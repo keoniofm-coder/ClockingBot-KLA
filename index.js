@@ -16,7 +16,7 @@ const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
 const TZ = "Europe/Paris";
 const EPHEMERAL_TTL = 25000; // 25 secondes
 
-const DATA_DIR = process.env.DATA_DIR || "/data"; // Volume Railway
+const DATA_DIR = process.env.DATA_DIR || "/data";
 const DATA_FILE = path.join(DATA_DIR, "data.json");
 
 const SHIFTS = {
@@ -27,10 +27,10 @@ const SHIFTS = {
 };
 
 const ANNOUNCEMENTS = [
-  { shift: "MATIN", hour: 7, minute: 45 }, // 08h - 15min
-  { shift: "APREM", hour: 13, minute: 45 }, // 14h - 15min
-  { shift: "SOIR", hour: 19, minute: 45 }, // 20h - 15min
-  { shift: "NUIT", hour: 1, minute: 45 }, // 02h - 15min
+  { shift: "MATIN", hour: 7, minute: 45 },
+  { shift: "APREM", hour: 13, minute: 45 },
+  { shift: "SOIR", hour: 19, minute: 45 },
+  { shift: "NUIT", hour: 1, minute: 45 },
 ];
 
 // ================== DATA ==================
@@ -82,195 +82,243 @@ function saveData() {
   }
 }
 
-function isAdmin(interaction) {
-  return interaction.member.permissions.has(ADMIN_PERM) || data.admins.includes(interaction.user.id);
-}
-
-function deviseOf(modeleName) {
-  return data.modeles.find((m) => m.name === modeleName)?.devise || "?";
-}
-
-function fmtTime(ms) {
-  const d = new Date(ms);
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-function fmtDuration(ms) {
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  return `${h}h ${m}m`;
-}
-
-function fmtMoney(stats) {
-  const parts = [];
-  if (stats.$) parts.push(`$${stats.$}`);
-  if (stats["€"]) parts.push(`€${stats["€"]}`);
-  return parts.join(" + ") || "-";
-}
-
-function clockInRow(shift) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`btn_clockin_${shift}`)
-      .setLabel("Clock In")
-      .setStyle(ButtonStyle.Success)
-  );
-}
-
-function clockOutRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("btn_clockout")
-      .setLabel("Clock Out")
-      .setStyle(ButtonStyle.Danger)
-  );
-}
-
-function ficheText(uid) {
-  const f = fiches.get(uid);
-  let txt = `📝 **Fiche de ventes**\nModèle sélectionné : **${f.currentModele}**\n\n`;
-  if (f.ventes.length === 0) txt += "*Aucune vente ajoutée.*";
-  else
-    for (const v of f.ventes)
-      txt += `• ${v.fan} → ${v.montant}${deviseOf(v.modele)} (${v.modele})\n`;
-  return txt;
-}
-
-// ================== CLIENT ==================
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
-});
-
 loadData();
 
-// ================== ANNONCES AUTO ==================
-async function announceShift(name) {
-  const sh = SHIFTS[name];
-  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-  await ch.send({
-    content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**\nPensez bien à Clock-in ceux du shift ${name.toLowerCase()} et bon shift ${sh.emoji}`,
-    components: [clockInRow(name), clockOutRow()],
+// ================== UTILITAIRES ==================
+function fmtTime(ms) {
+  return new Date(ms).toLocaleString("fr-FR", {
+    timeZone: TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   });
 }
 
-// ================== COMMANDES ==================
+function fmtDuration(ms) {
+  const h = Math.floor(ms / 3600e3);
+  const m = Math.floor((ms % 3600e3) / 60e3);
+  return `${h}h${m}min`;
+}
+
+function fmtMoney(u) {
+  return `$${u.$} / €${u["€"]}`;
+}
+
+function deviseOf(modele) {
+  return data.modeles.find((m) => m.name === modele)?.devise || "$";
+}
+
+// ================== COMPOSANTS ==================
 const periodeChoices = [
   { name: "Aujourd'hui", value: "today" },
-  { name: "7 jours", value: "week" },
-  { name: "15 jours", value: "fifteendays" },
-  { name: "30 jours", value: "month" },
-  { name: "Total", value: "all" },
+  { name: "7 derniers jours", value: "week" },
+  { name: "15 derniers jours", value: "fifteendays" },
+  { name: "30 derniers jours", value: "month" },
+  { name: "Tout", value: "all" },
 ];
 
+const clockInRow = (shift) =>
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`clockin_${shift}`)
+      .setLabel("Clock In")
+      .setEmoji("✅")
+      .setStyle(ButtonStyle.Success)
+  );
+
+const clockOutRow = () =>
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("clockout_btn")
+      .setLabel("Clock Out")
+      .setEmoji("🔴")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+const modelesRow = (shift) =>
+  new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`clockin_models_${shift}`)
+      .setPlaceholder("Sélectionne tes modèles")
+      .setMinValues(1)
+      .setMaxValues(data.modeles.length)
+      .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
+  );
+
+const ficheText = (uid) =>
+  `📋 **Fiche de ventes**\n<@${uid}>\nAjoute tes ventes ci-dessous ⬇️`;
+
+const ficheComponents = (uid, s) => {
+  const f = fiches.get(uid);
+  const currentModele = f?.currentModele || s.modeles[0];
+  const rows = [];
+
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("fiche_modele")
+        .setPlaceholder(`Modèle actuel : ${currentModele}`)
+        .addOptions(s.modeles.map((m) => ({ label: m.name, value: m.name, default: m === currentModele })))
+    )
+  );
+
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("fiche_add_vente")
+        .setLabel("Ajouter une vente")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("fiche_validate")
+        .setLabel("Valider et terminer")
+        .setEmoji("✅")
+        .setStyle(ButtonStyle.Success)
+    )
+  );
+
+  return rows;
+};
+
+// ================== CLIENT ==================
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// ================== ANNONCES AUTO ==================
+async function announceShift(shiftName) {
+  const sh = SHIFTS[shiftName];
+  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+  await ch.send({
+    content: `🔔 **C'est l'heure du shift ${shiftName} (${sh.label})**\nPensez bien à Clock-in ceux du shift ${shiftName.toLowerCase()} et bon shift ${sh.emoji}`,
+    components: [clockInRow(shiftName), clockOutRow()],
+  });
+}
+
+for (const { shift, hour, minute } of ANNOUNCEMENTS) {
+  cron.schedule(`${minute} ${hour} * * *`, () => announceShift(shift), { timezone: TZ });
+}
+
+// ================== COMMANDES ==================
 const commands = [
   // ========== CHATTEURS (tout le monde) ==========
   new SlashCommandBuilder()
     .setName("clockin")
-    .setDescription("Commencer ton shift"),
+    .setDescription("Commencer ton shift")
+    .setDMPermission(false),
   new SlashCommandBuilder()
     .setName("clockout")
-    .setDescription("Terminer ton shift"),
+    .setDescription("Terminer ton shift")
+    .setDMPermission(false),
   new SlashCommandBuilder()
     .setName("mystats")
     .setDescription("Voir tes propres stats")
+    .setDMPermission(false)
     .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
+      o
+        .setName("periode")
+        .setDescription("Période")
+        .setRequired(true)
+        .addChoices(...periodeChoices)
     ),
-
-  // ========== ADMINS ==========
-  new SlashCommandBuilder()
-    .setName("panel")
-    .setDescription("Envoyer le message de shift")
-    .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption((o) =>
-      o.setName("shift").setDescription("Quel shift ?").setRequired(true)
-        .addChoices(
-          { name: "MATIN (08h-14h)", value: "MATIN" },
-          { name: "APREM (14h-20h)", value: "APREM" },
-          { name: "SOIR (20h-02h)", value: "SOIR" },
-          { name: "NUIT (02h-08h)", value: "NUIT" }
-        )
-    ),
+  // ========== ADMINS ONLY ==========
   new SlashCommandBuilder()
     .setName("chatteur_add")
     .setDescription("Ajouter un chatteur au clocking")
     .setDefaultMemberPermissions(ADMIN_PERM)
+    .setDMPermission(false)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true))
     .addStringOption((o) =>
-      o.setName("shift").setDescription("Son shift").setRequired(true)
+      o
+        .setName("shift")
+        .setDescription("Son shift")
+        .setRequired(true)
         .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
     ),
   new SlashCommandBuilder()
     .setName("chatteur_remove")
     .setDescription("Retirer un chatteur")
     .setDefaultMemberPermissions(ADMIN_PERM)
+    .setDMPermission(false)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true)),
   new SlashCommandBuilder()
     .setName("chatteur_list")
     .setDescription("Liste des chatteurs")
-    .setDefaultMemberPermissions(ADMIN_PERM),
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .setDMPermission(false),
   new SlashCommandBuilder()
     .setName("modele_add")
     .setDescription("Ajouter un modèle")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption((o) => o.setName("nom").setDescription("Ex : Zoé (Inflow)").setRequired(true))
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName("nom").setDescription("Nom du modèle").setRequired(true))
     .addStringOption((o) =>
-      o.setName("devise").setDescription("Devise").setRequired(true)
-        .addChoices({ name: "Dollar ($)", value: "$" }, { name: "Euro (€)", value: "€" })
+      o
+        .setName("devise")
+        .setDescription("Devise")
+        .setRequired(true)
+        .addChoices(
+          { name: "Dollars ($)", value: "$" },
+          { name: "Euros (€)", value: "€" }
+        )
     ),
   new SlashCommandBuilder()
     .setName("modele_remove")
     .setDescription("Retirer un modèle")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption((o) => o.setName("nom").setDescription("Nom exact").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("modele_list")
-    .setDescription("Liste des modèles")
-    .setDefaultMemberPermissions(ADMIN_PERM),
+    .setDMPermission(false)
+    .addStringOption((o) =>
+      o
+        .setName("nom")
+        .setDescription("Nom du modèle")
+        .setRequired(true)
+        .addChoices(...data.modeles.map((m) => ({ name: m.name, value: m.name })))
+    ),
   new SlashCommandBuilder()
     .setName("stats")
-    .setDescription("Statistiques des ventes (admin)")
+    .setDescription("Statistiques des ventes")
     .setDefaultMemberPermissions(ADMIN_PERM)
+    .setDMPermission(false)
     .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
+      o
+        .setName("periode")
+        .setDescription("Période")
+        .setRequired(true)
+        .addChoices(...periodeChoices)
     )
     .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
   new SlashCommandBuilder()
     .setName("admin_add")
     .setDescription("Ajouter un admin")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .addUserOption((o) => o.setName("membre").setDescription("L'utilisateur").setRequired(true)),
+    .setDMPermission(false)
+    .addUserOption((o) => o.setName("membre").setDescription("L'admin").setRequired(true)),
   new SlashCommandBuilder()
     .setName("admin_remove")
     .setDescription("Retirer un admin")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .addUserOption((o) => o.setName("membre").setDescription("L'utilisateur").setRequired(true)),
+    .setDMPermission(false)
+    .addUserOption((o) => o.setName("membre").setDescription("L'admin").setRequired(true)),
   new SlashCommandBuilder()
-    .setName("admin_list")
-    .setDescription("Liste des admins")
-    .setDefaultMemberPermissions(ADMIN_PERM),
-];
+    .setName("panel")
+    .setDescription("Envoyer le message de shift (test)")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .setDMPermission(false)
+    .addStringOption((o) =>
+      o
+        .setName("shift")
+        .setDescription("Shift à annoncer")
+        .setRequired(true)
+        .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
+    ),
+].map((c) => c.toJSON());
 
-const ADMIN_COMMANDS = [
-  "panel", "chatteur_add", "chatteur_remove", "chatteur_list",
-  "modele_add", "modele_remove", "modele_list",
-  "stats", "admin_add", "admin_remove", "admin_list",
-];
-
-// ================== READY ==================
+// ================== LOGIN ==================
 client.once("ready", async () => {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands.map((c) => c.toJSON()) });
-  console.log(`✅ Connecté en tant que ${client.user.tag}`);
-
-  // Planifier les annonces
-  for (const ann of ANNOUNCEMENTS) {
-    const cronExpr = `${ann.minute} ${ann.hour} * * *`;
-    cron.schedule(cronExpr, () => announceShift(ann.shift), { timezone: TZ });
+  try {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log(`✅ Connecté en tant que ${client.user.tag}`);
+  } catch (err) {
+    console.error("❌ Erreur enregistrement commandes :", err);
   }
-  console.log("📅 Annonces planifiées");
 });
 
 // ================== INTERACTIONS ==================
@@ -278,29 +326,17 @@ client.on("interactionCreate", async (i) => {
   try {
     const uid = i.user.id;
 
-    // ---------- Slash commands ----------
+    // COMMANDES SLASH
     if (i.isChatInputCommand()) {
-      if (ADMIN_COMMANDS.includes(i.commandName) && !isAdmin(i))
-        return i.reply({ content: "❌ Admin uniquement.", ephemeral: true });
+      const isAdmin = i.member?.permissions.has(ADMIN_PERM);
 
       switch (i.commandName) {
-        case "panel": {
-          const shift = i.options.getString("shift");
-          const sh = SHIFTS[shift];
-          await i.reply({ content: `✅ Message de shift **${shift}** envoyé.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-          return ch.send({
-            content: `🔔 **C'est l'heure du shift ${shift} (${sh.label})**\nPensez bien à Clock-in ceux du shift ${shift.toLowerCase()} et bon shift ${sh.emoji}`,
-            components: [clockInRow(shift), clockOutRow()],
-          });
-        }
         case "chatteur_add": {
           const m = i.options.getUser("membre");
           const s = i.options.getString("shift");
           data.chatteurs[m.id] = s;
           saveData();
-          await i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
+          const reply = await i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -308,24 +344,30 @@ client.on("interactionCreate", async (i) => {
           const m = i.options.getUser("membre");
           delete data.chatteurs[m.id];
           saveData();
-          await i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
+          const reply = await i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
         case "chatteur_list": {
-          const txt = Object.entries(data.chatteurs).map(([u, s]) => `<@${u}> — ${s}`).join("\n") || "Aucun chatteur.";
-          await i.reply({ content: txt, ephemeral: true });
+          const txt =
+            Object.entries(data.chatteurs)
+              .map(([u, s]) => `<@${u}> — ${s}`)
+              .join("\n") || "Aucun chatteur.";
+          const reply = await i.reply({ content: txt, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
         case "modele_add": {
           const nom = i.options.getString("nom");
           const devise = i.options.getString("devise");
-          if (data.modeles.find((m) => m.name === nom))
-            return i.reply({ content: "⚠️ Ce modèle existe déjà.", ephemeral: true });
+          if (data.modeles.find((m) => m.name === nom)) {
+            const reply = await i.reply({ content: "⚠️ Ce modèle existe déjà.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+            return;
+          }
           data.modeles.push({ name: nom, devise });
           saveData();
-          await i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
+          const reply2 = await i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -333,151 +375,144 @@ client.on("interactionCreate", async (i) => {
           const nom = i.options.getString("nom");
           data.modeles = data.modeles.filter((m) => m.name !== nom);
           saveData();
-          await i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
+          const reply = await i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
-        case "modele_list": {
-          const txt = data.modeles.map((m) => `• ${m.name} (${m.devise})`).join("\n") || "Aucun modèle.";
-          await i.reply({ content: txt, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        case "mystats":
-          return handleStats(i, true);
-        case "stats":
-          return handleStats(i, false);
         case "admin_add": {
           const m = i.options.getUser("membre");
-          if (!data.admins.includes(m.id)) data.admins.push(m.id);
-          saveData();
-          await i.reply({ content: `✅ <@${m.id}> est admin.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          if (!data.admins) data.admins = [];
+          if (!data.admins.includes(m.id)) {
+            data.admins.push(m.id);
+            saveData();
+            const reply = await i.reply({ content: `✅ <@${m.id}> est maintenant admin.`, ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          } else {
+            const reply = await i.reply({ content: "⚠️ Déjà admin.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          }
           return;
         }
         case "admin_remove": {
           const m = i.options.getUser("membre");
+          if (!data.admins) data.admins = [];
           data.admins = data.admins.filter((id) => id !== m.id);
           saveData();
-          await i.reply({ content: `🗑️ <@${m.id}> n'est plus admin.`, ephemeral: true });
+          const reply = await i.reply({ content: `🗑️ <@${m.id}> n'est plus admin.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
-        case "admin_list": {
-          const txt = data.admins.map((id) => `<@${id}>`).join("\n") || "Aucun admin personnalisé.";
-          await i.reply({ content: txt, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+        case "stats": {
+          await handleStats(i, false);
           return;
         }
-        case "clockin": {
-          if (!data.chatteurs[uid])
-            return i.reply({ content: "❌ Tu n'es pas dans la liste des chatteurs.", ephemeral: true });
-          if (data.sessions[uid])
-            return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
-          if (data.modeles.length === 0)
-            return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId("menu_clockin_models")
-              .setPlaceholder("Choisir tes modèles...")
-              .setMinValues(1)
-              .setMaxValues(data.modeles.length)
-              .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-          );
-          await i.reply({ content: "Sélectionne tes modèles :", components: [row], ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+        case "mystats": {
+          await handleStats(i, true);
           return;
         }
         case "clockout": {
-          if (!data.sessions[uid])
-            return i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
-          const s = data.sessions[uid];
-          fiches.set(uid, { currentModele: s.modeles[0], ventes: [] });
-          const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId("menu_fiche_modele")
-              .setPlaceholder("Choisir un modèle...")
-              .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-          );
-          const buttonRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId("btn_add_vente")
-              .setLabel("➕ Ajouter une vente")
-              .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-              .setCustomId("btn_finish_fiche")
-              .setLabel("✅ Valider")
-              .setStyle(ButtonStyle.Success)
-          );
-          await i.reply({
-            content: ficheText(uid),
-            components: [row, buttonRow],
+          if (!data.chatteurs[uid]) {
+            const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+            return;
+          }
+          return startClockOut(i);
+        }
+        case "clockin": {
+          if (!data.chatteurs[uid]) {
+            const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+            return;
+          }
+          const shift = data.chatteurs[uid];
+          if (data.sessions[uid]) {
+            const reply = await i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+            return;
+          }
+          if (data.modeles.length === 0) {
+            const reply = await i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
+            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+            return;
+          }
+          return i.reply({
+            content: "Sélectionne tes modèles pour ce shift :",
+            components: [modelesRow(shift)],
             ephemeral: true,
           });
+        }
+        case "panel": {
+          const shift = i.options.getString("shift");
+          await announceShift(shift);
+          const reply = await i.reply({ content: `✅ Annonce envoyée pour le shift ${shift}.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
       }
     }
 
-    // ---------- Boutons ----------
+    // BOUTONS
     if (i.isButton()) {
-      // Clock Out
-      if (i.customId === "btn_clockout") {
-        if (!data.sessions[uid])
-          return i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
-        const s = data.sessions[uid];
-        fiches.set(uid, { currentModele: s.modeles[0], ventes: [] });
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("menu_fiche_modele")
-            .setPlaceholder("Choisir un modèle...")
-            .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-        );
-        const buttonRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("btn_add_vente")
-            .setLabel("➕ Ajouter une vente")
-            .setStyle(ButtonStyle.Primary),
-          new ButtonBuilder()
-            .setCustomId("btn_finish_fiche")
-            .setLabel("✅ Valider")
-            .setStyle(ButtonStyle.Success)
-        );
+      // Clock In
+      if (i.customId.startsWith("clockin_")) {
+        const shift = i.customId.split("_")[1];
+        if (!data.chatteurs[uid]) {
+          const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+        if (data.sessions[uid]) {
+          const reply = await i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+        if (data.modeles.length === 0) {
+          const reply = await i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
         return i.reply({
-          content: ficheText(uid),
-          components: [row, buttonRow],
+          content: "Sélectionne tes modèles pour ce shift :",
+          components: [modelesRow(shift)],
           ephemeral: true,
         });
       }
 
-      // Clock In
-      if (i.customId.startsWith("btn_clockin_")) {
-        const shift = i.customId.split("_")[2];
-        if (!data.chatteurs[uid])
-          return i.reply({ content: "❌ Tu n'es pas dans la liste des chatteurs.", ephemeral: true });
-        if (data.sessions[uid])
-          return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
-        if (data.modeles.length === 0)
-          return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("menu_clockin_models")
-            .setPlaceholder("Choisir tes modèles...")
-            .setMinValues(1)
-            .setMaxValues(data.modeles.length)
-            .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-        );
-        return i.reply({ content: "Sélectionne tes modèles :", components: [row], ephemeral: true });
+      // Clock Out bouton
+      if (i.customId === "clockout_btn") {
+        if (!data.chatteurs[uid]) {
+          const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+        if (!data.sessions[uid]) {
+          const reply = await i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+        return startClockOut(i);
       }
 
-      // Ajouter une vente
-      if (i.customId === "btn_add_vente") {
+      // Fiche : valider
+      if (i.customId === "fiche_validate") {
+        return finalizeClockOut(i);
+      }
+
+      // Fiche : ajouter vente
+      if (i.customId === "fiche_add_vente") {
+        const s = data.sessions[uid];
+        if (!s) {
+          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
         const f = fiches.get(uid);
-        if (!f) return i.reply({ content: "Session expirée.", ephemeral: true });
+        const modele = f?.currentModele || s.modeles[0];
+        const devise = deviseOf(modele);
+
         const modal = new ModalBuilder()
           .setCustomId("modal_vente")
-          .setTitle("Ajouter une vente")
+          .setTitle(`Ajouter une vente — ${modele}`)
           .addComponents(
             new ActionRowBuilder().addComponents(
               new TextInputBuilder()
@@ -489,131 +524,144 @@ client.on("interactionCreate", async (i) => {
             new ActionRowBuilder().addComponents(
               new TextInputBuilder()
                 .setCustomId("input_montant")
-                .setLabel(`Montant (${deviseOf(f.currentModele)})`)
+                .setLabel(`Montant (${devise})`)
                 .setStyle(TextInputStyle.Short)
+                .setPlaceholder("100")
                 .setRequired(true)
             )
           );
         return i.showModal(modal);
       }
-
-      // Terminer la fiche
-      if (i.customId === "btn_finish_fiche") {
-        return finalizeClockOut(i);
-      }
     }
 
-    // ---------- Select menus ----------
+    // SELECT MENUS
     if (i.isStringSelectMenu()) {
-      // Clock In models
-      if (i.customId === "menu_clockin_models") {
-        const shift = data.chatteurs[uid];
+      // Clock in models
+      if (i.customId.startsWith("clockin_models_")) {
+        const shift = i.customId.split("_")[2];
         const t = Date.now();
         data.sessions[uid] = { shift, clockIn: t, modeles: i.values };
         saveData();
         await i.update({ content: "✅ Clock in enregistré !", components: [] });
         const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-        return ch.send(`<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${i.values.join(", ")}`);
+        return ch.send(
+          `<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${i.values.join(", ")}`
+        );
       }
 
       // Fiche modele
-      if (i.customId === "menu_fiche_modele") {
+      if (i.customId === "fiche_modele") {
         const f = fiches.get(uid);
         const s = data.sessions[uid];
-        if (!f || !s) return i.reply({ content: "Session expirée.", ephemeral: true });
+        if (!f || !s) {
+          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
         f.currentModele = i.values[0];
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("menu_fiche_modele")
-            .setPlaceholder("Choisir un modèle...")
-            .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-        );
-        const buttonRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("btn_add_vente")
-            .setLabel("➕ Ajouter une vente")
-            .setStyle(ButtonStyle.Primary),
-          new ButtonBuilder()
-            .setCustomId("btn_finish_fiche")
-            .setLabel("✅ Valider")
-            .setStyle(ButtonStyle.Success)
-        );
-        return i.update({ content: ficheText(uid), components: [row, buttonRow] });
+        return i.update({ content: ficheText(uid), components: ficheComponents(uid, s) });
       }
     }
 
-    // ---------- Modals ----------
+    // MODALS
     if (i.isModalSubmit()) {
       if (i.customId === "modal_vente") {
         const fan = i.fields.getTextInputValue("input_fan");
         const montantStr = i.fields.getTextInputValue("input_montant");
         const montant = parseFloat(montantStr);
-        if (isNaN(montant)) return i.reply({ content: "❌ Montant invalide.", ephemeral: true });
+
+        if (isNaN(montant) || montant <= 0) {
+          const reply = await i.reply({ content: "❌ Montant invalide.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+
         const f = fiches.get(uid);
         const s = data.sessions[uid];
-        if (!f || !s) return i.reply({ content: "Session expirée.", ephemeral: true });
-        f.ventes.push({ fan, montant, modele: f.currentModele });
-        const row = new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("menu_fiche_modele")
-            .setPlaceholder("Choisir un modèle...")
-            .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-        );
-        const buttonRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("btn_add_vente")
-            .setLabel("➕ Ajouter une vente")
-            .setStyle(ButtonStyle.Primary),
-          new ButtonBuilder()
-            .setCustomId("btn_finish_fiche")
-            .setLabel("✅ Valider")
-            .setStyle(ButtonStyle.Success)
-        );
-        return i.update({ content: ficheText(uid), components: [row, buttonRow] });
+        if (!f || !s) {
+          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
+          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+          return;
+        }
+
+        const modele = f.currentModele;
+        f.ventes.push({ fan, montant, modele });
+
+        await i.reply({ content: `✅ Vente ajoutée : ${fan} — ${montant}${deviseOf(modele)}`, ephemeral: true });
+        setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+
+        // Pas de update du message principal ici
+        return;
       }
     }
   } catch (err) {
-    console.error(err);
-    if (!i.replied && !i.deferred) i.reply({ content: "❌ Erreur.", ephemeral: true }).catch(() => {});
+    console.error("❌ Erreur interaction :", err);
+    if (!i.replied && !i.deferred) {
+      i.reply({ content: "❌ Erreur.", ephemeral: true }).catch(() => {});
+    }
   }
 });
 
-// ================== CLOCK OUT FINALIZATION ==================
+// ================== CLOCK OUT ==================
+async function startClockOut(i) {
+  const uid = i.user.id;
+  const s = data.sessions[uid];
+  if (!s) {
+    const reply = await i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
+    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+    return;
+  }
+  fiches.set(uid, { ventes: [], currentModele: s.modeles[0] });
+  return i.reply({
+    content: ficheText(uid),
+    components: ficheComponents(uid, s),
+    ephemeral: true,
+  });
+}
+
 async function finalizeClockOut(i) {
   const uid = i.user.id;
   const s = data.sessions[uid];
   const f = fiches.get(uid);
-  if (!s || !f) return i.reply({ content: "Session introuvable.", ephemeral: true });
+  if (!s || !f) {
+    const reply = await i.reply({ content: "Session introuvable.", ephemeral: true });
+    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+    return;
+  }
 
   const tOut = Date.now();
   const duree = tOut - s.clockIn;
 
   const detail = {};
-  let totalVentes = {};
+  let ventesTxt = "";
+  let totalVentes = { $: 0, "€": 0 };
+
   for (const v of f.ventes) {
     if (!detail[v.modele]) detail[v.modele] = [];
     detail[v.modele].push(v);
-    totalVentes[v.modele] = (totalVentes[v.modele] || 0) + v.montant;
+    const devise = deviseOf(v.modele);
+    totalVentes[devise] += v.montant;
+    ventesTxt += `${v.modele} - ${v.fan} : ${v.montant}${devise}\n`;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("📊 Fiche de Shift")
-    .setColor(0x2ecc71)
+    .setTitle(`🔴 SHIFT TERMINÉ`)
+    .setColor(0xe74c3c)
+    .setTimestamp(tOut)
+    .setDescription(`<@${uid}> — ${i.user.username}`)
     .addFields(
-      { name: "👤 Chatteur", value: `<@${uid}>`, inline: true },
-      { name: "⏰ Clock In", value: fmtTime(s.clockIn), inline: true },
-      { name: "⏰ Clock Out", value: fmtTime(tOut), inline: true },
-      { name: "📅 Shift", value: s.shift, inline: true },
-      { name: "⏳ Durée", value: fmtDuration(duree), inline: true },
-      { name: "💃 Modèle(s)", value: s.modeles.join(", "), inline: true }
+      { name: "📊 Shift", value: s.shift, inline: true },
+      { name: "🕐 Arrivée", value: fmtTime(s.clockIn), inline: true },
+      { name: "🕒 Départ", value: fmtTime(tOut), inline: true },
+      { name: "⏱️ Durée", value: fmtDuration(duree), inline: true },
+      { name: "👥 Modèles", value: s.modeles.join(", ") },
+      {
+        name: "💰 Ventes totales",
+        value: totalVentes.$ > 0 || totalVentes["€"] > 0 ? `${totalVentes.$}$ / ${totalVentes["€"]}€` : "Aucune vente",
+      }
     );
 
   if (f.ventes.length) {
-    const totalsStr = Object.entries(totalVentes)
-      .map(([m, v]) => `**${m}** : ${v}${deviseOf(m)}`)
-      .join("\n");
-    embed.addFields({ name: "💰 Total par modèle", value: totalsStr });
-
     let txt = "";
     for (const [modele, list] of Object.entries(detail)) {
       const d = deviseOf(modele);
@@ -662,8 +710,11 @@ async function handleStats(i, self) {
   const since = now - limits[periode];
 
   const list = data.historique.filter((h) => h.clockOut >= since && h.userId === membre.id);
-  if (!list.length)
-    return i.reply({ content: "Aucun shift sur cette période.", ephemeral: true });
+  if (!list.length) {
+    const reply = await i.reply({ content: "Aucun shift sur cette période.", ephemeral: true });
+    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+    return;
+  }
 
   const parUser = {};
   const parModele = {};
