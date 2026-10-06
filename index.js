@@ -14,6 +14,7 @@ const GUILD_ID = (process.env.GUILD_ID || "").trim();
 const CLOCKING_CHANNEL_ID = (process.env.CLOCKING_CHANNEL_ID || "").trim();
 const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
 const TZ = "Europe/Paris";
+const EPHEMERAL_TTL = 10000; // 10 secondes
 
 const DATA_DIR = process.env.DATA_DIR || "/data"; // Volume Railway
 const DATA_FILE = path.join(DATA_DIR, "data.json");
@@ -35,6 +36,7 @@ const DEFAULT_DATA = {
   chatteurs: {}, // userId -> shift
   sessions: {}, // userId -> { shift, clockIn, modeles }
   historique: [], // shifts terminés (pour /stats)
+  admins: [], // userIds des admins du bot
 };
 
 let data = JSON.parse(JSON.stringify(DEFAULT_DATA));
@@ -60,7 +62,10 @@ const fmtDuration = (ms) => {
 };
 const deviseOf = (modeleName) =>
   data.modeles.find((m) => m.name === modeleName)?.devise || "$";
-const isAdmin = (i) => i.memberPermissions.has(PermissionFlagsBits.Administrator);
+
+// Admin = admin Discord OU admin ajouté via /admin_add
+const isAdmin = (i) =>
+  i.memberPermissions?.has(PermissionFlagsBits.Administrator) || data.admins.includes(i.user.id);
 
 // Détecte le shift en cours selon l'heure de Paris
 function currentShift() {
@@ -74,13 +79,19 @@ function currentShift() {
   return "NUIT";
 }
 
+// Réponse éphémère qui se supprime après 10 secondes
+async function reply(i, options, autoDelete = true) {
+  const msg = await i.reply({ ...options, ephemeral: true });
+  if (autoDelete) setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+  return msg;
+}
+
 // Brouillons de fiches de ventes en cours (en mémoire)
 const fiches = new Map(); // userId -> { ventes: [], currentModele }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ================== COMPOSANTS ==================
-// Message de shift : Clock In + Clock Out côte à côte
 const shiftRow = (shift) =>
   new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -95,7 +106,6 @@ const shiftRow = (shift) =>
       .setStyle(ButtonStyle.Danger)
   );
 
-// Menu de choix des modèles au clock in (bouton ET /clockin)
 function clockInMenu(shift) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -110,16 +120,12 @@ function clockInMenu(shift) {
 async function startClockIn(i, shift) {
   const uid = i.user.id;
   if (!data.chatteurs[uid])
-    return i.reply({ content: "❌ Tu n'es pas dans la liste des chatteurs.", ephemeral: true });
+    return reply(i, { content: "❌ Tu n'es pas dans la liste des chatteurs." });
   if (data.sessions[uid])
-    return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
+    return reply(i, { content: "⚠️ Tu es déjà clock in." });
   if (data.modeles.length === 0)
-    return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-  return i.reply({
-    content: "Choisis ton/tes modèle(s) :",
-    ephemeral: true,
-    components: [clockInMenu(shift)],
-  });
+    return reply(i, { content: "❌ Aucun modèle configuré." });
+  return reply(i, { content: "Choisis ton/tes modèle(s) :", components: [clockInMenu(shift)] });
 }
 
 function ficheComponents(uid, session) {
@@ -159,7 +165,7 @@ async function announceShift(name) {
   const sh = SHIFTS[name];
   const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await ch.send({
-    content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**\nPensez bien à Clock-in ceux du ${name.toLowerCase()} et bon shift ${sh.emoji}`,
+    content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**\nPensez bien à Clock-in ceux du **shift ${name} (${sh.label})** et bon shift ${sh.emoji}`,
     components: [shiftRow(name)],
   });
 }
@@ -175,10 +181,14 @@ for (const [name, sh] of Object.entries(SHIFTS)) {
 }
 
 // ================== COMMANDES ==================
+const ADMIN_PERM = PermissionFlagsBits.Administrator;
+
 const commands = [
+  // ----- Commandes admin (masquées pour les non-admins) -----
   new SlashCommandBuilder()
     .setName("chatteur_add")
     .setDescription("Ajouter un chatteur au clocking")
+    .setDefaultMemberPermissions(ADMIN_PERM)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true))
     .addStringOption((o) =>
       o.setName("shift").setDescription("Son shift").setRequired(true)
@@ -187,11 +197,16 @@ const commands = [
   new SlashCommandBuilder()
     .setName("chatteur_remove")
     .setDescription("Retirer un chatteur")
+    .setDefaultMemberPermissions(ADMIN_PERM)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true)),
-  new SlashCommandBuilder().setName("chatteur_list").setDescription("Liste des chatteurs"),
+  new SlashCommandBuilder()
+    .setName("chatteur_list")
+    .setDescription("Liste des chatteurs")
+    .setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder()
     .setName("modele_add")
     .setDescription("Ajouter un modèle")
+    .setDefaultMemberPermissions(ADMIN_PERM)
     .addStringOption((o) => o.setName("nom").setDescription("Ex : Zoé (Inflow)").setRequired(true))
     .addStringOption((o) =>
       o.setName("devise").setDescription("Devise").setRequired(true)
@@ -200,32 +215,69 @@ const commands = [
   new SlashCommandBuilder()
     .setName("modele_remove")
     .setDescription("Retirer un modèle")
+    .setDefaultMemberPermissions(ADMIN_PERM)
     .addStringOption((o) => o.setName("nom").setDescription("Nom exact").setRequired(true).setAutocomplete(true)),
-  new SlashCommandBuilder().setName("modele_list").setDescription("Liste des modèles"),
+  new SlashCommandBuilder()
+    .setName("modele_list")
+    .setDescription("Liste des modèles")
+    .setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder()
     .setName("stats")
-    .setDescription("Statistiques des ventes")
+    .setDescription("Statistiques des ventes (admin)")
+    .setDefaultMemberPermissions(ADMIN_PERM)
     .addStringOption((o) =>
       o.setName("periode").setDescription("Période").setRequired(true)
         .addChoices(
           { name: "Aujourd'hui", value: "today" },
           { name: "7 derniers jours", value: "week" },
+          { name: "15 derniers jours", value: "15days" },
           { name: "30 derniers jours", value: "month" },
           { name: "Tout", value: "all" }
         )
     )
     .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
-  new SlashCommandBuilder().setName("clockin").setDescription("Commencer ton shift"),
+  new SlashCommandBuilder()
+    .setName("admin_add")
+    .setDescription("Donner l'accès admin du bot à un membre")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .addUserOption((o) => o.setName("membre").setDescription("Le membre").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("admin_remove")
+    .setDescription("Retirer l'accès admin du bot à un membre")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .addUserOption((o) => o.setName("membre").setDescription("Le membre").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("admin_list")
+    .setDescription("Liste des admins du bot")
+    .setDefaultMemberPermissions(ADMIN_PERM),
+  new SlashCommandBuilder()
+    .setName("test_annonce")
+    .setDescription("Tester l'annonce de shift (admin)")
+    .setDefaultMemberPermissions(ADMIN_PERM),
+
+  // ----- Commandes chatteurs (accessibles à tous) -----
+  new SlashCommandBuilder().setName("clockin").setDescription("Clock in sur ton shift"),
   new SlashCommandBuilder().setName("clockout").setDescription("Terminer ton shift"),
-  new SlashCommandBuilder().setName("test_annonce").setDescription("Tester l'annonce de shift (admin)"),
+  new SlashCommandBuilder()
+    .setName("mystats")
+    .setDescription("Voir tes propres stats")
+    .addStringOption((o) =>
+      o.setName("periode").setDescription("Période").setRequired(true)
+        .addChoices(
+          { name: "Aujourd'hui", value: "today" },
+          { name: "7 derniers jours", value: "week" },
+          { name: "15 derniers jours", value: "15days" },
+          { name: "30 derniers jours", value: "month" },
+          { name: "Tout", value: "all" }
+        )
+    ),
 ].map((c) => c.toJSON());
 
 client.once("clientReady", async () => {
-  console.log(`Connecté en tant que ${client.user.tag}`);
   try {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("Commandes enregistrées ✅");
+    console.log(`Connecté en tant que ${client.user.tag} — commandes enregistrées`);
   } catch (e) {
     console.error("Erreur enregistrement commandes :", e.message);
   }
@@ -249,10 +301,11 @@ client.on("interactionCreate", async (i) => {
     if (i.isChatInputCommand()) {
       const adminCmds = [
         "chatteur_add", "chatteur_remove", "chatteur_list",
-        "modele_add", "modele_remove", "modele_list", "stats", "test_annonce",
+        "modele_add", "modele_remove", "modele_list",
+        "stats", "admin_add", "admin_remove", "admin_list", "test_annonce",
       ];
       if (adminCmds.includes(i.commandName) && !isAdmin(i))
-        return i.reply({ content: "❌ Admin uniquement.", ephemeral: true });
+        return reply(i, { content: "❌ Admin uniquement." });
 
       switch (i.commandName) {
         case "chatteur_add": {
@@ -260,46 +313,64 @@ client.on("interactionCreate", async (i) => {
           const s = i.options.getString("shift");
           data.chatteurs[m.id] = s;
           saveData();
-          return i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
+          return reply(i, { content: `✅ <@${m.id}> ajouté au shift **${s}**.` });
         }
         case "chatteur_remove": {
           const m = i.options.getUser("membre");
           delete data.chatteurs[m.id];
           saveData();
-          return i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
+          return reply(i, { content: `🗑️ <@${m.id}> retiré.` });
         }
         case "chatteur_list": {
           const txt = Object.entries(data.chatteurs).map(([u, s]) => `<@${u}> — ${s}`).join("\n") || "Aucun chatteur.";
-          return i.reply({ content: txt, ephemeral: true });
+          return reply(i, { content: txt });
         }
         case "modele_add": {
           const nom = i.options.getString("nom");
           const devise = i.options.getString("devise");
           if (data.modeles.find((m) => m.name === nom))
-            return i.reply({ content: "⚠️ Ce modèle existe déjà.", ephemeral: true });
+            return reply(i, { content: "⚠️ Ce modèle existe déjà." });
           data.modeles.push({ name: nom, devise });
           saveData();
-          return i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
+          return reply(i, { content: `✅ Modèle **${nom}** (${devise}) ajouté.` });
         }
         case "modele_remove": {
           const nom = i.options.getString("nom");
           data.modeles = data.modeles.filter((m) => m.name !== nom);
           saveData();
-          return i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
+          return reply(i, { content: `🗑️ Modèle **${nom}** retiré.` });
         }
         case "modele_list": {
           const txt = data.modeles.map((m) => `• ${m.name} (${m.devise})`).join("\n") || "Aucun modèle.";
-          return i.reply({ content: txt, ephemeral: true });
+          return reply(i, { content: txt });
         }
+        case "admin_add": {
+          const m = i.options.getUser("membre");
+          if (!data.admins.includes(m.id)) data.admins.push(m.id);
+          saveData();
+          return reply(i, { content: `✅ <@${m.id}> est maintenant admin du bot.` });
+        }
+        case "admin_remove": {
+          const m = i.options.getUser("membre");
+          data.admins = data.admins.filter((a) => a !== m.id);
+          saveData();
+          return reply(i, { content: `🗑️ <@${m.id}> n'est plus admin du bot.` });
+        }
+        case "admin_list": {
+          const txt = data.admins.map((a) => `<@${a}>`).join("\n") || "Aucun admin ajouté (les admins Discord ont déjà accès).";
+          return reply(i, { content: txt });
+        }
+        case "test_annonce":
+          await announceShift(currentShift());
+          return reply(i, { content: "✅ Annonce envoyée." });
         case "stats":
-          return handleStats(i);
+          return handleStats(i, i.options.getUser("membre"));
+        case "mystats":
+          return handleStats(i, i.user);
         case "clockin":
           return startClockIn(i, data.chatteurs[uid] || currentShift());
         case "clockout":
           return startClockOut(i);
-        case "test_annonce":
-          await announceShift(currentShift());
-          return i.reply({ content: "✅ Annonce envoyée.", ephemeral: true });
       }
     }
 
@@ -317,7 +388,7 @@ client.on("interactionCreate", async (i) => {
       // Fiche : ajouter une vente
       if (i.customId === "fiche_add") {
         const f = fiches.get(uid);
-        if (!f) return i.reply({ content: "Session expirée, refais Clock Out.", ephemeral: true });
+        if (!f) return reply(i, { content: "Session expirée, refais /clockout." });
         const devise = deviseOf(f.currentModele);
         const modal = new ModalBuilder()
           .setCustomId("fiche_modal")
@@ -348,6 +419,7 @@ client.on("interactionCreate", async (i) => {
         data.sessions[uid] = { shift, clockIn: t, modeles: i.values };
         saveData();
         await i.update({ content: "✅ Clock in enregistré !", components: [] });
+        setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
         const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
         return ch.send(`<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${i.values.join(", ")}`);
       }
@@ -355,7 +427,7 @@ client.on("interactionCreate", async (i) => {
       if (i.customId === "fiche_modele") {
         const f = fiches.get(uid);
         const s = data.sessions[uid];
-        if (!f || !s) return i.reply({ content: "Session expirée.", ephemeral: true });
+        if (!f || !s) return reply(i, { content: "Session expirée." });
         f.currentModele = i.values[0];
         return i.update({ content: ficheText(uid), components: ficheComponents(uid, s) });
       }
@@ -365,10 +437,10 @@ client.on("interactionCreate", async (i) => {
     if (i.isModalSubmit() && i.customId === "fiche_modal") {
       const f = fiches.get(uid);
       const s = data.sessions[uid];
-      if (!f || !s) return i.reply({ content: "Session expirée.", ephemeral: true });
+      if (!f || !s) return reply(i, { content: "Session expirée." });
       const fan = i.fields.getTextInputValue("fan");
       const montant = parseFloat(i.fields.getTextInputValue("montant").replace(",", ".").replace(/[$€\s]/g, ""));
-      if (isNaN(montant)) return i.reply({ content: "❌ Montant invalide.", ephemeral: true });
+      if (isNaN(montant)) return reply(i, { content: "❌ Montant invalide." });
       f.ventes.push({ modele: f.currentModele, fan, montant });
       return i.update({ content: ficheText(uid), components: ficheComponents(uid, s) });
     }
@@ -382,16 +454,17 @@ client.on("interactionCreate", async (i) => {
 async function startClockOut(i) {
   const uid = i.user.id;
   const s = data.sessions[uid];
-  if (!s) return i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
+  if (!s) return reply(i, { content: "❌ Tu n'es pas clock in." });
   fiches.set(uid, { ventes: [], currentModele: s.modeles[0] });
-  return i.reply({ content: ficheText(uid), components: ficheComponents(uid, s), ephemeral: true });
+  // Pas de suppression auto ici : le chatteur remplit sa fiche
+  return reply(i, { content: ficheText(uid), components: ficheComponents(uid, s) }, false);
 }
 
 async function finalizeClockOut(i) {
   const uid = i.user.id;
   const s = data.sessions[uid];
   const f = fiches.get(uid);
-  if (!s || !f) return i.reply({ content: "Session introuvable.", ephemeral: true });
+  if (!s || !f) return reply(i, { content: "Session introuvable." });
 
   const tOut = Date.now();
   const duree = tOut - s.clockIn;
@@ -408,10 +481,11 @@ async function finalizeClockOut(i) {
     Object.entries(totaux).filter(([, m]) => m > 0).map(([d, m]) => `${m}${d}`).join(" + ") || "0";
 
   const embed = new EmbedBuilder()
-    .setTitle(`🔴 SHIFT TERMINÉ - ${i.member?.displayName || i.user.username}`)
+    .setTitle(`🔴 SHIFT TERMINÉ - ${i.member.displayName}`)
     .setColor(0xe74c3c)
     .setTimestamp(tOut)
     .addFields(
+      { name: "👤 Chatteur", value: `<@${uid}>` },
       { name: "📊 Shift", value: s.shift },
       { name: "🕐 Arrivée", value: fmtTime(s.clockIn), inline: true },
       { name: "🕒 Départ", value: fmtTime(tOut), inline: true },
@@ -432,7 +506,7 @@ async function finalizeClockOut(i) {
   }
 
   const ventesCh = await client.channels.fetch(VENTES_CHANNEL_ID);
-  await ventesCh.send({ embeds: [embed] });
+  await ventesCh.send({ content: `<@${uid}>`, embeds: [embed] });
   const clockCh = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await clockCh.send(
     `<@${uid}> CLOCK OUT 🔴 ${fmtTime(tOut)} | Shift ${s.shift} | Modèle(s) : ${s.modeles.join(", ")}`
@@ -447,21 +521,22 @@ async function finalizeClockOut(i) {
   fiches.delete(uid);
   saveData();
 
-  return i.update({ content: "✅ Shift terminé, fiche envoyée !", components: [] });
+  await i.update({ content: "✅ Shift terminé, fiche envoyée !", components: [] });
+  setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
 }
 
 // ================== STATS ==================
-async function handleStats(i) {
+async function handleStats(i, membre) {
   const periode = i.options.getString("periode");
-  const membre = i.options.getUser("membre");
   const now = Date.now();
-  const limits = { today: 24 * 3600e3, week: 7 * 24 * 3600e3, month: 30 * 24 * 3600e3, all: Infinity };
+  const day = 24 * 3600e3;
+  const limits = { today: day, week: 7 * day, "15days": 15 * day, month: 30 * day, all: Infinity };
   const since = now - limits[periode];
 
   const list = data.historique.filter(
     (h) => h.clockOut >= since && (!membre || h.userId === membre.id)
   );
-  if (!list.length) return i.reply({ content: "Aucun shift sur cette période.", ephemeral: true });
+  if (!list.length) return reply(i, { content: "Aucun shift sur cette période." });
 
   const parUser = {};
   const parModele = {};
@@ -479,8 +554,12 @@ async function handleStats(i) {
   const fmtMoney = (u) =>
     [u.$ > 0 ? `${u.$}$` : null, u["€"] > 0 ? `${u["€"]}€` : null].filter(Boolean).join(" + ") || "0";
 
+  const titres = {
+    today: "Aujourd'hui", week: "7 jours", "15days": "15 jours", month: "30 jours", all: "Total",
+  };
+
   const embed = new EmbedBuilder()
-    .setTitle(`📈 Stats — ${{ today: "Aujourd'hui", week: "7 jours", month: "30 jours", all: "Total" }[periode]}`)
+    .setTitle(`📈 Stats — ${titres[periode]}`)
     .setColor(0x3498db)
     .addFields({
       name: "👤 Par chatteur",
@@ -499,7 +578,10 @@ async function handleStats(i) {
           .slice(0, 1024) || "-",
     });
 
-  return i.reply({ embeds: [embed], ephemeral: true });
+  // Les stats restent affichées 60 secondes (plus long que les autres messages)
+  const msg = await i.reply({ embeds: [embed], ephemeral: true });
+  setTimeout(() => i.deleteReply().catch(() => {}), 60000);
+  return msg;
 }
 
 client.login(TOKEN);
