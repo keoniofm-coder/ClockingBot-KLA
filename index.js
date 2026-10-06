@@ -128,42 +128,6 @@ function clockOutRow() {
   );
 }
 
-function ficheComponents(uid, session) {
-  const modelesRow = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId("menu_fiche_modele")
-      .setPlaceholder("Choisir un modèle...")
-      .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-  );
-
-  const f = fiches.get(uid);
-  const formRow = new ActionRowBuilder().addComponents(
-    new TextInputBuilder()
-      .setCustomId("input_fan")
-      .setLabel("Nom du fan")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true),
-    new TextInputBuilder()
-      .setCustomId("input_montant")
-      .setLabel(`Montant (${f.currentModele ? deviseOf(f.currentModele) : "?"})`
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-  );
-
-  const buttonRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("btn_add_vente")
-      .setLabel("➕ Ajouter une vente")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId("btn_finish_fiche")
-      .setLabel("✅ Valider")
-      .setStyle(ButtonStyle.Success)
-  );
-
-  return [modelesRow, buttonRow];
-}
-
 function ficheText(uid) {
   const f = fiches.get(uid);
   let txt = `📝 **Fiche de ventes**\nModèle sélectionné : **${f.currentModele}**\n\n`;
@@ -260,7 +224,7 @@ const commands = [
     .setName("modele_remove")
     .setDescription("Retirer un modèle")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption((o) => o.setName("nom").setDescription("Nom exact").setRequired(true).setAutocomplete(true)),
+    .addStringOption((o) => o.setName("nom").setDescription("Nom exact").setRequired(true)),
   new SlashCommandBuilder()
     .setName("modele_list")
     .setDescription("Liste des modèles")
@@ -298,7 +262,7 @@ const ADMIN_COMMANDS = [
 // ================== READY ==================
 client.once("ready", async () => {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands.map((c) => c.toJSON()) });
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
 
   // Planifier les annonces
@@ -336,7 +300,7 @@ client.on("interactionCreate", async (i) => {
           const s = i.options.getString("shift");
           data.chatteurs[m.id] = s;
           saveData();
-          const reply = await i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
+          await i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -344,13 +308,13 @@ client.on("interactionCreate", async (i) => {
           const m = i.options.getUser("membre");
           delete data.chatteurs[m.id];
           saveData();
-          const reply = await i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
+          await i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
         case "chatteur_list": {
           const txt = Object.entries(data.chatteurs).map(([u, s]) => `<@${u}> — ${s}`).join("\n") || "Aucun chatteur.";
-          const reply = await i.reply({ content: txt, ephemeral: true });
+          await i.reply({ content: txt, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -361,7 +325,7 @@ client.on("interactionCreate", async (i) => {
             return i.reply({ content: "⚠️ Ce modèle existe déjà.", ephemeral: true });
           data.modeles.push({ name: nom, devise });
           saveData();
-          const reply = await i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
+          await i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -369,13 +333,13 @@ client.on("interactionCreate", async (i) => {
           const nom = i.options.getString("nom");
           data.modeles = data.modeles.filter((m) => m.name !== nom);
           saveData();
-          const reply = await i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
+          await i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
         case "modele_list": {
           const txt = data.modeles.map((m) => `• ${m.name} (${m.devise})`).join("\n") || "Aucun modèle.";
-          const reply = await i.reply({ content: txt, ephemeral: true });
+          await i.reply({ content: txt, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -387,7 +351,7 @@ client.on("interactionCreate", async (i) => {
           const m = i.options.getUser("membre");
           if (!data.admins.includes(m.id)) data.admins.push(m.id);
           saveData();
-          const reply = await i.reply({ content: `✅ <@${m.id}> est admin.`, ephemeral: true });
+          await i.reply({ content: `✅ <@${m.id}> est admin.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -395,13 +359,13 @@ client.on("interactionCreate", async (i) => {
           const m = i.options.getUser("membre");
           data.admins = data.admins.filter((id) => id !== m.id);
           saveData();
-          const reply = await i.reply({ content: `🗑️ <@${m.id}> n'est plus admin.`, ephemeral: true });
+          await i.reply({ content: `🗑️ <@${m.id}> n'est plus admin.`, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
         case "admin_list": {
           const txt = data.admins.map((id) => `<@${id}>`).join("\n") || "Aucun admin personnalisé.";
-          const reply = await i.reply({ content: txt, ephemeral: true });
+          await i.reply({ content: txt, ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -412,7 +376,6 @@ client.on("interactionCreate", async (i) => {
             return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
           if (data.modeles.length === 0)
             return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-          const shift = data.chatteurs[uid];
           const row = new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder()
               .setCustomId("menu_clockin_models")
@@ -421,7 +384,7 @@ client.on("interactionCreate", async (i) => {
               .setMaxValues(data.modeles.length)
               .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
           );
-          const reply = await i.reply({ content: "Sélectionne tes modèles :", components: [row], ephemeral: true });
+          await i.reply({ content: "Sélectionne tes modèles :", components: [row], ephemeral: true });
           setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
           return;
         }
@@ -446,7 +409,7 @@ client.on("interactionCreate", async (i) => {
               .setLabel("✅ Valider")
               .setStyle(ButtonStyle.Success)
           );
-          const reply = await i.reply({
+          await i.reply({
             content: ficheText(uid),
             components: [row, buttonRow],
             ephemeral: true,
