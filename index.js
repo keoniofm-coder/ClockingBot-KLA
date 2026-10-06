@@ -16,7 +16,7 @@ const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
 const TZ = "Europe/Paris";
 const EPHEMERAL_TTL = 25000; // 25 secondes
 
-const DATA_DIR = process.env.DATA_DIR || "/data";
+const DATA_DIR = process.env.DATA_DIR || "/data"; // Volume Railway
 const DATA_FILE = path.join(DATA_DIR, "data.json");
 
 const SHIFTS = {
@@ -26,299 +26,266 @@ const SHIFTS = {
   NUIT: { start: 2, label: "02h-08h", emoji: "🌙" },
 };
 
-const ANNOUNCEMENTS = [
-  { shift: "MATIN", hour: 7, minute: 45 },
-  { shift: "APREM", hour: 13, minute: 45 },
-  { shift: "SOIR", hour: 19, minute: 45 },
-  { shift: "NUIT", hour: 1, minute: 45 },
-];
-
 // ================== DATA ==================
-let data = {};
-const fiches = new Map();
-const ADMIN_PERM = PermissionFlagsBits.Administrator;
+const DEFAULT_DATA = {
+  modeles: [
+    { name: "Amélie (Inflow)", devise: "$" },
+    { name: "Zoé (Inflow)", devise: "$" },
+    { name: "Zoé (Uncove)", devise: "€" },
+  ],
+  chatteurs: {}, // userId -> shift
+  sessions: {}, // userId -> { shift, clockIn, modeles }
+  historique: [], // shifts terminés (pour /stats)
+  admins: [], // userIds des admins du bot
+};
 
+let data = JSON.parse(JSON.stringify(DEFAULT_DATA));
 function loadData() {
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    if (fs.existsSync(DATA_FILE)) {
-      data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    } else {
-      data = {
-        modeles: [
-          { name: "Amélie (Inflow)", devise: "$" },
-          { name: "Zoé (Inflow)", devise: "$" },
-          { name: "Zoé (Uncove)", devise: "€" },
-        ],
-        chatteurs: {},
-        sessions: {},
-        historique: [],
-        admins: [],
-      };
-      saveData();
-    }
-  } catch (err) {
-    console.error("❌ Erreur loadData :", err);
-    data = {
-      modeles: [
-        { name: "Amélie (Inflow)", devise: "$" },
-        { name: "Zoé (Inflow)", devise: "$" },
-        { name: "Zoé (Uncove)", devise: "€" },
-      ],
-      chatteurs: {},
-      sessions: {},
-      historique: [],
-      admins: [],
-    };
+    data = { ...JSON.parse(JSON.stringify(DEFAULT_DATA)), ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) };
+  } catch {
+    data = JSON.parse(JSON.stringify(DEFAULT_DATA));
   }
 }
-
 function saveData() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error("❌ Erreur saveData :", err);
-  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
-
 loadData();
 
-// ================== UTILITAIRES ==================
-function fmtTime(ms) {
-  return new Date(ms).toLocaleString("fr-FR", {
-    timeZone: TZ,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+// ================== HELPERS ==================
+const fmtTime = (d) =>
+  new Date(d).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: TZ });
+const fmtDuration = (ms) => {
+  const m = Math.floor(ms / 60000);
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+};
+const deviseOf = (modeleName) => data.modeles.find((m) => m.name === modeleName)?.devise || "$";
+
+// Vérifie si l'utilisateur est admin (admin Discord OU admin du bot)
+function isAdmin(i) {
+  return (
+    i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+    data.admins.includes(i.user.id)
+  );
+}
+const ADMIN_PERM = PermissionFlagsBits.Administrator;
+
+// Répond en éphémère et supprime le message après 25 secondes
+async function reply(i, options, autoDelete = true) {
+  const payload = { ...options, ephemeral: true };
+  const msg = i.replied || i.deferred ? await i.followUp(payload) : await i.reply(payload);
+  if (autoDelete) setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+  return msg;
 }
 
-function fmtDuration(ms) {
-  const h = Math.floor(ms / 3600e3);
-  const m = Math.floor((ms % 3600e3) / 60e3);
-  return `${h}h${m}min`;
-}
+// Brouillons en mémoire
+const fiches = new Map(); // userId -> { ventes: [], currentModele }
+const clockInDraft = new Map(); // userId -> { shift, modeles: [] }
 
-function fmtMoney(u) {
-  return `$${u.$} / €${u["€"]}`;
-}
-
-function deviseOf(modele) {
-  return data.modeles.find((m) => m.name === modele)?.devise || "$";
-}
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ================== COMPOSANTS ==================
-const periodeChoices = [
-  { name: "Aujourd'hui", value: "today" },
-  { name: "7 derniers jours", value: "week" },
-  { name: "15 derniers jours", value: "fifteendays" },
-  { name: "30 derniers jours", value: "month" },
-  { name: "Tout", value: "all" },
-];
-
 const clockInRow = (shift) =>
   new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`clockin_${shift}`)
+      .setCustomId(`btn_clockin_${shift}`)
       .setLabel("Clock In")
       .setEmoji("✅")
-      .setStyle(ButtonStyle.Success)
-  );
-
-const clockOutRow = () =>
-  new ActionRowBuilder().addComponents(
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
-      .setCustomId("clockout_btn")
+      .setCustomId("btn_clockout")
       .setLabel("Clock Out")
       .setEmoji("🔴")
       .setStyle(ButtonStyle.Danger)
   );
 
-const modelesRow = (shift) =>
-  new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(`clockin_models_${shift}`)
-      .setPlaceholder("Sélectionne tes modèles")
-      .setMinValues(1)
-      .setMaxValues(data.modeles.length)
-      .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-  );
-
-const ficheText = (uid) =>
-  `📋 **Fiche de ventes**\n<@${uid}>\nAjoute tes ventes ci-dessous ⬇️`;
-
-const ficheComponents = (uid, s) => {
-  const f = fiches.get(uid);
-  const currentModele = f?.currentModele || s.modeles[0];
-  const rows = [];
-
-  rows.push(
+// Menu de choix des modèles au clock in + bouton Valider
+function clockInComponents(uid, shift) {
+  const draft = clockInDraft.get(uid);
+  return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId("fiche_modele")
-        .setPlaceholder(`Modèle actuel : ${currentModele}`)
-        .addOptions(s.modeles.map((m) => ({ label: m.name, value: m.name, default: m === currentModele })))
-    )
-  );
-
-  rows.push(
+        .setCustomId(`menu_clockin_models_${shift}`)
+        .setPlaceholder("Modèle(s)")
+        .setMinValues(1)
+        .setMaxValues(data.modeles.length)
+        .addOptions(
+          data.modeles.map((m) => ({
+            label: m.name,
+            value: m.name,
+            default: draft?.modeles.includes(m.name) || false,
+          }))
+        )
+    ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("fiche_add_vente")
-        .setLabel("Ajouter une vente")
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId("fiche_validate")
-        .setLabel("Valider et terminer")
+        .setCustomId(`btn_clockin_validate_${shift}`)
+        .setLabel("Valider le Clock In")
         .setEmoji("✅")
         .setStyle(ButtonStyle.Success)
-    )
-  );
+        .setDisabled(!draft || draft.modeles.length === 0)
+    ),
+  ];
+}
 
-  return rows;
-};
+function clockInText(uid) {
+  const draft = clockInDraft.get(uid);
+  return draft && draft.modeles.length
+    ? `Modèle(s) choisi(s) : **${draft.modeles.join(", ")}**\nClique sur **Valider** pour confirmer.`
+    : "Choisis ton/tes modèle(s) puis clique sur **Valider** :";
+}
 
-// ================== CLIENT ==================
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+function ficheComponents(uid, session) {
+  const f = fiches.get(uid);
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("menu_fiche_modele")
+        .setPlaceholder("Modèle de la vente")
+        .addOptions(
+          session.modeles.map((m) => ({
+            label: m,
+            value: m,
+            default: m === f.currentModele,
+          }))
+        )
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("btn_fiche_add").setLabel("➕ Ajouter une vente").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("btn_fiche_validate").setLabel("✅ Valider").setStyle(ButtonStyle.Success)
+    ),
+  ];
+}
+
+function ficheText(uid) {
+  const f = fiches.get(uid);
+  let txt = `📝 **Fiche de ventes**\nModèle sélectionné : **${f.currentModele}**\n\n`;
+  if (f.ventes.length === 0) txt += "*Aucune vente ajoutée.*";
+  else for (const v of f.ventes) txt += `• ${v.fan} → ${v.montant}${deviseOf(v.modele)} (${v.modele})\n`;
+  return txt;
+}
 
 // ================== ANNONCES AUTO ==================
-async function announceShift(shiftName) {
-  const sh = SHIFTS[shiftName];
+async function announceShift(name) {
+  const sh = SHIFTS[name];
   const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await ch.send({
-    content: `🔔 **C'est l'heure du shift ${shiftName} (${sh.label})**\nPensez bien à Clock-in ceux du shift ${shiftName.toLowerCase()} et bon shift ${sh.emoji}`,
-    components: [clockInRow(shiftName), clockOutRow()],
+    content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**\nPensez bien à Clock-in ceux du **shift ${name} (${sh.label})** et bon shift ${sh.emoji}`,
+    components: [clockInRow(name)],
   });
 }
 
-for (const { shift, hour, minute } of ANNOUNCEMENTS) {
-  cron.schedule(`${minute} ${hour} * * *`, () => announceShift(shift), { timezone: TZ });
+// 15 min avant chaque shift (heure de Paris)
+for (const [name, sh] of Object.entries(SHIFTS)) {
+  const hour = (sh.start - 1 + 24) % 24; // 15 min avant => hh-1:45
+  cron.schedule(`45 ${hour} * * *`, () => announceShift(name), { timezone: TZ });
 }
 
 // ================== COMMANDES ==================
+const shiftChoices = Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k }));
+const periodeChoices = [
+  { name: "Aujourd'hui", value: "today" },
+  { name: "7 derniers jours", value: "week" },
+  { name: "15 derniers jours", value: "15days" },
+  { name: "30 derniers jours", value: "month" },
+  { name: "Tout", value: "all" },
+];
+
 const commands = [
-  // ========== CHATTEURS (tout le monde) ==========
+  // ---- Chatteurs (tout le monde) ----
   new SlashCommandBuilder()
     .setName("clockin")
     .setDescription("Commencer ton shift")
-    .setDMPermission(false),
-  new SlashCommandBuilder()
-    .setName("clockout")
-    .setDescription("Terminer ton shift")
-    .setDMPermission(false),
+    .addStringOption((o) =>
+      o.setName("shift").setDescription("Ton shift").setRequired(true).addChoices(...shiftChoices)
+    ),
+  new SlashCommandBuilder().setName("clockout").setDescription("Terminer ton shift"),
   new SlashCommandBuilder()
     .setName("mystats")
     .setDescription("Voir tes propres stats")
-    .setDMPermission(false)
     .addStringOption((o) =>
-      o
-        .setName("periode")
-        .setDescription("Période")
-        .setRequired(true)
-        .addChoices(...periodeChoices)
+      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
     ),
-  // ========== ADMINS ONLY ==========
+
+  // ---- Admins uniquement ----
+  new SlashCommandBuilder()
+    .setName("panel")
+    .setDescription("Envoyer le message de shift dans le salon clocking (test)")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .addStringOption((o) =>
+      o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
+    ),
   new SlashCommandBuilder()
     .setName("chatteur_add")
     .setDescription("Ajouter un chatteur au clocking")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true))
     .addStringOption((o) =>
-      o
-        .setName("shift")
-        .setDescription("Son shift")
-        .setRequired(true)
-        .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
+      o.setName("shift").setDescription("Son shift").setRequired(true).addChoices(...shiftChoices)
     ),
   new SlashCommandBuilder()
     .setName("chatteur_remove")
     .setDescription("Retirer un chatteur")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true)),
   new SlashCommandBuilder()
     .setName("chatteur_list")
     .setDescription("Liste des chatteurs")
-    .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false),
+    .setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder()
     .setName("modele_add")
     .setDescription("Ajouter un modèle")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
-    .addStringOption((o) => o.setName("nom").setDescription("Nom du modèle").setRequired(true))
+    .addStringOption((o) => o.setName("nom").setDescription("Ex : Zoé (Inflow)").setRequired(true))
     .addStringOption((o) =>
-      o
-        .setName("devise")
-        .setDescription("Devise")
-        .setRequired(true)
-        .addChoices(
-          { name: "Dollars ($)", value: "$" },
-          { name: "Euros (€)", value: "€" }
-        )
+      o.setName("devise").setDescription("Devise").setRequired(true)
+        .addChoices({ name: "Dollar ($)", value: "$" }, { name: "Euro (€)", value: "€" })
     ),
   new SlashCommandBuilder()
     .setName("modele_remove")
     .setDescription("Retirer un modèle")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
-    .addStringOption((o) =>
-      o
-        .setName("nom")
-        .setDescription("Nom du modèle")
-        .setRequired(true)
-        .addChoices(...data.modeles.map((m) => ({ name: m.name, value: m.name })))
-    ),
+    .addStringOption((o) => o.setName("nom").setDescription("Nom exact du modèle").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("modele_list")
+    .setDescription("Liste des modèles")
+    .setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder()
     .setName("stats")
-    .setDescription("Statistiques des ventes")
+    .setDescription("Statistiques des ventes (admin)")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
     .addStringOption((o) =>
-      o
-        .setName("periode")
-        .setDescription("Période")
-        .setRequired(true)
-        .addChoices(...periodeChoices)
+      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
     )
     .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
   new SlashCommandBuilder()
     .setName("admin_add")
-    .setDescription("Ajouter un admin")
+    .setDescription("Ajouter un admin du bot")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
-    .addUserOption((o) => o.setName("membre").setDescription("L'admin").setRequired(true)),
+    .addUserOption((o) => o.setName("membre").setDescription("Le futur admin").setRequired(true)),
   new SlashCommandBuilder()
     .setName("admin_remove")
-    .setDescription("Retirer un admin")
+    .setDescription("Retirer un admin du bot")
     .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
-    .addUserOption((o) => o.setName("membre").setDescription("L'admin").setRequired(true)),
+    .addUserOption((o) => o.setName("membre").setDescription("L'admin à retirer").setRequired(true)),
   new SlashCommandBuilder()
-    .setName("panel")
-    .setDescription("Envoyer le message de shift (test)")
-    .setDefaultMemberPermissions(ADMIN_PERM)
-    .setDMPermission(false)
-    .addStringOption((o) =>
-      o
-        .setName("shift")
-        .setDescription("Shift à annoncer")
-        .setRequired(true)
-        .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
-    ),
+    .setName("admin_list")
+    .setDescription("Liste des admins du bot")
+    .setDefaultMemberPermissions(ADMIN_PERM),
 ].map((c) => c.toJSON());
 
-// ================== LOGIN ==================
+// Commandes réservées aux admins (sécurité côté code, en plus du masquage Discord)
+const ADMIN_COMMANDS = [
+  "panel", "chatteur_add", "chatteur_remove", "chatteur_list",
+  "modele_add", "modele_remove", "modele_list",
+  "stats", "admin_add", "admin_remove", "admin_list",
+];
+
 client.once("ready", async () => {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log(`✅ Connecté en tant que ${client.user.tag}`);
-  } catch (err) {
-    console.error("❌ Erreur enregistrement commandes :", err);
-  }
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  console.log(`Connecté en tant que ${client.user.tag}`);
 });
 
 // ================== INTERACTIONS ==================
@@ -326,339 +293,236 @@ client.on("interactionCreate", async (i) => {
   try {
     const uid = i.user.id;
 
-    // COMMANDES SLASH
+    // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
-      const isAdmin = i.member?.permissions.has(ADMIN_PERM);
+      if (ADMIN_COMMANDS.includes(i.commandName) && !isAdmin(i))
+        return reply(i, { content: "⛔ Cette commande est réservée aux admins." });
 
       switch (i.commandName) {
+        case "clockin":
+          return startClockIn(i, i.options.getString("shift"));
+        case "clockout":
+          return startClockOut(i);
+        case "mystats":
+          return handleStats(i, true);
+        case "stats":
+          return handleStats(i, false);
+
+        case "panel": {
+          const shift = i.options.getString("shift");
+          await announceShift(shift);
+          return reply(i, { content: `✅ Message du shift **${shift}** envoyé dans le salon clocking.` });
+        }
         case "chatteur_add": {
           const m = i.options.getUser("membre");
           const s = i.options.getString("shift");
           data.chatteurs[m.id] = s;
           saveData();
-          const reply = await i.reply({ content: `✅ <@${m.id}> ajouté au shift **${s}**.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+          return reply(i, { content: `✅ <@${m.id}> ajouté au shift **${s}**.` });
         }
         case "chatteur_remove": {
           const m = i.options.getUser("membre");
           delete data.chatteurs[m.id];
           saveData();
-          const reply = await i.reply({ content: `🗑️ <@${m.id}> retiré.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+          return reply(i, { content: `🗑️ <@${m.id}> retiré.` });
         }
         case "chatteur_list": {
           const txt =
-            Object.entries(data.chatteurs)
-              .map(([u, s]) => `<@${u}> — ${s}`)
-              .join("\n") || "Aucun chatteur.";
-          const reply = await i.reply({ content: txt, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+            Object.entries(data.chatteurs).map(([u, s]) => `<@${u}> — ${s}`).join("\n") || "Aucun chatteur.";
+          return reply(i, { content: txt });
         }
         case "modele_add": {
           const nom = i.options.getString("nom");
           const devise = i.options.getString("devise");
-          if (data.modeles.find((m) => m.name === nom)) {
-            const reply = await i.reply({ content: "⚠️ Ce modèle existe déjà.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-            return;
-          }
+          if (data.modeles.find((m) => m.name === nom))
+            return reply(i, { content: "⚠️ Ce modèle existe déjà." });
           data.modeles.push({ name: nom, devise });
           saveData();
-          const reply2 = await i.reply({ content: `✅ Modèle **${nom}** (${devise}) ajouté.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+          return reply(i, { content: `✅ Modèle **${nom}** (${devise}) ajouté.` });
         }
         case "modele_remove": {
           const nom = i.options.getString("nom");
           data.modeles = data.modeles.filter((m) => m.name !== nom);
           saveData();
-          const reply = await i.reply({ content: `🗑️ Modèle **${nom}** retiré.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+          return reply(i, { content: `🗑️ Modèle **${nom}** retiré.` });
+        }
+        case "modele_list": {
+          const txt = data.modeles.map((m) => `• ${m.name} (${m.devise})`).join("\n") || "Aucun modèle.";
+          return reply(i, { content: txt });
         }
         case "admin_add": {
           const m = i.options.getUser("membre");
-          if (!data.admins) data.admins = [];
-          if (!data.admins.includes(m.id)) {
-            data.admins.push(m.id);
-            saveData();
-            const reply = await i.reply({ content: `✅ <@${m.id}> est maintenant admin.`, ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          } else {
-            const reply = await i.reply({ content: "⚠️ Déjà admin.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          }
-          return;
+          if (data.admins.includes(m.id)) return reply(i, { content: "⚠️ Déjà admin du bot." });
+          data.admins.push(m.id);
+          saveData();
+          return reply(i, { content: `✅ <@${m.id}> est maintenant admin du bot.` });
         }
         case "admin_remove": {
           const m = i.options.getUser("membre");
-          if (!data.admins) data.admins = [];
-          data.admins = data.admins.filter((id) => id !== m.id);
+          data.admins = data.admins.filter((a) => a !== m.id);
           saveData();
-          const reply = await i.reply({ content: `🗑️ <@${m.id}> n'est plus admin.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+          return reply(i, { content: `🗑️ <@${m.id}> n'est plus admin du bot.` });
         }
-        case "stats": {
-          await handleStats(i, false);
-          return;
-        }
-        case "mystats": {
-          await handleStats(i, true);
-          return;
-        }
-        case "clockout": {
-          if (!data.chatteurs[uid]) {
-            const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-            return;
-          }
-          return startClockOut(i);
-        }
-        case "clockin": {
-          if (!data.chatteurs[uid]) {
-            const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-            return;
-          }
-          const shift = data.chatteurs[uid];
-          if (data.sessions[uid]) {
-            const reply = await i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-            return;
-          }
-          if (data.modeles.length === 0) {
-            const reply = await i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-            setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-            return;
-          }
-          return i.reply({
-            content: "Sélectionne tes modèles pour ce shift :",
-            components: [modelesRow(shift)],
-            ephemeral: true,
-          });
-        }
-        case "panel": {
-          const shift = i.options.getString("shift");
-          await announceShift(shift);
-          const reply = await i.reply({ content: `✅ Annonce envoyée pour le shift ${shift}.`, ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
+        case "admin_list": {
+          const txt = data.admins.map((a) => `<@${a}>`).join("\n") || "Aucun admin du bot (en plus des admins Discord).";
+          return reply(i, { content: txt });
         }
       }
     }
 
-    // BOUTONS
+    // ---------- Boutons ----------
     if (i.isButton()) {
-      // Clock In
-      if (i.customId.startsWith("clockin_")) {
-        const shift = i.customId.split("_")[1];
-        if (!data.chatteurs[uid]) {
-          const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        if (data.sessions[uid]) {
-          const reply = await i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        if (data.modeles.length === 0) {
-          const reply = await i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        return i.reply({
-          content: "Sélectionne tes modèles pour ce shift :",
-          components: [modelesRow(shift)],
-          ephemeral: true,
-        });
+      const id = i.customId;
+
+      // Clock Out (bouton du salon)
+      if (id === "btn_clockout") return startClockOut(i);
+
+      // Valider le clock in
+      if (id.startsWith("btn_clockin_validate_")) {
+        const shift = id.split("_")[3];
+        const draft = clockInDraft.get(uid);
+        if (!draft || draft.modeles.length === 0)
+          return reply(i, { content: "❌ Choisis au moins un modèle." });
+        if (data.sessions[uid])
+          return reply(i, { content: "⚠️ Tu es déjà clock in." });
+
+        const t = Date.now();
+        data.sessions[uid] = { shift, clockIn: t, modeles: draft.modeles };
+        clockInDraft.delete(uid);
+        saveData();
+
+        await i.update({ content: "✅ Clock in enregistré !", components: [] });
+        setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+        const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+        return ch.send(
+          `<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${data.sessions[uid].modeles.join(", ")}`
+        );
       }
 
-      // Clock Out bouton
-      if (i.customId === "clockout_btn") {
-        if (!data.chatteurs[uid]) {
-          const reply = await i.reply({ content: "❌ Tu n'es pas enregistré comme chatteur.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        if (!data.sessions[uid]) {
-          const reply = await i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-        return startClockOut(i);
+      // Clock In (bouton du salon)
+      if (id.startsWith("btn_clockin_")) {
+        const shift = id.split("_")[2];
+        return startClockIn(i, shift);
       }
 
-      // Fiche : valider
-      if (i.customId === "fiche_validate") {
-        return finalizeClockOut(i);
-      }
-
-      // Fiche : ajouter vente
-      if (i.customId === "fiche_add_vente") {
-        const s = data.sessions[uid];
-        if (!s) {
-          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
+      // Fiche : ajouter une vente
+      if (id === "btn_fiche_add") {
         const f = fiches.get(uid);
-        const modele = f?.currentModele || s.modeles[0];
-        const devise = deviseOf(modele);
-
+        if (!f) return reply(i, { content: "Session expirée, refais Clock Out." });
+        const devise = deviseOf(f.currentModele);
         const modal = new ModalBuilder()
-          .setCustomId("modal_vente")
-          .setTitle(`Ajouter une vente — ${modele}`)
+          .setCustomId("modal_fiche")
+          .setTitle(`Vente - ${f.currentModele}`.slice(0, 45))
           .addComponents(
             new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId("input_fan")
-                .setLabel("Nom du fan")
-                .setStyle(TextInputStyle.Short)
-                .setRequired(true)
+              new TextInputBuilder().setCustomId("fan").setLabel("Nom du fan").setPlaceholder("ex : John")
+                .setStyle(TextInputStyle.Short).setRequired(true)
             ),
             new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId("input_montant")
-                .setLabel(`Montant (${devise})`)
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder("100")
-                .setRequired(true)
+              new TextInputBuilder().setCustomId("montant").setLabel(`Ventes PPV (${devise})`).setPlaceholder("ex : 185")
+                .setStyle(TextInputStyle.Short).setRequired(true)
             )
           );
         return i.showModal(modal);
       }
+
+      // Fiche : valider
+      if (id === "btn_fiche_validate") return finalizeClockOut(i);
     }
 
-    // SELECT MENUS
+    // ---------- Select menus ----------
     if (i.isStringSelectMenu()) {
-      // Clock in models
-      if (i.customId.startsWith("clockin_models_")) {
-        const shift = i.customId.split("_")[2];
-        const t = Date.now();
-        data.sessions[uid] = { shift, clockIn: t, modeles: i.values };
-        saveData();
-        await i.update({ content: "✅ Clock in enregistré !", components: [] });
-        const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-        return ch.send(
-          `<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${i.values.join(", ")}`
-        );
+      // Choix des modèles au clock in (ne valide plus tout seul)
+      if (i.customId.startsWith("menu_clockin_models_")) {
+        const shift = i.customId.split("_")[3];
+        clockInDraft.set(uid, { shift, modeles: i.values });
+        return i.update({ content: clockInText(uid), components: clockInComponents(uid, shift) });
       }
 
-      // Fiche modele
-      if (i.customId === "fiche_modele") {
+      // Choix du modèle dans la fiche
+      if (i.customId === "menu_fiche_modele") {
         const f = fiches.get(uid);
         const s = data.sessions[uid];
-        if (!f || !s) {
-          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
+        if (!f || !s) return reply(i, { content: "Session expirée." });
         f.currentModele = i.values[0];
         return i.update({ content: ficheText(uid), components: ficheComponents(uid, s) });
       }
     }
 
-    // MODALS
-    if (i.isModalSubmit()) {
-      if (i.customId === "modal_vente") {
-        const fan = i.fields.getTextInputValue("input_fan");
-        const montantStr = i.fields.getTextInputValue("input_montant");
-        const montant = parseFloat(montantStr);
-
-        if (isNaN(montant) || montant <= 0) {
-          const reply = await i.reply({ content: "❌ Montant invalide.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-
-        const f = fiches.get(uid);
-        const s = data.sessions[uid];
-        if (!f || !s) {
-          const reply = await i.reply({ content: "Session expirée.", ephemeral: true });
-          setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-          return;
-        }
-
-        const modele = f.currentModele;
-        f.ventes.push({ fan, montant, modele });
-
-        await i.reply({ content: `✅ Vente ajoutée : ${fan} — ${montant}${deviseOf(modele)}`, ephemeral: true });
-        setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-
-        // Pas de update du message principal ici
-        return;
-      }
+    // ---------- Modal ----------
+    if (i.isModalSubmit() && i.customId === "modal_fiche") {
+      const f = fiches.get(uid);
+      const s = data.sessions[uid];
+      if (!f || !s) return reply(i, { content: "Session expirée." });
+      const fan = i.fields.getTextInputValue("fan");
+      const montant = parseFloat(i.fields.getTextInputValue("montant").replace(",", ".").replace(/[$€\s]/g, ""));
+      if (isNaN(montant)) return reply(i, { content: "❌ Montant invalide." });
+      f.ventes.push({ modele: f.currentModele, fan, montant });
+      return i.update({ content: ficheText(uid), components: ficheComponents(uid, s) });
     }
   } catch (err) {
-    console.error("❌ Erreur interaction :", err);
-    if (!i.replied && !i.deferred) {
-      i.reply({ content: "❌ Erreur.", ephemeral: true }).catch(() => {});
-    }
+    console.error(err);
+    if (!i.replied && !i.deferred) i.reply({ content: "❌ Erreur.", ephemeral: true }).catch(() => {});
   }
 });
+
+// ================== CLOCK IN ==================
+async function startClockIn(i, shift) {
+  const uid = i.user.id;
+  if (!data.chatteurs[uid])
+    return reply(i, { content: "❌ Tu n'es pas dans la liste des chatteurs." });
+  if (data.sessions[uid])
+    return reply(i, { content: "⚠️ Tu es déjà clock in." });
+  if (data.modeles.length === 0)
+    return reply(i, { content: "❌ Aucun modèle configuré." });
+
+  clockInDraft.set(uid, { shift, modeles: [] });
+  // Pas de suppression auto : le chatteur doit avoir le temps de choisir
+  return reply(i, { content: clockInText(uid), components: clockInComponents(uid, shift) }, false);
+}
 
 // ================== CLOCK OUT ==================
 async function startClockOut(i) {
   const uid = i.user.id;
   const s = data.sessions[uid];
-  if (!s) {
-    const reply = await i.reply({ content: "❌ Tu n'es pas clock in.", ephemeral: true });
-    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-    return;
-  }
+  if (!s) return reply(i, { content: "❌ Tu n'es pas clock in." });
   fiches.set(uid, { ventes: [], currentModele: s.modeles[0] });
-  return i.reply({
-    content: ficheText(uid),
-    components: ficheComponents(uid, s),
-    ephemeral: true,
-  });
+  // Pas de suppression auto : la fiche reste jusqu'à validation
+  return reply(i, { content: ficheText(uid), components: ficheComponents(uid, s) }, false);
 }
 
 async function finalizeClockOut(i) {
   const uid = i.user.id;
   const s = data.sessions[uid];
   const f = fiches.get(uid);
-  if (!s || !f) {
-    const reply = await i.reply({ content: "Session introuvable.", ephemeral: true });
-    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-    return;
-  }
+  if (!s || !f) return reply(i, { content: "Session introuvable." });
 
   const tOut = Date.now();
   const duree = tOut - s.clockIn;
 
+  // Totaux par devise + détail par modèle
+  const totaux = { $: 0, "€": 0 };
   const detail = {};
-  let ventesTxt = "";
-  let totalVentes = { $: 0, "€": 0 };
-
   for (const v of f.ventes) {
-    if (!detail[v.modele]) detail[v.modele] = [];
-    detail[v.modele].push(v);
-    const devise = deviseOf(v.modele);
-    totalVentes[devise] += v.montant;
-    ventesTxt += `${v.modele} - ${v.fan} : ${v.montant}${devise}\n`;
+    const d = deviseOf(v.modele);
+    totaux[d] += v.montant;
+    (detail[v.modele] ||= []).push(v);
   }
+  const ventesTxt =
+    Object.entries(totaux).filter(([, m]) => m > 0).map(([d, m]) => `${m}${d}`).join(" + ") || "0";
 
   const embed = new EmbedBuilder()
-    .setTitle(`🔴 SHIFT TERMINÉ`)
+    .setTitle(`🔴 SHIFT TERMINÉ - ${i.member.displayName}`)
     .setColor(0xe74c3c)
     .setTimestamp(tOut)
-    .setDescription(`<@${uid}> — ${i.user.username}`)
     .addFields(
-      { name: "📊 Shift", value: s.shift, inline: true },
+      { name: "👤 Chatteur", value: `<@${uid}>` },
+      { name: "📊 Shift", value: `${s.shift} (${SHIFTS[s.shift]?.label || ""})` },
       { name: "🕐 Arrivée", value: fmtTime(s.clockIn), inline: true },
       { name: "🕒 Départ", value: fmtTime(tOut), inline: true },
       { name: "⏱️ Durée", value: fmtDuration(duree), inline: true },
       { name: "👥 Modèles", value: s.modeles.join(", ") },
-      {
-        name: "💰 Ventes totales",
-        value: totalVentes.$ > 0 || totalVentes["€"] > 0 ? `${totalVentes.$}$ / ${totalVentes["€"]}€` : "Aucune vente",
-      }
+      { name: "💰 Ventes", value: ventesTxt }
     );
 
   if (f.ventes.length) {
@@ -673,48 +537,50 @@ async function finalizeClockOut(i) {
   }
 
   const ventesCh = await client.channels.fetch(VENTES_CHANNEL_ID);
-  await ventesCh.send({ embeds: [embed] });
+  await ventesCh.send({ content: `<@${uid}>`, embeds: [embed] });
   const clockCh = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await clockCh.send(
     `<@${uid}> CLOCK OUT 🔴 ${fmtTime(tOut)} | Shift ${s.shift} | Modèle(s) : ${s.modeles.join(", ")}`
   );
 
+  // Historique pour /stats
   data.historique.push({
-    userId: uid,
-    shift: s.shift,
-    clockIn: s.clockIn,
-    clockOut: tOut,
-    modeles: s.modeles,
-    ventes: f.ventes,
+    userId: uid, shift: s.shift, clockIn: s.clockIn, clockOut: tOut,
+    modeles: s.modeles, ventes: f.ventes,
   });
   delete data.sessions[uid];
   fiches.delete(uid);
   saveData();
 
-  return i.update({ content: "✅ Shift terminé, fiche envoyée !", components: [] });
+  await i.update({ content: "✅ Shift terminé, fiche envoyée !", components: [] });
+  setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
 }
 
 // ================== STATS ==================
+// self = true => /mystats (ses propres stats), sinon /stats (admin)
 async function handleStats(i, self) {
+  const uid = i.user.id;
   const periode = i.options.getString("periode");
-  const membre = self ? i.user : i.options.getUser("membre");
+  
+  // Pour /mystats, on force toujours le user courant
+  // Pour /stats, on peut filtrer sur un autre
+  let targetUserId;
+  if (self) {
+    targetUserId = uid;
+  } else {
+    const membre = i.options.getUser("membre");
+    targetUserId = membre ? membre.id : null;
+  }
 
   const now = Date.now();
-  const limits = {
-    today: 24 * 3600e3,
-    week: 7 * 24 * 3600e3,
-    fifteendays: 15 * 24 * 3600e3,
-    month: 30 * 24 * 3600e3,
-    all: Infinity,
-  };
+  const day = 24 * 3600e3;
+  const limits = { today: day, week: 7 * day, "15days": 15 * day, month: 30 * day, all: Infinity };
   const since = now - limits[periode];
 
-  const list = data.historique.filter((h) => h.clockOut >= since && h.userId === membre.id);
-  if (!list.length) {
-    const reply = await i.reply({ content: "Aucun shift sur cette période.", ephemeral: true });
-    setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
-    return;
-  }
+  const list = data.historique.filter(
+    (h) => h.clockOut >= since && (!targetUserId || h.userId === targetUserId)
+  );
+  if (!list.length) return reply(i, { content: "Aucun shift sur cette période." });
 
   const parUser = {};
   const parModele = {};
@@ -729,20 +595,23 @@ async function handleStats(i, self) {
     }
   }
 
+  const fmtMoney = (u) =>
+    [u.$ > 0 ? `${u.$}$` : null, u["€"] > 0 ? `${u["€"]}€` : null].filter(Boolean).join(" + ") || "0";
+
   const titres = {
-    today: "Aujourd'hui",
-    week: "7 jours",
-    fifteendays: "15 jours",
-    month: "30 jours",
-    all: "Total",
+    today: "Aujourd'hui", week: "7 jours", "15days": "15 jours", month: "30 jours", all: "Total",
   };
 
   const embed = new EmbedBuilder()
     .setTitle(`📈 ${self ? "Mes stats" : "Stats"} — ${titres[periode]}`)
     .setColor(0x3498db)
     .addFields({
-      name: "👤 Chatteur",
-      value: `<@${membre.id}> — ${parUser[membre.id].shifts} shift(s) | ${fmtDuration(parUser[membre.id].ms)} | ${fmtMoney(parUser[membre.id])}`,
+      name: "👤 Par chatteur",
+      value:
+        Object.entries(parUser)
+          .map(([u, s]) => `<@${u}> — ${s.shifts} shift(s) | ${fmtDuration(s.ms)} | ${fmtMoney(s)}`)
+          .join("\n")
+          .slice(0, 1024) || "-",
     })
     .addFields({
       name: "💃 Par modèle",
@@ -753,6 +622,7 @@ async function handleStats(i, self) {
           .slice(0, 1024) || "-",
     });
 
+  // Les stats restent affichées 60 secondes pour avoir le temps de les lire
   await i.reply({ embeds: [embed], ephemeral: true });
   setTimeout(() => i.deleteReply().catch(() => {}), 60000);
 }
