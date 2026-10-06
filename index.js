@@ -8,11 +8,11 @@ const fs = require("fs");
 const path = require("path");
 
 // ================== CONFIG ==================
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const CLOCKING_CHANNEL_ID = process.env.CLOCKING_CHANNEL_ID;
-const VENTES_CHANNEL_ID = process.env.VENTES_CHANNEL_ID;
+const TOKEN = (process.env.DISCORD_TOKEN || "").trim();
+const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
+const GUILD_ID = (process.env.GUILD_ID || "").trim();
+const CLOCKING_CHANNEL_ID = (process.env.CLOCKING_CHANNEL_ID || "").trim();
+const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
 const TZ = "Europe/Paris";
 
 const DATA_DIR = process.env.DATA_DIR || "/data"; // Volume Railway
@@ -33,14 +33,14 @@ const DEFAULT_DATA = {
     { name: "Zoé (Uncove)", devise: "€" },
   ],
   chatteurs: {}, // userId -> shift
-  sessions: {}, // userId -> { shift, clockIn, modeles, messageId }
+  sessions: {}, // userId -> { shift, clockIn, modeles }
   historique: [], // shifts terminés (pour /stats)
 };
 
-let data = DEFAULT_DATA;
+let data = JSON.parse(JSON.stringify(DEFAULT_DATA));
 function loadData() {
   try {
-    data = { ...DEFAULT_DATA, ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) };
+    data = { ...JSON.parse(JSON.stringify(DEFAULT_DATA)), ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) };
   } catch {
     data = JSON.parse(JSON.stringify(DEFAULT_DATA));
   }
@@ -62,29 +62,65 @@ const deviseOf = (modeleName) =>
   data.modeles.find((m) => m.name === modeleName)?.devise || "$";
 const isAdmin = (i) => i.memberPermissions.has(PermissionFlagsBits.Administrator);
 
+// Détecte le shift en cours selon l'heure de Paris
+function currentShift() {
+  const h = parseInt(
+    new Date().toLocaleString("fr-FR", { hour: "2-digit", hour12: false, timeZone: TZ }),
+    10
+  );
+  if (h >= 8 && h < 14) return "MATIN";
+  if (h >= 14 && h < 20) return "APREM";
+  if (h >= 20 || h < 2) return "SOIR";
+  return "NUIT";
+}
+
 // Brouillons de fiches de ventes en cours (en mémoire)
 const fiches = new Map(); // userId -> { ventes: [], currentModele }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ================== COMPOSANTS ==================
-const clockInRow = (shift) =>
+// Message de shift : Clock In + Clock Out côte à côte
+const shiftRow = (shift) =>
   new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`clockin_${shift}`)
       .setLabel("Clock In")
       .setEmoji("✅")
-      .setStyle(ButtonStyle.Success)
-  );
-
-const clockOutRow = () =>
-  new ActionRowBuilder().addComponents(
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId("clockout")
       .setLabel("Clock Out")
       .setEmoji("🔴")
       .setStyle(ButtonStyle.Danger)
   );
+
+// Menu de choix des modèles au clock in (bouton ET /clockin)
+function clockInMenu(shift) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`clockin_models_${shift}`)
+      .setPlaceholder("Modèle(s)")
+      .setMinValues(1)
+      .setMaxValues(data.modeles.length)
+      .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
+  );
+}
+
+async function startClockIn(i, shift) {
+  const uid = i.user.id;
+  if (!data.chatteurs[uid])
+    return i.reply({ content: "❌ Tu n'es pas dans la liste des chatteurs.", ephemeral: true });
+  if (data.sessions[uid])
+    return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
+  if (data.modeles.length === 0)
+    return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
+  return i.reply({
+    content: "Choisis ton/tes modèle(s) :",
+    ephemeral: true,
+    components: [clockInMenu(shift)],
+  });
+}
 
 function ficheComponents(uid, session) {
   const f = fiches.get(uid);
@@ -124,15 +160,18 @@ async function announceShift(name) {
   const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await ch.send({
     content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**\nPensez bien à Clock-in ceux du ${name.toLowerCase()} et bon shift ${sh.emoji}`,
-    components: [clockInRow(name)],
+    components: [shiftRow(name)],
   });
-  await ch.send({ content: "Pour terminer ton shift :", components: [clockOutRow()] });
 }
 
 // 15 min avant chaque shift (heure de Paris)
 for (const [name, sh] of Object.entries(SHIFTS)) {
   const hour = (sh.start - 1 + 24) % 24; // 15 min avant => hh-1:45
-  cron.schedule(`45 ${hour} * * *`, () => announceShift(name), { timezone: TZ });
+  cron.schedule(
+    `45 ${hour} * * *`,
+    () => announceShift(name).catch((e) => console.error("Annonce échouée :", e.message)),
+    { timezone: TZ }
+  );
 }
 
 // ================== COMMANDES ==================
@@ -176,13 +215,20 @@ const commands = [
         )
     )
     .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
+  new SlashCommandBuilder().setName("clockin").setDescription("Commencer ton shift"),
   new SlashCommandBuilder().setName("clockout").setDescription("Terminer ton shift"),
+  new SlashCommandBuilder().setName("test_annonce").setDescription("Tester l'annonce de shift (admin)"),
 ].map((c) => c.toJSON());
 
-client.once("ready", async () => {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+client.once("clientReady", async () => {
   console.log(`Connecté en tant que ${client.user.tag}`);
+  try {
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log("Commandes enregistrées ✅");
+  } catch (e) {
+    console.error("Erreur enregistrement commandes :", e.message);
+  }
 });
 
 // ================== INTERACTIONS ==================
@@ -201,7 +247,10 @@ client.on("interactionCreate", async (i) => {
 
     // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
-      const adminCmds = ["chatteur_add", "chatteur_remove", "chatteur_list", "modele_add", "modele_remove", "modele_list", "stats"];
+      const adminCmds = [
+        "chatteur_add", "chatteur_remove", "chatteur_list",
+        "modele_add", "modele_remove", "modele_list", "stats", "test_annonce",
+      ];
       if (adminCmds.includes(i.commandName) && !isAdmin(i))
         return i.reply({ content: "❌ Admin uniquement.", ephemeral: true });
 
@@ -244,8 +293,13 @@ client.on("interactionCreate", async (i) => {
         }
         case "stats":
           return handleStats(i);
+        case "clockin":
+          return startClockIn(i, data.chatteurs[uid] || currentShift());
         case "clockout":
           return startClockOut(i);
+        case "test_annonce":
+          await announceShift(currentShift());
+          return i.reply({ content: "✅ Annonce envoyée.", ephemeral: true });
       }
     }
 
@@ -254,26 +308,7 @@ client.on("interactionCreate", async (i) => {
       // Clock In
       if (i.customId.startsWith("clockin_")) {
         const shift = i.customId.split("_")[1];
-        if (!data.chatteurs[uid])
-          return i.reply({ content: "❌ Tu n'es pas dans la liste des chatteurs.", ephemeral: true });
-        if (data.sessions[uid])
-          return i.reply({ content: "⚠️ Tu es déjà clock in.", ephemeral: true });
-        if (data.modeles.length === 0)
-          return i.reply({ content: "❌ Aucun modèle configuré.", ephemeral: true });
-        return i.reply({
-          content: "Choisis ton/tes modèle(s) :",
-          ephemeral: true,
-          components: [
-            new ActionRowBuilder().addComponents(
-              new StringSelectMenuBuilder()
-                .setCustomId(`clockin_models_${shift}`)
-                .setPlaceholder("Modèle(s)")
-                .setMinValues(1)
-                .setMaxValues(data.modeles.length)
-                .addOptions(data.modeles.map((m) => ({ label: m.name, value: m.name })))
-            ),
-          ],
-        });
+        return startClockIn(i, shift);
       }
 
       // Clock Out
@@ -282,7 +317,7 @@ client.on("interactionCreate", async (i) => {
       // Fiche : ajouter une vente
       if (i.customId === "fiche_add") {
         const f = fiches.get(uid);
-        if (!f) return i.reply({ content: "Session expirée, refais /clockout.", ephemeral: true });
+        if (!f) return i.reply({ content: "Session expirée, refais Clock Out.", ephemeral: true });
         const devise = deviseOf(f.currentModele);
         const modal = new ModalBuilder()
           .setCustomId("fiche_modal")
@@ -373,7 +408,7 @@ async function finalizeClockOut(i) {
     Object.entries(totaux).filter(([, m]) => m > 0).map(([d, m]) => `${m}${d}`).join(" + ") || "0";
 
   const embed = new EmbedBuilder()
-    .setTitle(`🔴 SHIFT TERMINÉ - ${i.member.displayName}`)
+    .setTitle(`🔴 SHIFT TERMINÉ - ${i.member?.displayName || i.user.username}`)
     .setColor(0xe74c3c)
     .setTimestamp(tOut)
     .addFields(
