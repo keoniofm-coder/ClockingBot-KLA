@@ -89,12 +89,12 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const clockInRow = (shift) =>
   new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`clockin_${shift}`)
+      .setCustomId(`btn_clockin_${shift}`)
       .setLabel("Clock In")
       .setEmoji("✅")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
-      .setCustomId("clockout_btn")
+      .setCustomId("btn_clockout")
       .setLabel("Clock Out")
       .setEmoji("🔴")
       .setStyle(ButtonStyle.Danger)
@@ -106,7 +106,7 @@ function clockInComponents(uid, shift) {
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId(`clockin_models_${shift}`)
+        .setCustomId(`menu_clockin_models_${shift}`)
         .setPlaceholder("Modèle(s)")
         .setMinValues(1)
         .setMaxValues(data.modeles.length)
@@ -120,7 +120,7 @@ function clockInComponents(uid, shift) {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`clockin_validate_${shift}`)
+        .setCustomId(`btn_clockin_validate_${shift}`)
         .setLabel("Valider le Clock In")
         .setEmoji("✅")
         .setStyle(ButtonStyle.Success)
@@ -141,7 +141,7 @@ function ficheComponents(uid, session) {
   return [
     new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId("fiche_modele")
+        .setCustomId("menu_fiche_modele")
         .setPlaceholder("Modèle de la vente")
         .addOptions(
           session.modeles.map((m) => ({
@@ -152,8 +152,8 @@ function ficheComponents(uid, session) {
         )
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("fiche_add").setLabel("➕ Ajouter une vente").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("fiche_validate").setLabel("✅ Valider").setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId("btn_fiche_add").setLabel("➕ Ajouter une vente").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("btn_fiche_validate").setLabel("✅ Valider").setStyle(ButtonStyle.Success)
     ),
   ];
 }
@@ -183,37 +183,46 @@ for (const [name, sh] of Object.entries(SHIFTS)) {
 }
 
 // ================== COMMANDES ==================
+const shiftChoices = Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k }));
+const periodeChoices = [
+  { name: "Aujourd'hui", value: "today" },
+  { name: "7 derniers jours", value: "week" },
+  { name: "15 derniers jours", value: "15days" },
+  { name: "30 derniers jours", value: "month" },
+  { name: "Tout", value: "all" },
+];
+
 const commands = [
   // ---- Chatteurs (tout le monde) ----
   new SlashCommandBuilder()
     .setName("clockin")
     .setDescription("Commencer ton shift")
     .addStringOption((o) =>
-      o.setName("shift").setDescription("Ton shift").setRequired(true)
-        .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
+      o.setName("shift").setDescription("Ton shift").setRequired(true).addChoices(...shiftChoices)
     ),
   new SlashCommandBuilder().setName("clockout").setDescription("Terminer ton shift"),
-  new SlashCommandBuilder().setName("mystats").setDescription("Voir tes propres stats")
+  new SlashCommandBuilder()
+    .setName("mystats")
+    .setDescription("Voir tes propres stats")
     .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true)
-        .addChoices(
-          { name: "Aujourd'hui", value: "today" },
-          { name: "7 derniers jours", value: "week" },
-          { name: "15 derniers jours", value: "15days" },
-          { name: "30 derniers jours", value: "month" },
-          { name: "Tout", value: "all" }
-        )
+      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
     ),
 
   // ---- Admins uniquement ----
+  new SlashCommandBuilder()
+    .setName("panel")
+    .setDescription("Envoyer le message de shift dans le salon clocking (test)")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .addStringOption((o) =>
+      o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
+    ),
   new SlashCommandBuilder()
     .setName("chatteur_add")
     .setDescription("Ajouter un chatteur au clocking")
     .setDefaultMemberPermissions(ADMIN_PERM)
     .addUserOption((o) => o.setName("membre").setDescription("Le chatteur").setRequired(true))
     .addStringOption((o) =>
-      o.setName("shift").setDescription("Son shift").setRequired(true)
-        .addChoices(...Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k })))
+      o.setName("shift").setDescription("Son shift").setRequired(true).addChoices(...shiftChoices)
     ),
   new SlashCommandBuilder()
     .setName("chatteur_remove")
@@ -247,14 +256,7 @@ const commands = [
     .setDescription("Statistiques des ventes (admin)")
     .setDefaultMemberPermissions(ADMIN_PERM)
     .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true)
-        .addChoices(
-          { name: "Aujourd'hui", value: "today" },
-          { name: "7 derniers jours", value: "week" },
-          { name: "15 derniers jours", value: "15days" },
-          { name: "30 derniers jours", value: "month" },
-          { name: "Tout", value: "all" }
-        )
+      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
     )
     .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
   new SlashCommandBuilder()
@@ -273,9 +275,9 @@ const commands = [
     .setDefaultMemberPermissions(ADMIN_PERM),
 ].map((c) => c.toJSON());
 
-// Commandes qui nécessitent d'être admin (sécurité côté code, en plus du masquage Discord)
+// Commandes réservées aux admins (sécurité côté code, en plus du masquage Discord)
 const ADMIN_COMMANDS = [
-  "chatteur_add", "chatteur_remove", "chatteur_list",
+  "panel", "chatteur_add", "chatteur_remove", "chatteur_list",
   "modele_add", "modele_remove", "modele_list",
   "stats", "admin_add", "admin_remove", "admin_list",
 ];
@@ -306,6 +308,11 @@ client.on("interactionCreate", async (i) => {
         case "stats":
           return handleStats(i, false);
 
+        case "panel": {
+          const shift = i.options.getString("shift");
+          await announceShift(shift);
+          return reply(i, { content: `✅ Message du shift **${shift}** envoyé dans le salon clocking.` });
+        }
         case "chatteur_add": {
           const m = i.options.getUser("membre");
           const s = i.options.getString("shift");
@@ -365,9 +372,14 @@ client.on("interactionCreate", async (i) => {
 
     // ---------- Boutons ----------
     if (i.isButton()) {
-      // Valider le clock in (doit être AVANT "clockin_")
-      if (i.customId.startsWith("clockin_validate_")) {
-        const shift = i.customId.split("_")[2];
+      const id = i.customId;
+
+      // Clock Out (bouton du salon)
+      if (id === "btn_clockout") return startClockOut(i);
+
+      // Valider le clock in
+      if (id.startsWith("btn_clockin_validate_")) {
+        const shift = id.split("_")[3];
         const draft = clockInDraft.get(uid);
         if (!draft || draft.modeles.length === 0)
           return reply(i, { content: "❌ Choisis au moins un modèle." });
@@ -388,21 +400,18 @@ client.on("interactionCreate", async (i) => {
       }
 
       // Clock In (bouton du salon)
-      if (i.customId.startsWith("clockin_")) {
-        const shift = i.customId.split("_")[1];
+      if (id.startsWith("btn_clockin_")) {
+        const shift = id.split("_")[2];
         return startClockIn(i, shift);
       }
 
-      // Clock Out (bouton du salon)
-      if (i.customId === "clockout_btn") return startClockOut(i);
-
       // Fiche : ajouter une vente
-      if (i.customId === "fiche_add") {
+      if (id === "btn_fiche_add") {
         const f = fiches.get(uid);
         if (!f) return reply(i, { content: "Session expirée, refais Clock Out." });
         const devise = deviseOf(f.currentModele);
         const modal = new ModalBuilder()
-          .setCustomId("fiche_modal")
+          .setCustomId("modal_fiche")
           .setTitle(`Vente - ${f.currentModele}`.slice(0, 45))
           .addComponents(
             new ActionRowBuilder().addComponents(
@@ -418,20 +427,20 @@ client.on("interactionCreate", async (i) => {
       }
 
       // Fiche : valider
-      if (i.customId === "fiche_validate") return finalizeClockOut(i);
+      if (id === "btn_fiche_validate") return finalizeClockOut(i);
     }
 
     // ---------- Select menus ----------
     if (i.isStringSelectMenu()) {
       // Choix des modèles au clock in (ne valide plus tout seul)
-      if (i.customId.startsWith("clockin_models_")) {
-        const shift = i.customId.split("_")[2];
+      if (i.customId.startsWith("menu_clockin_models_")) {
+        const shift = i.customId.split("_")[3];
         clockInDraft.set(uid, { shift, modeles: i.values });
         return i.update({ content: clockInText(uid), components: clockInComponents(uid, shift) });
       }
 
       // Choix du modèle dans la fiche
-      if (i.customId === "fiche_modele") {
+      if (i.customId === "menu_fiche_modele") {
         const f = fiches.get(uid);
         const s = data.sessions[uid];
         if (!f || !s) return reply(i, { content: "Session expirée." });
@@ -441,7 +450,7 @@ client.on("interactionCreate", async (i) => {
     }
 
     // ---------- Modal ----------
-    if (i.isModalSubmit() && i.customId === "fiche_modal") {
+    if (i.isModalSubmit() && i.customId === "modal_fiche") {
       const f = fiches.get(uid);
       const s = data.sessions[uid];
       if (!f || !s) return reply(i, { content: "Session expirée." });
