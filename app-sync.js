@@ -18,7 +18,8 @@ async function rest(method, query, body, prefer) {
     method,
     headers: {
       apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
+      // ancienne clé service_role (JWT) : aussi en Bearer ; nouvelle clé sb_secret_… : apikey suffit
+      ...(SUPABASE_KEY.startsWith("eyJ") ? { Authorization: `Bearer ${SUPABASE_KEY}` } : {}),
       "Content-Type": "application/json",
       ...(prefer ? { Prefer: prefer } : {}),
     },
