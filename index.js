@@ -6,6 +6,7 @@ const {
 const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
+const appSync = require("./app-sync");
 
 // ================== CONFIG ==================
 const TOKEN = (process.env.DISCORD_TOKEN || "").trim();
@@ -37,6 +38,7 @@ const DEFAULT_DATA = {
   sessions: {}, // userId -> { shift, clockIn, modeles }
   historique: [], // shifts terminés (pour /stats)
   admins: [], // userIds des admins du bot
+  appLinks: {}, // userId -> id du chatteur dans l'app KL (Pointage)
 };
 
 let data = JSON.parse(JSON.stringify(DEFAULT_DATA));
@@ -270,6 +272,14 @@ const commands = [
     .setDefaultMemberPermissions(ADMIN_PERM)
     .addUserOption((o) => o.setName("membre").setDescription("L'admin à retirer").setRequired(true)),
   new SlashCommandBuilder()
+    .setName("lien_app")
+    .setDescription("Relier un membre Discord à son chatteur dans l'app KL (Pointage)")
+    .setDefaultMemberPermissions(ADMIN_PERM)
+    .addUserOption((o) => o.setName("membre").setDescription("Le membre Discord"))
+    .addStringOption((o) =>
+      o.setName("chatteur").setDescription("Son nom dans l'app").setAutocomplete(true)
+    ),
+  new SlashCommandBuilder()
     .setName("admin_list")
     .setDescription("Liste des admins du bot")
     .setDefaultMemberPermissions(ADMIN_PERM),
@@ -279,7 +289,7 @@ const commands = [
 const ADMIN_COMMANDS = [
   "panel", "chatteur_add", "chatteur_remove", "chatteur_list",
   "modele_add", "modele_remove", "modele_list",
-  "stats", "admin_add", "admin_remove", "admin_list",
+  "stats", "admin_add", "admin_remove", "admin_list", "lien_app",
 ];
 
 client.once("ready", async () => {
@@ -292,6 +302,16 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (i) => {
   try {
     const uid = i.user.id;
+
+    // ---------- Autocomplete (/lien_app) ----------
+    if (i.isAutocomplete()) {
+      if (!isAdmin(i) || !appSync.enabled()) return i.respond([]);
+      const q = appSync.norm(i.options.getFocused());
+      const list = (await appSync.appChatters())
+        .filter((c) => c.active && appSync.norm(c.name).includes(q))
+        .slice(0, 25);
+      return i.respond(list.map((c) => ({ name: c.name.slice(0, 100), value: c.id })));
+    }
 
     // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
@@ -363,6 +383,29 @@ client.on("interactionCreate", async (i) => {
           saveData();
           return reply(i, { content: `🗑️ <@${m.id}> n'est plus admin du bot.` });
         }
+        case "lien_app": {
+          if (!appSync.enabled())
+            return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+          const m = i.options.getUser("membre");
+          const cid = i.options.getString("chatteur");
+          const chatters = await appSync.appChatters();
+          const nameOf = (id) => chatters.find((c) => c.id === id)?.name || "chatteur supprimé";
+          if (!m) {
+            const txt =
+              Object.entries(data.appLinks).map(([u, id]) => `<@${u}> → ${nameOf(id)}`).join("\n") ||
+              "Aucun lien pour l'instant (ils se font tout seuls au premier clock in si le pseudo Discord = le nom dans l'app).";
+            return reply(i, { content: txt.slice(0, 2000) });
+          }
+          if (!cid) {
+            const id = data.appLinks[m.id];
+            return reply(i, { content: id ? `<@${m.id}> → **${nameOf(id)}**` : `<@${m.id}> n'est relié à aucun chatteur de l'app.` });
+          }
+          if (!chatters.find((c) => c.id === cid))
+            return reply(i, { content: "❌ Chatteur introuvable dans l'app, choisis-le dans la liste." });
+          data.appLinks[m.id] = cid;
+          saveData();
+          return reply(i, { content: `🔗 <@${m.id}> est relié à **${nameOf(cid)}** dans l'app.` });
+        }
         case "admin_list": {
           const txt = data.admins.map((a) => `<@${a}>`).join("\n") || "Aucun admin du bot (en plus des admins Discord).";
           return reply(i, { content: txt });
@@ -394,9 +437,10 @@ client.on("interactionCreate", async (i) => {
         await i.update({ content: "✅ Clock in enregistré !", components: [] });
         setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
         const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-        return ch.send(
+        await ch.send(
           `<@${uid}> CLOCK IN ✅ ${fmtTime(t)} | Shift ${shift} | Modèle(s) : ${data.sessions[uid].modeles.join(", ")}`
         );
+        return syncClockIn(i, shift, t);
       }
 
       // Clock In (bouton du salon)
@@ -548,12 +592,32 @@ async function finalizeClockOut(i) {
     userId: uid, shift: s.shift, clockIn: s.clockIn, clockOut: tOut,
     modeles: s.modeles, ventes: f.ventes,
   });
+  appSync.onClockOut({ app: s.app, t: tOut }).catch((e) => console.error("Pointage app (clock out) :", e.message));
   delete data.sessions[uid];
   fiches.delete(uid);
   saveData();
 
   await i.update({ content: "✅ Shift terminé, fiche envoyée !", components: [] });
   setTimeout(() => i.deleteReply().catch(() => {}), EPHEMERAL_TTL);
+}
+
+// Envoie le clock in dans l'onglet Pointage de l'app (si le lien est configuré)
+async function syncClockIn(i, shift, t) {
+  const uid = i.user.id;
+  try {
+    const names = [i.member?.displayName, i.user.globalName, i.user.username];
+    const r = await appSync.onClockIn({ links: data.appLinks, uid, names, shift, t });
+    if (r.skipped === "unlinked") {
+      console.warn(`Pointage app : ${names[0]} (${uid}) n'est relié à aucun chatteur`);
+      return reply(i, { content: "⚠️ Ton compte Discord n'est pas encore relié à l'app KL : ton pointage n'y apparaît pas. Préviens un admin (/lien_app)." });
+    }
+    if (r.chatterId && data.sessions[uid]) {
+      data.sessions[uid].app = { date: r.date, key: r.key };
+      saveData();
+    }
+  } catch (e) {
+    console.error("Pointage app (clock in) :", e.message);
+  }
 }
 
 // ================== STATS ==================
