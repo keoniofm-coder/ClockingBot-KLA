@@ -1,10 +1,16 @@
-// ================== LIEN AVEC L'APP KL (onglet Pointage) ==================
-// Chaque clock in écrit le pointage du chatteur dans l'app (table Supabase « docs »),
-// chaque clock out y ajoute l'heure de départ. Désactivé tant que SUPABASE_URL et
-// SUPABASE_SERVICE_KEY ne sont pas renseignés dans Railway.
+// ================== LIEN AVEC L'APP KL ==================
+// Le bot lit et écrit la table Supabase « docs » de l'app :
+//  - Pointage (att/<date>) : présent ou retard au clock in, heure de départ au clock out,
+//    absent si le chatteur n'a pas clock in ABSENT_AFTER_H heures après le début de son shift
+//  - Équipe (chatters/<id>.discordId) : quel compte Discord correspond à quel chatteur
+//  - config/discord : les membres du bot, pour pouvoir les relier depuis l'app
+//  - Planning (plan/<date>) : pour l'envoyer dans le salon planning
+//  - config/discordPost : demande d'envoi du planning faite depuis l'app
+// Désactivé tant que SUPABASE_URL et SUPABASE_SERVICE_KEY ne sont pas renseignés dans Railway.
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
 const SUPABASE_KEY = (process.env.SUPABASE_SERVICE_KEY || "").trim();
 const RETARD_TOLERANCE = Number(process.env.RETARD_TOLERANCE_MIN || 5); // minutes
+const ABSENT_AFTER_H = Number(process.env.ABSENT_AFTER_H ?? 4); // 0 = jamais d'absent automatique
 const TZ = "Europe/Paris";
 
 // Shifts du bot -> créneaux de l'app (heure de début, heure de Paris)
@@ -13,8 +19,8 @@ const START_OF = { matin: 8, aprem: 14, soir: 20, nuit: 2 };
 
 const enabled = () => !!(SUPABASE_URL && SUPABASE_KEY);
 
-async function rest(method, query, body, prefer) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/docs?${query}`, {
+async function http(method, path, body, prefer) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method,
     headers: {
       apikey: SUPABASE_KEY,
@@ -24,41 +30,87 @@ async function rest(method, query, body, prefer) {
       ...(prefer ? { Prefer: prefer } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10000),
   });
-  if (!res.ok) throw new Error(`Supabase ${method} ${res.status}: ${await res.text()}`);
-  return res.status === 204 || method !== "GET" ? null : res.json();
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Supabase ${method} ${res.status}: ${text}`);
+  return method === "GET" && text ? JSON.parse(text) : null;
 }
 const enc = encodeURIComponent;
+const rest = (method, query, body, prefer) => http(method, `docs?${query}`, body, prefer);
+
 async function getDoc(coll, id) {
   const rows = await rest("GET", `select=data&coll=eq.${enc(coll)}&id=eq.${enc(id)}`);
   return rows[0]?.data || null;
 }
+// Remplace tout le document
 async function putDoc(coll, id, data) {
   await rest("POST", "", [{ coll, id, data, updated_at: new Date().toISOString() }], "resolution=merge-duplicates");
 }
+// Fusionne un morceau dans le document, sans toucher au reste (même fonction que l'app : merge_doc).
+// base : document à créer s'il n'existe pas encore ; sans base, un document absent est une erreur.
+async function mergeDoc(coll, id, patch, base) {
+  const merge = () => http("POST", "rpc/merge_doc", { p_coll: coll, p_id: id, p_patch: patch });
+  try {
+    await merge();
+  } catch (e) {
+    if (!base || !/document absent/.test(e.message)) throw e;
+    await rest("POST", "", [{ coll, id, data: base, updated_at: new Date().toISOString() }], "resolution=ignore-duplicates");
+    await merge();
+  }
+}
+async function collMap(coll) {
+  const rows = await rest("GET", `select=id,data&coll=eq.${enc(coll)}`);
+  return Object.fromEntries(rows.map((r) => [r.id, r.data || {}]));
+}
 
-// ---------- Chatteurs de l'app (cache 5 min) ----------
+// ---------- Chatteurs de l'app (cache 1 min) ----------
 let chattersCache = { at: 0, list: [] };
-async function appChatters() {
-  if (Date.now() - chattersCache.at < 300e3) return chattersCache.list;
+async function appChatters(force) {
+  if (!force && Date.now() - chattersCache.at < 60e3) return chattersCache.list;
   const rows = await rest("GET", "select=id,data&coll=eq.chatters");
   const list = rows
-    .map((r) => ({ id: r.id, name: r.data?.name || "", active: r.data?.active !== false }))
+    .map((r) => ({
+      id: r.id,
+      name: r.data?.name || "",
+      active: r.data?.active !== false,
+      discordId: r.data?.discordId ? String(r.data.discordId) : "",
+    }))
     .filter((c) => c.name);
   chattersCache = { at: Date.now(), list };
   return list;
+}
+
+// ---------- Modèles et plateformes de l'app (cache 5 min) ----------
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+let catCache = { at: 0, v: null };
+async function appCatalog() {
+  if (catCache.v && Date.now() - catCache.at < 300e3) return catCache.v;
+  const [models, platforms] = await Promise.all([collMap("models"), collMap("platforms")]);
+  const platName = (pid) => platforms[pid]?.name || cap(String(pid).replace(/^p-/, ""));
+  const accounts = [];
+  for (const [mid, m] of Object.entries(models)) {
+    if (m.active === false) continue;
+    for (const pid of m.platforms || [])
+      accounts.push({
+        key: `${mid}|${pid}`, mid, pid, model: m.name || mid, platform: platName(pid),
+        devise: platforms[pid]?.currency === "USD" ? "$" : "€",
+      });
+  }
+  accounts.sort((a, b) => a.model.localeCompare(b.model, "fr") || a.platform.localeCompare(b.platform, "fr"));
+  catCache = { at: Date.now(), v: { models, platforms, accounts, platName } };
+  return catCache.v;
 }
 
 // « Kéoni 🌙 (Matin) » -> « keoni »
 const norm = (s) =>
   String(s || "")
     .replace(/\(.*?\)|\[.*?\]/g, " ")
-    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-// Trouve le chatteur de l'app qui porte le même nom que le pseudo Discord
-async function matchChatter(names) {
-  const list = (await appChatters()).filter((c) => c.active);
+// Trouve dans la liste le chatteur qui porte le même nom que le pseudo Discord
+function matchIn(list, names) {
   for (const n of names.map(norm).filter(Boolean)) {
     const same = list.filter((c) => norm(c.name) === n);
     if (same.length === 1) return same[0];
@@ -66,6 +118,46 @@ async function matchChatter(names) {
     if (first.length === 1) return first[0];
   }
   return null;
+}
+
+// ---------- Lien compte Discord <-> chatteur de l'app ----------
+// Relie (ou délie si cid est vide) : un compte Discord ne va qu'à un seul chatteur.
+async function linkDiscord(uid, cid) {
+  const list = await appChatters(true);
+  for (const c of list)
+    if (c.discordId === uid && c.id !== cid) await mergeDoc("chatters", c.id, { discordId: null });
+  if (cid) await mergeDoc("chatters", cid, { discordId: uid });
+  chattersCache.at = 0;
+}
+
+// Le chatteur de l'app relié à ce compte Discord. S'il n'y en a pas encore, on cherche un chatteur
+// libre qui porte le même nom que le pseudo et on les relie (link = false : on cherche sans relier).
+async function chatterOf(uid, names = [], link = true) {
+  const list = await appChatters();
+  const linked = list.find((c) => c.discordId === uid);
+  if (linked) return linked;
+  const c = matchIn(list.filter((x) => x.active && !x.discordId), names);
+  if (c && link) await linkDiscord(uid, c.id);
+  return c;
+}
+
+// Anciens liens /lien_app gardés dans data.json : recopiés une fois dans la fiche du chatteur
+async function migrateLinks(appLinks = {}) {
+  const list = await appChatters(true);
+  let n = 0;
+  for (const [uid, cid] of Object.entries(appLinks)) {
+    const c = list.find((x) => x.id === cid);
+    if (!c || c.discordId || list.some((x) => x.discordId === uid)) continue;
+    await mergeDoc("chatters", cid, { discordId: uid });
+    n++;
+  }
+  if (n) chattersCache.at = 0;
+  return n;
+}
+
+// Membres du bot visibles dans l'app (Équipe › Comptes Discord)
+async function publishMembers(members) {
+  await putDoc("config", "discord", { members, at: Date.now() });
 }
 
 // ---------- Dates à l'heure de Paris ----------
@@ -102,49 +194,126 @@ function shiftDay(slot, t) {
     .map((date) => ({ date, start: parisMs(date, START_OF[slot]) }))
     .sort((a, b) => Math.abs(t - a.start) - Math.abs(t - b.start))[0];
 }
-
-// Écrit une marque dans att/<date> en relisant le document juste avant (les autres marques restent).
-async function patchMark(date, key, fn) {
-  const doc = (await getDoc("att", date)) || { date, marks: {} };
-  const marks = doc.marks || {};
-  const next = fn(marks[key]);
-  if (!next) return null;
-  await putDoc("att", date, { ...doc, date, marks: { ...marks, [key]: next } });
-  return next;
+// Minutes de retard par rapport au début du shift
+function lateness(slot, t) {
+  const { date, start } = shiftDay(slot, t);
+  const late = Math.max(0, Math.round((t - start) / 60000));
+  return { date, start, late, isLate: late > RETARD_TOLERANCE };
 }
 
-// ---------- API pour index.js ----------
-// links : data.appLinks (userId Discord -> id du chatteur dans l'app)
-async function onClockIn({ links, uid, names, shift, t }) {
+// ---------- Planning et day off ----------
+async function planOf(date) {
+  const doc = await getDoc("plan", date);
+  return Object.entries(doc?.shifts || {})
+    .filter(([, s]) => s && typeof s === "object" && s.chatterId && s.slot)
+    .map(([sid, s]) => ({ sid, ...s }));
+}
+async function offsOn(date) {
+  const rows = await rest("GET", `select=data&coll=eq.offs&data->>date=eq.${enc(date)}`);
+  return new Set(rows.map((r) => r.data?.chatterId).filter(Boolean));
+}
+// Tout ce qu'il faut pour afficher le planning d'un jour
+async function planningDay(date) {
+  const [plan, offs, chatters, cat] = await Promise.all([planOf(date), offsOn(date), appChatters(), appCatalog()]);
+  return { date, plan, offs: [...offs], chatters, models: cat.models, platName: cat.platName };
+}
+// Comptes (modèle|plateforme) prévus au planning pour ce chatteur sur ce shift
+async function plannedAccts(uid, names, shift, t) {
+  const slot = SLOT_OF[shift];
+  const c = slot && (await chatterOf(uid, names, false));
+  if (!c) return [];
+  const { date } = shiftDay(slot, t);
+  const plan = await planOf(date);
+  return [...new Set(plan.filter((s) => s.chatterId === c.id && s.slot === slot).flatMap((s) => s.accts || []))];
+}
+
+// ---------- Pointage ----------
+const markKey = (slot, cid) => `${slot}_${cid}`;
+async function readMarks(date) {
+  return (await getDoc("att", date))?.marks || {};
+}
+async function writeMark(date, key, mark) {
+  await mergeDoc("att", date, { date, marks: { [key]: mark } }, { date, marks: {} });
+}
+const presentMark = (chatterId, slot, t, late, prev) => {
+  const r = late > RETARD_TOLERANCE;
+  return {
+    chatterId, slot, status: r ? "retard" : "present", min: r ? late : "",
+    note: prev?.note || "", in: t, out: null, at: Date.now(), src: "discord", auto: null,
+  };
+};
+
+async function onClockIn({ uid, names, shift, t }) {
   if (!enabled()) return { skipped: "off" };
   const slot = SLOT_OF[shift];
   if (!slot) return { skipped: "shift" };
-  let chatterId = links[uid];
-  if (!chatterId) {
-    const c = await matchChatter(names);
-    if (!c) return { skipped: "unlinked" };
-    chatterId = links[uid] = c.id;
-  }
-  const { date, start } = shiftDay(slot, t);
-  const late = Math.max(0, Math.round((t - start) / 60000));
-  const key = `${slot}_${chatterId}`;
-  const mark = await patchMark(date, key, (prev) => {
-    // un pointage déjà fait à la main dans l'app n'est jamais écrasé
-    if (prev?.status && prev.src !== "discord") return null;
-    return {
-      chatterId, slot,
-      status: late > RETARD_TOLERANCE ? "retard" : "present",
-      min: late > RETARD_TOLERANCE ? late : "",
-      note: prev?.note || "",
-      in: t, at: Date.now(), src: "discord",
-    };
-  });
-  return { chatterId, date, slot, key, written: !!mark, late };
+  const c = await chatterOf(uid, names);
+  if (!c) return { skipped: "unlinked" };
+  const { date, late } = lateness(slot, t);
+  const key = markKey(slot, c.id);
+  const prev = (await readMarks(date))[key];
+  // un pointage déjà fait à la main dans l'app n'est jamais écrasé (un absent posé par le bot, si)
+  if (prev?.status && prev.src !== "discord") return { chatterId: c.id, name: c.name, date, slot, key, late, written: false };
+  await writeMark(date, key, presentMark(c.id, slot, t, late, prev));
+  return { chatterId: c.id, name: c.name, date, slot, key, late, written: true };
 }
 
 async function onClockOut({ app, t }) {
   if (!enabled() || !app?.key) return;
-  await patchMark(app.date, app.key, (prev) => (prev ? { ...prev, out: t } : null));
+  const prev = (await readMarks(app.date))[app.key];
+  if (prev) await writeMark(app.date, app.key, { out: t });
 }
 
-module.exports = { enabled, appChatters, onClockIn, onClockOut, shiftDay, norm, parisParts };
+// Absents automatiques : chatteur prévu au planning, relié à Discord, pas en day off, sans pointage
+// ABSENT_AFTER_H heures après le début de son shift. clockIns : les clock in vus par le bot, pour
+// rattraper un pointage qui n'aurait pas pu s'écrire au moment du clock in.
+async function sweepAbsents({ now = Date.now(), clockIns = [] } = {}) {
+  if (!enabled() || !(ABSENT_AFTER_H > 0)) return [];
+  const today = parisParts(now).date;
+  const due = [];
+  for (const date of [addDays(today, -1), today])
+    for (const slot of Object.keys(START_OF)) {
+      const start = parisMs(date, START_OF[slot]);
+      if (now >= start + ABSENT_AFTER_H * 3600e3 && now < start + 20 * 3600e3) due.push({ date, slot });
+    }
+  if (!due.length) return [];
+  const byId = Object.fromEntries((await appChatters()).map((c) => [c.id, c]));
+  const done = [];
+  for (const date of [...new Set(due.map((x) => x.date))]) {
+    const [plan, marks, offs] = await Promise.all([planOf(date), readMarks(date), offsOn(date)]);
+    for (const { slot } of due.filter((x) => x.date === date))
+      for (const s of plan.filter((p) => p.slot === slot)) {
+        const c = byId[s.chatterId];
+        const key = c && markKey(slot, c.id);
+        if (!c || !c.active || !c.discordId || marks[key]?.status || offs.has(c.id)) continue;
+        const ci = clockIns.find((x) => x.uid === c.discordId && SLOT_OF[x.shift] === slot && shiftDay(slot, x.t).date === date);
+        const mark = ci
+          ? presentMark(c.id, slot, ci.t, lateness(slot, ci.t).late, null)
+          : { chatterId: c.id, slot, status: "absent", min: "", note: "", at: now, src: "discord", auto: true };
+        await writeMark(date, key, mark);
+        marks[key] = mark;
+        done.push({ date, slot, chatterId: c.id, name: c.name, status: mark.status });
+      }
+  }
+  return done;
+}
+
+// ---------- Envoi du planning demandé depuis l'app ----------
+async function pendingPost() {
+  const d = await getDoc("config", "discordPost");
+  return d && d.status === "pending" && d.date ? d : null;
+}
+// Ne remplace la demande que si l'app n'en a pas fait une nouvelle entre-temps
+async function finishPost(req, patch) {
+  await rest("PATCH", `coll=eq.config&id=eq.discordPost&data->>at=eq.${enc(String(req.at))}`, {
+    data: { ...req, ...patch }, updated_at: new Date().toISOString(),
+  });
+}
+
+module.exports = {
+  enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
+  appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers,
+  onClockIn, onClockOut, sweepAbsents, lateness, shiftDay,
+  planningDay, plannedAccts, pendingPost, finishPost,
+  norm, parisParts, parisMs, addDays,
+};
