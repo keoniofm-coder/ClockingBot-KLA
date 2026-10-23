@@ -196,9 +196,11 @@ function clockInView(uid) {
       ? `Modèle(s) : **${modelesTxt(d.modeles)}**. Clique sur **Valider**.`
       : "Choisis une ou plusieurs modèles, puis **Valider**."
   );
+  // bouton au-dessus du menu : Discord ouvre la liste vers le bas, elle cacherait le bouton
   return {
     content: lines.join("\n"),
     components: [
+      row(button(`ci_ok_${d.shift}`, "Valider le clock in", "✅", ButtonStyle.Success, !d.modeles.length)),
       row(
         new StringSelectMenuBuilder()
           .setCustomId(`ci_models_${d.shift}`)
@@ -207,7 +209,6 @@ function clockInView(uid) {
           .setMaxValues(names.length)
           .addOptions(names.map((n) => ({ label: withEmoji(n), value: n, default: d.modeles.includes(n) })))
       ),
-      row(button(`ci_ok_${d.shift}`, "Valider le clock in", "✅", ButtonStyle.Success, !d.modeles.length)),
     ],
   };
 }
@@ -228,18 +229,18 @@ function clockOutView(uid) {
     ].filter(Boolean).join("\n"),
     components: [
       row(
+        fiche.length
+          ? button("co_go", "Remplir la fiche et terminer", "📝", ButtonStyle.Primary, !d.modeles.length)
+          : button("co_go", "Terminer mon shift", "🔴", ButtonStyle.Danger, !d.modeles.length),
+        button("co_cancel", "Annuler", null, ButtonStyle.Secondary)
+      ),
+      row(
         new StringSelectMenuBuilder()
           .setCustomId("co_models")
           .setPlaceholder("Modèles du shift (plusieurs possibles)")
           .setMinValues(1)
           .setMaxValues(opts.length)
           .addOptions(opts.map((n) => ({ label: withEmoji(n), value: n, default: d.modeles.includes(n) })))
-      ),
-      row(
-        fiche.length
-          ? button("co_go", "Remplir la fiche et terminer", "📝", ButtonStyle.Primary, !d.modeles.length)
-          : button("co_go", "Terminer mon shift", "🔴", ButtonStyle.Danger, !d.modeles.length),
-        button("co_cancel", "Annuler", null, ButtonStyle.Secondary)
       ),
     ],
   };
