@@ -22,6 +22,8 @@ const PLANNING_CHANNEL_ID = (process.env.PLANNING_CHANNEL_ID || "155394667314151
 const PLANNING_AUTO = (process.env.PLANNING_AUTO || "").trim();
 // Modèles qui ont une fiche de fin de shift dans le salon ventes (les autres n'en ont pas)
 const FICHE_MODELES = new RegExp(process.env.FICHE_MODELES || "uncove", "i");
+// Récap de l'effectif dans le salon clocking, N minutes après le début de chaque shift (0 = pas de récap)
+const EFFECTIF_APRES = Math.min(300, Math.max(0, Number(process.env.EFFECTIF_APRES_MIN ?? 20) || 0));
 const TZ = "Europe/Paris";
 const EPHEMERAL_TTL = 25000; // 25 secondes
 const EPHEMERAL = MessageFlags.Ephemeral;
@@ -85,6 +87,16 @@ const mentions = (ids) => ids.map((u) => `<@${u}>`).join(", ");
 const modelesTxt = (names) => names.map(withEmoji).join(", ");
 const chunk = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, k) => list.slice(k * n, k * n + n));
 // « Zoé (Inflow) » -> « zoe inflow »
+const fit = (lines, max = 1024) => {
+  let out = "";
+  for (const l of lines) {
+    if (out.length + l.length + 3 > max) return out + "\n…";
+    out += (out ? "\n" : "") + l;
+  }
+  return out;
+};
+// Shift en cours à l'instant t (heure de Paris)
+const shiftAt = (t) => SHIFT_ORDER.find((k) => (appSync.parisParts(t).h - SHIFTS[k].start + 24) % 24 < 6);
 const kNorm = (s) =>
   String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const namesOf = (i) => [i.member?.displayName || i.member?.nick, i.user.globalName, i.user.username].filter(Boolean);
@@ -311,6 +323,54 @@ for (const [name, sh] of Object.entries(SHIFTS)) {
   cron.schedule(`45 ${hour} * * *`, () => announceShift(name).catch((e) => console.error("Annonce :", e.message)), { timezone: TZ });
 }
 
+// ================== EFFECTIF (quelques minutes après le début de chaque shift) ==================
+// Membres qui ont fait clock in sur ce shift (en cours ou terminé)
+function clockInsOf(name, date) {
+  const slot = appSync.SLOT_OF[name];
+  const start = appSync.parisMs(date, SHIFTS[name].start);
+  const same = (t) => Math.abs(t - start) < 12 * 3600e3 && appSync.shiftDay(slot, t).date === date;
+  return new Set([
+    ...data.historique.filter((h) => h.shift === name && same(h.clockIn)).map((h) => h.userId),
+    ...Object.entries(data.sessions).filter(([, s]) => s.shift === name && same(s.clockIn)).map(([uid]) => uid),
+  ]);
+}
+// Qui est là sur ce shift, sur combien de prévus, et qui manque
+async function effectifView(name, date) {
+  const sh = SHIFTS[name];
+  const slot = appSync.SLOT_OF[name];
+  const seen = clockInsOf(name, date);
+  // prévus : planning de l'app (hors day off), sinon les chatteurs du bot sur ce shift
+  let staff = appSync.enabled() ? await appSync.slotStaff(date, slot) : [];
+  if (!staff.length) staff = Object.keys(data.chatteurs).filter((u) => data.chatteurs[u] === name).map((u) => ({ discordId: u, name: nameOf(u) }));
+  const due = staff.filter((p) => !p.off);
+  const who = (p) => (p.discordId ? `<@${p.discordId}>` : `**${p.name}**`);
+  // présent : clock in sur Discord, ou pointé présent / retard / coupure dans l'app
+  const isHere = (p) => seen.has(p.discordId) || ["present", "retard", "coupure"].includes(p.mark?.status);
+  const here = due.filter(isHere).map(who);
+  const missing = due.filter((p) => !isHere(p)).map(who);
+  // clock in sur ce shift sans être prévu : listés avec les présents, sans compter dans le total
+  const dueIds = new Set(due.map((p) => p.discordId));
+  const extra = [...seen].filter((u) => !dueIds.has(u)).map((u) => `<@${u}> (en plus)`);
+  const n = here.length, total = due.length;
+  const embed = new EmbedBuilder()
+    .setColor(!total ? 0x8a8f98 : n >= total ? 0x5bae8c : n ? 0xe0ae4e : 0xd63a3a)
+    .setTitle(`👥 Effectif ${sh.emoji} ${name} · ${n}/${total}`);
+  if (!total && !extra.length) embed.setDescription("_Personne de prévu sur ce shift._");
+  if (here.length || extra.length) embed.addFields({ name: "✅ Présents", value: fit([...here, ...extra]) });
+  if (missing.length) embed.addFields({ name: "❌ Manquants", value: fit(missing) });
+  return { embeds: [embed], components: [row(button(`eff_${name}_${date}`, "Actualiser", "🔄", ButtonStyle.Secondary))], allowedMentions: { parse: [] } };
+}
+async function postEffectif(name) {
+  const { date } = appSync.shiftDay(appSync.SLOT_OF[name], Date.now());
+  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+  await ch.send(await effectifView(name, date));
+}
+if (EFFECTIF_APRES > 0)
+  for (const [name, sh] of Object.entries(SHIFTS)) {
+    const m = sh.start * 60 + EFFECTIF_APRES;
+    cron.schedule(`${m % 60} ${Math.floor(m / 60) % 24} * * *`, () => postEffectif(name).catch((e) => console.error("Effectif :", e.message)), { timezone: TZ });
+  }
+
 // ================== PLANNING -> DISCORD ==================
 async function postPlanning(date) {
   const { embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
@@ -434,6 +494,13 @@ const commands = [
       o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
     ),
   adminCmd("admins", "Voir, ajouter ou retirer des admins du bot"),
+  adminCmd("coupure", "Noter une coupure : notifie le chatteur et le met en « Coupure » dans le pointage de l'app")
+    .addUserOption((o) => o.setName("chatteur").setDescription("Le chatteur").setRequired(true))
+    .addIntegerOption((o) => o.setName("minutes").setDescription("Durée de la coupure, en minutes").setMinValue(1).setMaxValue(720))
+    .addStringOption((o) => o.setName("raison").setDescription("La raison (le chatteur la verra)").setMaxLength(200))
+    .addStringOption((o) =>
+      o.setName("shift").setDescription("Le shift concerné (par défaut : celui en cours)").addChoices(...shiftChoices)
+    ),
 ].map((c) => c.toJSON());
 
 client.once(Events.ClientReady, async () => {
@@ -810,6 +877,8 @@ async function handleInteraction(i) {
         }
         case "lien_app":
           return lienApp(i);
+        case "coupure":
+          return coupure(i);
       }
     }
 
@@ -817,6 +886,13 @@ async function handleInteraction(i) {
     if (i.isButton()) {
       const id = i.customId;
       if (id.startsWith("adm_")) return onPanel(i);
+      // Actualiser le récap de l'effectif
+      if (id.startsWith("eff_")) {
+        const [, name, date] = id.split("_");
+        if (!SHIFTS[name] || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return done(i, "Ce message a expiré.", 8000);
+        await i.deferUpdate();
+        return i.editReply(await effectifView(name, date));
+      }
       // Clock Out (bouton du salon)
       if (id === "btn_clockout") return startClockOut(i);
       // Clock In (bouton du salon)
@@ -907,6 +983,60 @@ async function lienApp(i) {
   if (!c) return done(i, "❌ Chatteur introuvable dans l'app, choisis-le dans la liste.");
   await appSync.linkDiscord(m.id, cid);
   return done(i, `🔗 <@${m.id}> est relié à **${c.name}** dans l'app.`);
+}
+
+// ================== COUPURE ==================
+async function coupure(i) {
+  const m = i.options.getUser("chatteur");
+  if (m.bot) return reply(i, { content: "❌ Choisis un chatteur, pas un bot." });
+  const min = i.options.getInteger("minutes");
+  const raison = (i.options.getString("raison") || "").trim();
+  const t = Date.now();
+  const s = data.sessions[m.id];
+  // par défaut : le shift sur lequel il est clock in, sinon celui en cours
+  const shift = i.options.getString("shift") || s?.shift || shiftAt(t);
+  const date = appSync.shiftDay(appSync.SLOT_OF[shift], s?.shift === shift ? s.clockIn : t).date;
+  await i.deferReply({ flags: EPHEMERAL });
+  remember(m, i.options.getMember("chatteur"));
+
+  let point = "";
+  if (!appSync.enabled()) point = "⚠️ Lien avec l'app désactivé : pas noté au pointage.";
+  else
+    try {
+      const names = [data.membres[m.id]?.name, m.globalName, m.username].filter(Boolean);
+      const r = await appSync.markCoupure({ uid: m.id, names, slot: appSync.SLOT_OF[shift], date, min, note: raison, t });
+      point = r.skipped === "unlinked"
+        ? "⚠️ Ce compte Discord n'est relié à aucun chatteur de l'app : pas noté au pointage (à relier dans Équipe › Comptes Discord)."
+        : `📋 Noté « Coupure » au pointage de l'app (${r.name}).`;
+    } catch (e) {
+      console.error("Pointage app (coupure) :", e.message);
+      point = `⚠️ Pas noté au pointage : ${String(e.message || e).slice(0, 200)}`;
+    }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x4f8fd6)
+    .setTitle("✂️ Coupure")
+    .setDescription(`<@${m.id}>, une coupure a été notée sur ton shift.`)
+    .addFields(
+      { name: "Shift", value: `${SHIFTS[shift].emoji} ${shift} · ${planning.dayLabel(date)}`, inline: true },
+      ...(min ? [{ name: "Durée", value: `${min} min`, inline: true }] : []),
+      ...(raison ? [{ name: "Raison", value: raison }] : [])
+    )
+    .setTimestamp(t);
+  let sent = "";
+  try {
+    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+    await ch.send({ content: `<@${m.id}>`, embeds: [embed], allowedMentions: { users: [m.id] } });
+    sent = `🔔 Notifié dans <#${CLOCKING_CHANNEL_ID}>.`;
+  } catch (e) {
+    console.error("Coupure (salon clocking) :", e.message);
+    sent = `⚠️ Message pas envoyé dans le salon clocking : ${String(e.message || e).slice(0, 200)}`;
+  }
+  return done(
+    i,
+    [`✂️ Coupure pour <@${m.id}> · ${SHIFTS[shift].emoji} ${shift} du ${planning.dayLabel(date)}${min ? ` · ${min} min` : ""}`, point, sent].join("\n"),
+    60000
+  );
 }
 
 // ================== CLOCK IN ==================
@@ -1042,4 +1172,4 @@ async function finalizeClockOut(i, ventes) {
 
 if (require.main === module) client.login(TOKEN);
 // pour les tests
-module.exports = { client, handleInteraction, postPlanning, pollPost, sweep, parseDay, dayChoices, getData: () => data, SHIFTS };
+module.exports = { client, handleInteraction, postPlanning, postEffectif, pollPost, sweep, parseDay, dayChoices, getData: () => data, SHIFTS };

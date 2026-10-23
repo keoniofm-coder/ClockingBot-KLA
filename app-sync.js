@@ -252,8 +252,9 @@ async function onClockIn({ uid, names, shift, t }) {
   const { date, late } = lateness(slot, t);
   const key = markKey(slot, c.id);
   const prev = (await readMarks(date))[key];
-  // un pointage déjà fait à la main dans l'app n'est jamais écrasé (un absent posé par le bot, si)
-  if (prev?.status && prev.src !== "discord") return { chatterId: c.id, name: c.name, date, slot, key, late, written: false };
+  // un pointage déjà fait à la main dans l'app n'est jamais écrasé (un absent posé par le bot, si),
+  // ni une coupure notée avec /coupure (le chatteur qui revient après une coupure reste en coupure)
+  if (prev?.status && (prev.src !== "discord" || prev.status === "coupure")) return { chatterId: c.id, name: c.name, date, slot, key, late, written: false };
   await writeMark(date, key, presentMark(c.id, slot, t, late, prev));
   return { chatterId: c.id, name: c.name, date, slot, key, late, written: true };
 }
@@ -262,6 +263,27 @@ async function onClockOut({ app, t }) {
   if (!enabled() || !app?.key) return;
   const prev = (await readMarks(app.date))[app.key];
   if (prev) await writeMark(app.date, app.key, { out: t });
+}
+
+// Coupure notée par un admin (/coupure) : statut « Coupure » dans le pointage de l'app, en gardant
+// les heures de clock in / out déjà enregistrées
+async function markCoupure({ uid, names, slot, date, min, note, t = Date.now() }) {
+  if (!enabled()) return { skipped: "off" };
+  const c = await chatterOf(uid, names);
+  if (!c) return { skipped: "unlinked" };
+  const key = markKey(slot, c.id);
+  const patch = { chatterId: c.id, slot, status: "coupure", min: min || "", at: t, src: "discord", auto: null };
+  if (note) patch.note = note;
+  await writeMark(date, key, patch);
+  return { chatterId: c.id, name: c.name, date, slot, key };
+}
+
+// Effectif d'un shift : chatteurs prévus au planning de l'app, avec leur day off et leur pointage
+async function slotStaff(date, slot) {
+  const [plan, marks, offs, chatters] = await Promise.all([planOf(date), readMarks(date), offsOn(date), appChatters(true)]);
+  const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
+  const ids = [...new Set(plan.filter((p) => p.slot === slot && byId[p.chatterId] && byId[p.chatterId].active !== false).map((p) => p.chatterId))];
+  return ids.map((id) => ({ ...byId[id], off: offs.has(id), mark: marks[markKey(slot, id)] || null }));
 }
 
 // Absents automatiques : chatteur prévu au planning, relié à Discord, pas en day off, sans pointage
@@ -313,7 +335,7 @@ async function finishPost(req, patch) {
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers,
-  onClockIn, onClockOut, sweepAbsents, lateness, shiftDay,
+  onClockIn, onClockOut, sweepAbsents, markCoupure, slotStaff, lateness, shiftDay,
   planningDay, plannedAccts, pendingPost, finishPost,
   norm, parisParts, parisMs, addDays,
 };
