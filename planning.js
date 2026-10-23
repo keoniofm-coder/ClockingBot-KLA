@@ -17,6 +17,20 @@ const boxesL = (l) => (!l.length ? "" : l.includes("all") ? "All Inbox" : "Box "
 const boxIdx = (l) => (l.length ? BOX_ORDER.indexOf(l[0]) : 99);
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+// Repère de chaque modèle, juste après son prénom (modifiable avec MODEL_EMOJIS="anna=🍑,axelle=🍒,zoe=💎")
+const key1 = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const MODEL_EMOJIS = Object.fromEntries(
+  (process.env.MODEL_EMOJIS || "anna=🍑,axelle=🍒,zoe=💎")
+    .split(",").map((x) => x.split("=").map((y) => y.trim()))
+    .filter(([k, e]) => k && e).map(([k, e]) => [key1(k), e])
+);
+// « Zoé (Uncove) » -> « Zoé 💎 (Uncove) » (rien à faire si l'emoji y est déjà)
+function withEmoji(name) {
+  const s = String(name || "");
+  const m = s.match(/^(\S+)(.*)$/s);
+  const e = m && MODEL_EMOJIS[key1(m[1])];
+  return !e || s.includes(e) ? s : `${m[1]} ${e}${m[2]}`;
+}
 // « jeudi 23 octobre »
 const dayLabel = (date) =>
   new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
@@ -46,7 +60,7 @@ function slotLines(day, slot) {
     const g = groups.get(mid);
     const plats = [...new Set([...g.values()].flatMap((e) => [...e.plats]))];
     const samePlat = [...g.values()].every((e) => e.plats.size === plats.length);
-    lines.push(`**${mName(mid)}**${samePlat && plats.length ? ` · ${plats.join(" + ")}` : ""}`);
+    lines.push(`**${withEmoji(mName(mid))}**${samePlat && plats.length ? ` · ${plats.join(" + ")}` : ""}`);
     const ids = [...g.keys()].sort((a, b) => boxIdx(g.get(a).boxes) - boxIdx(g.get(b).boxes) || byId[a].name.localeCompare(byId[b].name, "fr"));
     for (const id of ids) {
       const e = g.get(id);
@@ -102,4 +116,4 @@ function chunkEmbeds(embeds) {
   return out;
 }
 
-module.exports = { SLOTS, planningEmbeds, slotLines, chunkEmbeds, dayLabel, boxList, boxesL, cap };
+module.exports = { SLOTS, planningEmbeds, slotLines, chunkEmbeds, dayLabel, boxList, boxesL, cap, withEmoji };

@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const appSync = require("./app-sync");
 const planning = require("./planning");
+const { withEmoji } = planning;
 
 // ================== CONFIG ==================
 const TOKEN = (process.env.DISCORD_TOKEN || "").trim();
@@ -81,6 +82,7 @@ const needsFiche = (name) => FICHE_MODELES.test(`${name} ${modeleOf(name)?.app |
 const shiftTxt = (shift) => `${SHIFTS[shift]?.emoji || ""} Shift ${shift} (${SHIFTS[shift]?.label || "?"})`;
 const plS = (n) => (n > 1 ? "s" : "");
 const mentions = (ids) => ids.map((u) => `<@${u}>`).join(", ");
+const modelesTxt = (names) => names.map(withEmoji).join(", ");
 const chunk = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, k) => list.slice(k * n, k * n + n));
 // « Zoé (Inflow) » -> « zoe inflow »
 const kNorm = (s) =>
@@ -176,10 +178,10 @@ function clockInView(uid) {
   const d = clockInDraft.get(uid);
   const names = data.modeles.map((m) => m.name).slice(0, 25);
   const lines = [`${SHIFTS[d.shift].emoji} **Clock in · Shift ${d.shift}** (${SHIFTS[d.shift].label})`];
-  if (d.plan.length) lines.push(`📋 Au planning : **${d.plan.join(", ")}**`);
+  if (d.plan.length) lines.push(`📋 Au planning : **${modelesTxt(d.plan)}**`);
   lines.push(
     d.modeles.length
-      ? `Modèle(s) : **${d.modeles.join(", ")}**. Clique sur **Valider**.`
+      ? `Modèle(s) : **${modelesTxt(d.modeles)}**. Clique sur **Valider**.`
       : "Choisis une ou plusieurs modèles, puis **Valider**."
   );
   return {
@@ -191,7 +193,7 @@ function clockInView(uid) {
           .setPlaceholder("Tes modèles (plusieurs possibles)")
           .setMinValues(1)
           .setMaxValues(names.length)
-          .addOptions(names.map((n) => ({ label: n, value: n, default: d.modeles.includes(n) })))
+          .addOptions(names.map((n) => ({ label: withEmoji(n), value: n, default: d.modeles.includes(n) })))
       ),
       row(button(`ci_ok_${d.shift}`, "Valider le clock in", "✅", ButtonStyle.Success, !d.modeles.length)),
     ],
@@ -210,7 +212,7 @@ function clockOutView(uid) {
     content: [
       `🔴 **Clock out · Shift ${s.shift}**, arrivé à ${fmtTime(s.clockIn)} (${fmtDuration(Date.now() - s.clockIn)})`,
       "Sur quelles modèles as-tu bossé ? Ajoute celles où tu as aidé en plus pendant le shift.",
-      fiche.length ? `📝 Fiche de ventes à remplir pour **${fiche.join(", ")}**.` : "",
+      fiche.length ? `📝 Fiche de ventes à remplir pour **${modelesTxt(fiche)}**.` : "",
     ].filter(Boolean).join("\n"),
     components: [
       row(
@@ -219,7 +221,7 @@ function clockOutView(uid) {
           .setPlaceholder("Modèles du shift (plusieurs possibles)")
           .setMinValues(1)
           .setMaxValues(opts.length)
-          .addOptions(opts.map((n) => ({ label: n, value: n, default: d.modeles.includes(n) })))
+          .addOptions(opts.map((n) => ({ label: withEmoji(n), value: n, default: d.modeles.includes(n) })))
       ),
       row(
         fiche.length
@@ -233,7 +235,7 @@ function clockOutView(uid) {
 
 // Fiche de fin de shift : ventes + tips par modèle (5 champs max dans une fenêtre Discord)
 function ficheModal(models) {
-  const short = (n) => (n.length > 20 ? n.slice(0, 19) + "…" : n);
+  const short = (n) => (withEmoji(n).length > 20 ? withEmoji(n).slice(0, 19) + "…" : withEmoji(n));
   const input = (id, label, ph, required) =>
     row(new TextInputBuilder().setCustomId(id).setLabel(label).setPlaceholder(ph).setStyle(TextInputStyle.Short).setRequired(required).setMaxLength(20));
   const rows = [];
@@ -244,7 +246,7 @@ function ficheModal(models) {
       rows.push(input(`t_${k}`, `${pre}Tips (${deviseOf(n)})`, "ex : 20 (vide = 0)", false));
     });
   else models.forEach((n, k) => rows.push(input(`vt_${k}`, `${short(n)} · ventes / tips`, "ex : 185 / 20", true)));
-  const title = models.length === 1 ? `Fiche · ${models[0]}` : "Fiche de fin de shift";
+  const title = models.length === 1 ? `Fiche · ${withEmoji(models[0])}` : "Fiche de fin de shift";
   return new ModalBuilder().setCustomId("co_fiche").setTitle(title.slice(0, 45)).addComponents(...rows);
 }
 // « 1 234,50 € » -> 1234.5 ; vide -> 0 ; invalide -> NaN
@@ -259,8 +261,8 @@ function clockEmbed(kind, uid, s, t, late = 0) {
   const sh = SHIFTS[s.shift] || {};
   const lines =
     kind === "in"
-      ? [`✅ <@${uid}> **Clock in** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${s.modeles.join(", ")}`]
-      : [`🔴 <@${uid}> **Clock out** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${fmtDuration(t - s.clockIn)} · ${s.modeles.join(", ")}`];
+      ? [`✅ <@${uid}> **Clock in** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${modelesTxt(s.modeles)}`]
+      : [`🔴 <@${uid}> **Clock out** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${fmtDuration(t - s.clockIn)} · ${modelesTxt(s.modeles)}`];
   if (late) lines.push(`⏰ ${late} min de retard`);
   return new EmbedBuilder().setColor(kind === "in" ? 0x2ecc71 : 0xe74c3c).setDescription(lines.join("\n"));
 }
@@ -269,7 +271,7 @@ function ficheEmbed(uid, v) {
   const d = deviseOf(v.modele);
   return new EmbedBuilder()
     .setColor(0xd63a3a)
-    .setTitle(`💰 ${v.modele}`)
+    .setTitle(`💰 ${withEmoji(v.modele)}`)
     .setDescription(`<@${uid}>`)
     .addFields(
       { name: "Ventes", value: fmtMoney(v.montant, d), inline: true },
@@ -410,69 +412,29 @@ async function sweep() {
 }
 
 // ================== COMMANDES ==================
+// Toutes réservées aux admins : les chatteurs n'utilisent que les boutons Clock In / Clock Out du salon clocking
 const shiftChoices = Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k }));
-const periodeChoices = [
-  { name: "Aujourd'hui", value: "today" },
-  { name: "7 derniers jours", value: "week" },
-  { name: "15 derniers jours", value: "15days" },
-  { name: "30 derniers jours", value: "month" },
-  { name: "Tout", value: "all" },
-];
 const adminCmd = (name, description) =>
   new SlashCommandBuilder().setName(name).setDescription(description).setDefaultMemberPermissions(ADMIN_PERM);
 
 const commands = [
-  // ---- Chatteurs (tout le monde) ----
-  new SlashCommandBuilder()
-    .setName("clockin")
-    .setDescription("Commencer ton shift")
-    .addStringOption((o) =>
-      o.setName("shift").setDescription("Ton shift").setRequired(true).addChoices(...shiftChoices)
-    ),
-  new SlashCommandBuilder().setName("clockout").setDescription("Terminer ton shift"),
-  new SlashCommandBuilder()
-    .setName("mystats")
-    .setDescription("Voir tes propres stats")
-    .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
-    ),
-
-  // ---- Admins uniquement ----
-  adminCmd("panel", "Envoyer le message de shift dans le salon clocking (test)")
-    .addStringOption((o) =>
-      o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
-    ),
+  adminCmd("chatteurs", "Voir, ajouter ou retirer des chatteurs du clocking"),
+  adminCmd("modeles", "Voir, ajouter ou retirer des modèles"),
   adminCmd("planning", "Envoyer le planning d'un jour dans le salon planning")
     .addStringOption((o) =>
       o.setName("jour").setDescription("Le jour : aujourd'hui, demain, 23/10…").setRequired(true).setAutocomplete(true)
     ),
-  adminCmd("chatteur_add", "Ajouter des chatteurs au clocking (ou changer leur shift)"),
-  adminCmd("chatteur_remove", "Retirer des chatteurs du clocking"),
-  adminCmd("chatteur_list", "Liste des chatteurs"),
-  adminCmd("modele_add", "Ajouter des modèles"),
-  adminCmd("modele_remove", "Retirer des modèles"),
-  adminCmd("modele_list", "Liste des modèles"),
-  adminCmd("stats", "Statistiques des ventes (admin)")
-    .addStringOption((o) =>
-      o.setName("periode").setDescription("Période").setRequired(true).addChoices(...periodeChoices)
-    )
-    .addUserOption((o) => o.setName("membre").setDescription("Filtrer sur un chatteur")),
-  adminCmd("admin_add", "Ajouter des admins du bot"),
-  adminCmd("admin_remove", "Retirer des admins du bot"),
-  adminCmd("admin_list", "Liste des admins du bot"),
   adminCmd("lien_app", "Relier un membre Discord à son chatteur dans l'app KL (Pointage)")
     .addUserOption((o) => o.setName("membre").setDescription("Le membre Discord"))
     .addStringOption((o) =>
       o.setName("chatteur").setDescription("Son nom dans l'app").setAutocomplete(true)
     ),
+  adminCmd("panel", "Renvoyer le message de shift (boutons Clock In / Clock Out) dans le salon clocking")
+    .addStringOption((o) =>
+      o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
+    ),
+  adminCmd("admins", "Voir, ajouter ou retirer des admins du bot"),
 ].map((c) => c.toJSON());
-
-// Commandes réservées aux admins (sécurité côté code, en plus du masquage Discord)
-const ADMIN_COMMANDS = [
-  "panel", "planning", "chatteur_add", "chatteur_remove", "chatteur_list",
-  "modele_add", "modele_remove", "modele_list",
-  "stats", "admin_add", "admin_remove", "admin_list", "lien_app",
-];
 
 client.once(Events.ClientReady, async () => {
   try {
@@ -527,7 +489,14 @@ const userMenu = (id, placeholder, users) => {
 const okRow = (menu, label, emoji, style, n) =>
   row(
     button(`adm_${menu}_ok`, n ? `${label} (${n})` : label, emoji, style, !n),
-    button(`adm_${menu}_cancel`, "Annuler", null, ButtonStyle.Secondary)
+    button(`adm_${menu}_back`, "Retour", "↩️", ButtonStyle.Secondary)
+  );
+const backRow = (menu) => row(button(`adm_${menu}_back`, "Retour", "↩️", ButtonStyle.Secondary));
+// Accueil d'un menu : la liste + Ajouter / Retirer
+const homeRow = (g, n) =>
+  row(
+    button(`adm_${g}home_to_${g}add`, "Ajouter", "➕", ButtonStyle.Success),
+    button(`adm_${g}home_to_${g}rem`, "Retirer", "🗑️", ButtonStyle.Danger, !n)
   );
 const opt = (label, value, description, emoji) => ({
   label: String(label).slice(0, 100), value, ...(description ? { description: String(description).slice(0, 100) } : {}), ...(emoji ? { emoji } : {}),
@@ -545,6 +514,28 @@ function modeleForAcct(key, cat) {
 
 const PANELS = {
   // ---- chatteurs ----
+  chome: {
+    async view() {
+      const linked = {};
+      if (appSync.enabled())
+        try {
+          for (const c of await appSync.appChatters()) if (c.discordId) linked[c.discordId] = c.name;
+        } catch (e) {
+          console.error("Chatteurs de l'app :", e.message);
+        }
+      const ids = byShift(Object.keys(data.chatteurs));
+      const embed = new EmbedBuilder().setColor(0x5bae8c).setTitle(`👥 Chatteurs du clocking (${ids.length})`);
+      if (!ids.length) embed.setDescription("Aucun chatteur pour l'instant : clique sur **Ajouter**.");
+      for (const k of SHIFT_ORDER) {
+        const list = ids.filter((u) => data.chatteurs[u] === k);
+        if (!list.length) continue;
+        const line = (u) => `<@${u}>${appSync.enabled() ? (linked[u] ? ` → ${linked[u]}` : " · ⚠️ pas relié à l'app") : ""}`;
+        embed.addFields({ name: `${SHIFTS[k].emoji} ${k} · ${list.length}`, value: list.map(line).join("\n").slice(0, 1024) });
+      }
+      if (appSync.enabled()) embed.setFooter({ text: "Les liens se règlent dans l'app : Équipe › Comptes Discord" });
+      return { embeds: [embed], components: [homeRow("c", ids.length)] };
+    },
+  },
   cadd: {
     view(st) {
       const users = st.users || [];
@@ -573,7 +564,7 @@ const PANELS = {
   crem: {
     view(st) {
       const ids = byShift(Object.keys(data.chatteurs));
-      if (!ids.length) return { content: "Aucun chatteur dans la liste.", components: [] };
+      if (!ids.length) return { content: "Aucun chatteur dans la liste.", components: [backRow("crem")] };
       const chosen = chosenOf(st);
       const opts = ids.map((u) =>
         opt(nameOf(u), u, `Shift ${data.chatteurs[u]}${data.membres[u]?.username ? ` · @${data.membres[u].username}` : ""}`, SHIFTS[data.chatteurs[u]]?.emoji)
@@ -596,6 +587,19 @@ const PANELS = {
     },
   },
   // ---- modèles ----
+  mhome: {
+    view() {
+      const embed = new EmbedBuilder()
+        .setColor(0x5bae8c)
+        .setTitle(`💃 Modèles (${data.modeles.length})`)
+        .setDescription(
+          data.modeles.map((m) => `• **${withEmoji(m.name)}** · ${m.devise}${needsFiche(m.name) ? " · 📝" : ""}`).join("\n").slice(0, 4000) ||
+            "Aucun modèle pour l'instant : clique sur **Ajouter**."
+        );
+      if (data.modeles.some((m) => needsFiche(m.name))) embed.setFooter({ text: "📝 = fiche de fin de shift dans le salon ventes" });
+      return { embeds: [embed], components: [homeRow("m", data.modeles.length)] };
+    },
+  },
   madd: {
     async view(st) {
       const chosen = chosenOf(st);
@@ -605,7 +609,7 @@ const PANELS = {
           const cat = await appSync.appCatalog();
           opts = cat.accounts
             .filter((a) => !modeleForAcct(a.key, cat))
-            .map((a) => opt(`${a.model} (${a.platform})`, a.key, `Compte de l'app · ${a.devise}`));
+            .map((a) => opt(withEmoji(`${a.model} (${a.platform})`), a.key, `Compte de l'app · ${a.devise}`));
         } catch (e) {
           console.error("Comptes de l'app :", e.message);
         }
@@ -624,7 +628,7 @@ const PANELS = {
           row(
             button("adm_madd_ok", chosen.length ? `Ajouter (${chosen.length})` : "Ajouter", "✅", ButtonStyle.Success, !chosen.length || full),
             button("adm_madd_other", "Autre modèle…", "✏️", ButtonStyle.Secondary, full),
-            button("adm_madd_cancel", "Annuler", null, ButtonStyle.Secondary)
+            button("adm_madd_back", "Retour", "↩️", ButtonStyle.Secondary)
           ),
         ],
       };
@@ -640,19 +644,19 @@ const PANELS = {
         added.push(name);
       }
       saveData();
-      return added.length ? `✅ Ajouté${plS(added.length)} : **${added.join(", ")}**` : "Rien à ajouter.";
+      return added.length ? `✅ Ajouté${plS(added.length)} : **${modelesTxt(added)}**` : "Rien à ajouter.";
     },
   },
   mrem: {
     view(st) {
-      if (!data.modeles.length) return { content: "Aucun modèle dans la liste.", components: [] };
+      if (!data.modeles.length) return { content: "Aucun modèle dans la liste.", components: [backRow("mrem")] };
       const chosen = chosenOf(st);
-      const opts = data.modeles.map((m) => opt(m.name, m.name, `${m.devise}${needsFiche(m.name) ? " · fiche de fin de shift" : ""}`));
+      const opts = data.modeles.map((m) => opt(withEmoji(m.name), m.name, `${m.devise}${needsFiche(m.name) ? " · fiche de fin de shift" : ""}`));
       return {
         content: [
           `🗑️ **Retirer des modèles** (${data.modeles.length} dans la liste)`,
           "Coche celles à retirer, puis **Retirer**.",
-          chosen.length ? `Sélection : **${chosen.join(", ")}**` : "",
+          chosen.length ? `Sélection : **${modelesTxt(chosen)}**` : "",
         ].filter(Boolean).join("\n"),
         components: [...pickMenus("mrem", opts, chosen, "Modèles à retirer"), okRow("mrem", "Retirer", "🗑️", ButtonStyle.Danger, chosen.length)],
       };
@@ -661,10 +665,20 @@ const PANELS = {
       const names = chosenOf(st);
       data.modeles = data.modeles.filter((m) => !names.includes(m.name));
       saveData();
-      return `🗑️ Retiré${plS(names.length)} : **${names.join(", ")}**`;
+      return `🗑️ Retiré${plS(names.length)} : **${modelesTxt(names)}**`;
     },
   },
   // ---- admins du bot ----
+  ahome: {
+    view() {
+      const embed = new EmbedBuilder()
+        .setColor(0x5bae8c)
+        .setTitle(`🛡️ Admins du bot (${data.admins.length})`)
+        .setDescription(data.admins.map((a) => `• <@${a}>`).join("\n") || "Aucun admin du bot pour l'instant.")
+        .setFooter({ text: "Les admins du serveur Discord ont toujours accès aux commandes." });
+      return { embeds: [embed], components: [homeRow("a", data.admins.length)] };
+    },
+  },
   aadd: {
     view(st) {
       const users = st.users || [];
@@ -681,7 +695,7 @@ const PANELS = {
   },
   arem: {
     view(st) {
-      if (!data.admins.length) return { content: "Aucun admin du bot (en plus des admins Discord).", components: [] };
+      if (!data.admins.length) return { content: "Aucun admin du bot (en plus des admins Discord).", components: [backRow("arem")] };
       const chosen = chosenOf(st);
       const opts = data.admins.map((u) => opt(nameOf(u), u, data.membres[u]?.username ? `@${data.membres[u].username}` : ""));
       return {
@@ -697,24 +711,41 @@ const PANELS = {
     },
   },
 };
-const PANEL_OF = { chatteur_add: "cadd", chatteur_remove: "crem", modele_add: "madd", modele_remove: "mrem", admin_add: "aadd", admin_remove: "arem" };
+const PANEL_OF = { chatteurs: "chome", modeles: "mhome", admins: "ahome" };
+const HOME_OF = { cadd: "chome", crem: "chome", madd: "mhome", mrem: "mhome", aadd: "ahome", arem: "ahome" };
 
-async function openPanel(i, menu) {
-  const st = {};
-  picks.set(`${i.user.id}:${menu}`, st);
-  return reply(i, await PANELS[menu].view(st), false);
+// Affiche un menu dans le message éphémère (note : résultat de la dernière action, au-dessus)
+async function show(i, menu, st = {}, note = "") {
+  const v = await PANELS[menu].view(st);
+  const payload = {
+    content: [note, v.content].filter(Boolean).join("\n\n"),
+    embeds: v.embeds || [],
+    components: v.components,
+    allowedMentions: { parse: [] },
+  };
+  return i.deferred || i.replied ? i.editReply(payload) : i.update(payload);
 }
-// customId : adm_<menu>_<action>[_<n° du menu>]
+async function openPanel(i, menu) {
+  await i.deferReply({ flags: EPHEMERAL });
+  return show(i, menu);
+}
+// customId : adm_<menu>_<action>[_<n° du menu ou menu suivant>]
 async function onPanel(i) {
   if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const [, menu, action, k] = i.customId.split("_");
   const key = `${i.user.id}:${menu}`;
-  const st = picks.get(key);
-  if (action === "cancel") {
-    picks.delete(key);
-    return done(i, "Annulé.", 5000);
+  if (!PANELS[menu]) return done(i, "Ce menu a expiré, relance la commande.");
+  if (action === "to" && PANELS[k]) {
+    const st = {};
+    picks.set(`${i.user.id}:${k}`, st);
+    return show(i, k, st);
   }
-  if (!PANELS[menu] || !st) return done(i, "Ce menu a expiré, relance la commande.");
+  if (action === "back") {
+    picks.delete(key);
+    return show(i, HOME_OF[menu] || menu);
+  }
+  const st = picks.get(key);
+  if (!st) return done(i, "Ce menu a expiré, relance la commande.");
   if (action === "sel") (st.menus ||= {})[k] = i.values;
   else if (action === "users") {
     st.users = i.values.filter((u) => !i.users.get(u)?.bot);
@@ -731,43 +762,9 @@ async function onPanel(i) {
     await i.deferUpdate();
     const msg = await PANELS[menu].ok(i, st);
     picks.delete(key);
-    return done(i, msg);
+    return show(i, HOME_OF[menu], {}, msg);
   }
-  return i.update(await PANELS[menu].view(st));
-}
-
-// ================== LISTES ==================
-async function chatteurList(i) {
-  await i.deferReply({ flags: EPHEMERAL });
-  const linked = {};
-  if (appSync.enabled())
-    try {
-      for (const c of await appSync.appChatters()) if (c.discordId) linked[c.discordId] = c.name;
-    } catch (e) {
-      console.error("Chatteurs de l'app :", e.message);
-    }
-  const ids = byShift(Object.keys(data.chatteurs));
-  const embed = new EmbedBuilder().setColor(0x5bae8c).setTitle(`👥 Chatteurs du clocking (${ids.length})`);
-  if (!ids.length) embed.setDescription("Aucun chatteur. Ajoute-les avec /chatteur_add.");
-  for (const k of SHIFT_ORDER) {
-    const list = ids.filter((u) => data.chatteurs[u] === k);
-    if (!list.length) continue;
-    const line = (u) => `<@${u}>${appSync.enabled() ? (linked[u] ? ` → ${linked[u]}` : " · ⚠️ pas relié à l'app") : ""}`;
-    embed.addFields({ name: `${SHIFTS[k].emoji} ${k} · ${list.length}`, value: list.map(line).join("\n").slice(0, 1024) });
-  }
-  if (appSync.enabled()) embed.setFooter({ text: "Les liens se règlent dans l'app : Équipe › Comptes Discord" });
-  await i.editReply({ embeds: [embed], allowedMentions: { parse: [] } });
-  setTimeout(() => i.deleteReply().catch(() => {}), 60000);
-}
-function modeleList(i) {
-  const embed = new EmbedBuilder()
-    .setColor(0x5bae8c)
-    .setTitle(`💃 Modèles (${data.modeles.length})`)
-    .setDescription(
-      data.modeles.map((m) => `• **${m.name}** · ${m.devise}${needsFiche(m.name) ? " · 📝 fiche de fin de shift" : ""}`).join("\n").slice(0, 4000) ||
-        "Aucun modèle."
-    );
-  return reply(i, { embeds: [embed] });
+  return show(i, menu, st);
 }
 
 // ================== INTERACTIONS ==================
@@ -792,24 +789,10 @@ async function handleInteraction(i) {
 
     // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
-      if (ADMIN_COMMANDS.includes(i.commandName) && !isAdmin(i))
-        return reply(i, { content: "⛔ Cette commande est réservée aux admins." });
+      if (!isAdmin(i)) return reply(i, { content: "⛔ Cette commande est réservée aux admins." });
       if (PANEL_OF[i.commandName]) return openPanel(i, PANEL_OF[i.commandName]);
 
       switch (i.commandName) {
-        case "clockin":
-          return startClockIn(i, i.options.getString("shift"));
-        case "clockout":
-          return startClockOut(i);
-        case "mystats":
-          return handleStats(i, true);
-        case "stats":
-          return handleStats(i, false);
-        case "chatteur_list":
-          return chatteurList(i);
-        case "modele_list":
-          return modeleList(i);
-
         case "panel": {
           const shift = i.options.getString("shift");
           await i.deferReply({ flags: EPHEMERAL });
@@ -824,10 +807,6 @@ async function handleInteraction(i) {
           await i.deferReply({ flags: EPHEMERAL });
           const r = await postPlanning(date);
           return done(i, `✅ Planning du ${planning.dayLabel(date)} envoyé dans <#${PLANNING_CHANNEL_ID}> (${r.count} chatteur${plS(r.count)}) : ${r.url}`);
-        }
-        case "admin_list": {
-          const txt = data.admins.map((a) => `<@${a}>`).join("\n") || "Aucun admin du bot (en plus des admins Discord).";
-          return reply(i, { content: txt });
         }
         case "lien_app":
           return lienApp(i);
@@ -889,7 +868,7 @@ async function handleInteraction(i) {
         data.modeles.push({ name: nom, devise });
         saveData();
         picks.delete(`${uid}:madd`);
-        return done(i, `✅ Modèle **${nom}** (${devise}) ajouté.`);
+        return show(i, "mhome", {}, `✅ Modèle **${withEmoji(nom)}** (${devise}) ajouté.`);
       }
     }
   } catch (err) {
@@ -1059,78 +1038,6 @@ async function finalizeClockOut(i, ventes) {
   } finally {
     closing.delete(uid);
   }
-}
-
-// ================== STATS ==================
-// self = true => /mystats (ses propres stats), sinon /stats (admin)
-async function handleStats(i, self) {
-  const uid = i.user.id;
-  const periode = i.options.getString("periode");
-
-  // Pour /mystats, on force toujours le user courant
-  // Pour /stats, on peut filtrer sur un autre
-  let targetUserId;
-  if (self) {
-    targetUserId = uid;
-  } else {
-    const membre = i.options.getUser("membre");
-    targetUserId = membre ? membre.id : null;
-  }
-
-  const now = Date.now();
-  const day = 24 * 3600e3;
-  const limits = { today: day, week: 7 * day, "15days": 15 * day, month: 30 * day, all: Infinity };
-  const since = now - limits[periode];
-
-  const list = data.historique.filter(
-    (h) => h.clockOut >= since && (!targetUserId || h.userId === targetUserId)
-  );
-  if (!list.length) return reply(i, { content: "Aucun shift sur cette période." });
-
-  const parUser = {};
-  const parModele = {};
-  for (const h of list) {
-    const u = (parUser[h.userId] ||= { shifts: 0, ms: 0, $: 0, "€": 0 });
-    u.shifts++;
-    u.ms += h.clockOut - h.clockIn;
-    for (const v of h.ventes) {
-      const d = deviseOf(v.modele);
-      const total = v.montant + (v.tips || 0); // ventes + tips
-      u[d] += total;
-      parModele[v.modele] = (parModele[v.modele] || 0) + total;
-    }
-  }
-
-  const fmtTotal = (u) =>
-    [u.$ > 0 ? fmtMoney(u.$, "$") : null, u["€"] > 0 ? fmtMoney(u["€"], "€") : null].filter(Boolean).join(" + ") || "0";
-
-  const titres = {
-    today: "Aujourd'hui", week: "7 jours", "15days": "15 jours", month: "30 jours", all: "Total",
-  };
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📈 ${self ? "Mes stats" : "Stats"} — ${titres[periode]}`)
-    .setColor(0x3498db)
-    .addFields({
-      name: "👤 Par chatteur",
-      value:
-        Object.entries(parUser)
-          .map(([u, s]) => `<@${u}> — ${s.shifts} shift(s) | ${fmtDuration(s.ms)} | ${fmtTotal(s)}`)
-          .join("\n")
-          .slice(0, 1024) || "-",
-    })
-    .addFields({
-      name: "💃 Par modèle (ventes + tips)",
-      value:
-        Object.entries(parModele)
-          .map(([m, v]) => `**${m}** — ${fmtMoney(v, deviseOf(m))}`)
-          .join("\n")
-          .slice(0, 1024) || "-",
-    });
-
-  // Les stats restent affichées 60 secondes pour avoir le temps de les lire
-  await i.reply({ embeds: [embed], flags: EPHEMERAL, allowedMentions: { parse: [] } });
-  setTimeout(() => i.deleteReply().catch(() => {}), 60000);
 }
 
 if (require.main === module) client.login(TOKEN);
