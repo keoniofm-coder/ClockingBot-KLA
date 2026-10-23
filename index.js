@@ -374,15 +374,16 @@ if (EFFECTIF_APRES > 0)
 
 // ================== PLANNING -> DISCORD ==================
 async function postPlanning(date) {
-  const { embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
+  const { content, embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
   const ch = await client.channels.fetch(PLANNING_CHANNEL_ID);
   // un nouvel envoi du même jour remplace le précédent
   const old = data.planningMsgs[date];
   if (old?.channelId === ch.id) for (const id of old.ids || []) await ch.messages.delete(id).catch(() => {});
   const ids = [];
   let first = null;
-  for (const part of planning.chunkEmbeds(embeds)) {
-    const msg = await ch.send({ embeds: part, allowedMentions: { parse: [] } });
+  const parts = embeds.length ? planning.chunkEmbeds(embeds) : [[]];
+  for (const part of parts) {
+    const msg = await ch.send({ ...(first ? {} : { content }), embeds: part, allowedMentions: { parse: [] } });
     first ||= msg;
     ids.push(msg.id);
   }
