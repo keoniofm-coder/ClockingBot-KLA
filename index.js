@@ -270,14 +270,16 @@ function parseAmount(s) {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : NaN;
 }
 
-function clockEmbed(kind, uid, s, t, late = 0) {
+// Une seule ligne : « ✅ @Kelly Clock in 02:01 · 🌙 NUIT · Anna 🍑 (Telegram) · ⏰ 12 min de retard »
+function clockLine(kind, uid, s, t, late = 0) {
   const sh = SHIFTS[s.shift] || {};
-  const lines =
-    kind === "in"
-      ? [`✅ <@${uid}> **Clock in** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${modelesTxt(s.modeles)}`]
-      : [`🔴 <@${uid}> **Clock out** · ${fmtTime(t)}`, `${sh.emoji || ""} Shift ${s.shift} · ${fmtDuration(t - s.clockIn)} · ${modelesTxt(s.modeles)}`];
-  if (late) lines.push(`⏰ ${late} min de retard`);
-  return new EmbedBuilder().setColor(kind === "in" ? 0x2ecc71 : 0xe74c3c).setDescription(lines.join("\n"));
+  return [
+    kind === "in" ? `✅ <@${uid}> **Clock in** ${fmtTime(t)}` : `🔴 <@${uid}> **Clock out** ${fmtTime(t)}`,
+    `${sh.emoji || ""} ${s.shift}`,
+    kind === "out" ? fmtDuration(t - s.clockIn) : "",
+    modelesTxt(s.modeles),
+    late ? `⏰ ${late} min de retard` : "",
+  ].filter(Boolean).join(" · ");
 }
 // Fiche simplifiée du salon ventes : chatteur, modèle, ventes, tips, total
 function ficheEmbed(uid, v) {
@@ -374,15 +376,16 @@ if (EFFECTIF_APRES > 0)
 
 // ================== PLANNING -> DISCORD ==================
 async function postPlanning(date) {
-  const { embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
+  const { content, embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
   const ch = await client.channels.fetch(PLANNING_CHANNEL_ID);
   // un nouvel envoi du même jour remplace le précédent
   const old = data.planningMsgs[date];
   if (old?.channelId === ch.id) for (const id of old.ids || []) await ch.messages.delete(id).catch(() => {});
   const ids = [];
   let first = null;
-  for (const part of planning.chunkEmbeds(embeds)) {
-    const msg = await ch.send({ embeds: part, allowedMentions: { parse: [] } });
+  const parts = embeds.length ? planning.chunkEmbeds(embeds) : [[]];
+  for (const part of parts) {
+    const msg = await ch.send({ ...(first ? {} : { content }), embeds: part, allowedMentions: { parse: [] } });
     first ||= msg;
     ids.push(msg.id);
   }
@@ -1082,7 +1085,7 @@ async function validateClockIn(i, shift) {
 
   const { late, isLate } = appSync.lateness(appSync.SLOT_OF[shift], t);
   const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-  await ch.send({ embeds: [clockEmbed("in", uid, s, t, isLate ? late : 0)], allowedMentions: { parse: [] } });
+  await ch.send({ content: clockLine("in", uid, s, t, isLate ? late : 0), allowedMentions: { parse: [] } });
   const note = await syncClockIn(i, shift, t);
   return done(i, [`✅ Clock in enregistré à **${fmtTime(t)}** · ${shiftTxt(shift)}`, isLate ? `⏰ ${late} min de retard.` : "", note].filter(Boolean).join("\n"));
 }
@@ -1162,7 +1165,7 @@ async function finalizeClockOut(i, ventes) {
       await ventesCh.send({ embeds: ventes.map((v) => ficheEmbed(uid, v)), allowedMentions: { parse: [] } });
     }
     const clockCh = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await clockCh.send({ embeds: [clockEmbed("out", uid, { ...s, modeles }, tOut)], allowedMentions: { parse: [] } });
+    await clockCh.send({ content: clockLine("out", uid, { ...s, modeles }, tOut), allowedMentions: { parse: [] } });
     appSync.onClockOut({ app: s.app, t: tOut }).catch((e) => console.error("Pointage app (clock out) :", e.message));
 
     return done(i, `✅ Shift terminé à **${fmtTime(tOut)}** (${fmtDuration(tOut - s.clockIn)}).${ventes.length ? ` Fiche envoyée dans <#${VENTES_CHANNEL_ID}>.` : ""}`);

@@ -1,19 +1,19 @@
 // ================== PLANNING DE L'APP -> DISCORD ==================
-// Mise en forme d'une journée du planning de l'app : un embed d'en-tête puis un embed par shift,
-// les chatteurs rangés par modèle avec leurs box (comme Planning › Jour dans l'app).
+// Mise en forme d'une journée du planning de l'app : un seul message, l'en-tête en texte puis un bloc
+// de couleur par shift, une ligne par modèle avec ses chatteurs et leurs box (comme Planning › Jour dans l'app).
 const SLOTS = [
   { k: "matin", shift: "MATIN", l: "Matin", h: "08h → 14h", emoji: "🌞", color: 0xe0ae4e },
   { k: "aprem", shift: "APREM", l: "Aprem", h: "14h → 20h", emoji: "☀️", color: 0xe8875c },
   { k: "soir", shift: "SOIR", l: "Soir", h: "20h → 02h", emoji: "🌆", color: 0xa98be8 },
   { k: "nuit", shift: "NUIT", l: "Nuit", h: "02h → 08h", emoji: "🌙", color: 0x79a3e3 },
 ];
-const ACCENT = 0x5bae8c;
 
 const BOX_ORDER = ["all", ...Array.from({ length: 15 }, (_, k) => String(k + 1))];
 const boxList = (v) =>
   [...new Set((Array.isArray(v) ? v : v ? [v] : []).map(String).filter((x) => BOX_ORDER.includes(x)))]
     .sort((a, b) => BOX_ORDER.indexOf(a) - BOX_ORDER.indexOf(b));
-const boxesL = (l) => (!l.length ? "" : l.includes("all") ? "All Inbox" : "Box " + l.join(", "));
+// Box en court : « B1·2 », « All »
+const boxesS = (l) => (!l.length ? "" : l.includes("all") ? "All" : "B" + l.join("·"));
 const boxIdx = (l) => (l.length ? BOX_ORDER.indexOf(l[0]) : 99);
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -36,11 +36,11 @@ const dayLabel = (date) =>
   new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
 const plS = (n) => (n > 1 ? "s" : "");
 
-// Lignes d'un shift : « **Anna** · Telegram » puis « > @Cruz · `Box 1, 2` » pour chaque chatteur
+// Lignes d'un shift, une par modèle : « **Anna 🍑** Telegram · @Cruz `B1·2` · @Tina `B3` »
 function slotLines(day, slot) {
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const off = new Set(day.offs);
-  const who = (id) => (byId[id].discordId ? `<@${byId[id].discordId}>` : `**${byId[id].name}**`);
+  const who = (id) => (byId[id].discordId ? `<@${byId[id].discordId}>` : byId[id].name);
   const groups = new Map(); // modèle -> chatteur -> { plats, boxes }
   for (const s of day.plan.filter((p) => p.slot === slot && byId[p.chatterId])) {
     const accts = (s.accts || []).length ? s.accts : ["|"];
@@ -60,22 +60,22 @@ function slotLines(day, slot) {
     const g = groups.get(mid);
     const plats = [...new Set([...g.values()].flatMap((e) => [...e.plats]))];
     const samePlat = [...g.values()].every((e) => e.plats.size === plats.length);
-    lines.push(`**${withEmoji(mName(mid))}**${samePlat && plats.length ? ` · ${plats.join(" + ")}` : ""}`);
     const ids = [...g.keys()].sort((a, b) => boxIdx(g.get(a).boxes) - boxIdx(g.get(b).boxes) || byId[a].name.localeCompare(byId[b].name, "fr"));
-    for (const id of ids) {
+    const people = ids.map((id) => {
       const e = g.get(id);
       const bits = [who(id)];
-      if (e.boxes.length) bits.push(`\`${boxesL(e.boxes)}\``);
-      if (!samePlat && e.plats.size) bits.push([...e.plats].join(" + "));
-      if (off.has(id)) bits.push("🏖️ day off");
-      lines.push(`> ${bits.join(" · ")}`);
-    }
+      if (e.boxes.length) bits.push(`\`${boxesS(e.boxes)}\``);
+      if (!samePlat && e.plats.size) bits.push(`(${[...e.plats].join(" + ")})`);
+      if (off.has(id)) bits.push("🏖️");
+      return bits.join(" ");
+    });
+    lines.push(`**${withEmoji(mName(mid))}**${samePlat && plats.length ? ` ${plats.join(" + ")}` : ""} · ${people.join(" · ")}`);
   }
   const count = new Set(day.plan.filter((p) => p.slot === slot && byId[p.chatterId] && !off.has(p.chatterId)).map((p) => p.chatterId)).size;
   return { lines, count };
 }
 
-// Embeds Discord (objets simples, acceptés tels quels par channel.send)
+// Un message : l'en-tête en texte, puis un bloc de couleur par shift (objets simples, acceptés tels quels par channel.send)
 function planningEmbeds(day) {
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const plan = day.plan.filter((p) => byId[p.chatterId]);
@@ -83,23 +83,19 @@ function planningEmbeds(day) {
   const people = new Set(plan.map((p) => p.chatterId).filter((id) => !offs.includes(id)));
   const who = (id) => (byId[id].discordId ? `<@${byId[id].discordId}>` : byId[id].name);
   const head = [
-    plan.length ? `**${people.size}** chatteur${plS(people.size)} au planning` : "_Rien de prévu ce jour-là dans l'app._",
+    `📅 **Planning du ${dayLabel(day.date)}**` +
+      (plan.length ? ` · **${people.size}** chatteur${plS(people.size)}` : "\n_Rien de prévu ce jour-là dans l'app._"),
   ];
   if (offs.length) head.push(`🏖️ Day off : ${offs.map(who).join(", ")}`);
-  const embeds = [{ title: `📅 Planning du ${dayLabel(day.date)}`, description: head.join("\n"), color: ACCENT }];
-  if (!plan.length) return { embeds, count: 0 };
-  for (const sl of SLOTS) {
+  const content = head.join("\n");
+  if (!plan.length) return { content, embeds: [], count: 0 };
+  const embeds = SLOTS.map((sl) => {
     const { lines, count } = slotLines(day, sl.k);
     let description = lines.length ? lines.join("\n") : "_Personne de prévu_";
     if (description.length > 4000) description = description.slice(0, 3990) + "\n…";
-    embeds.push({
-      title: `${sl.emoji} ${sl.l} · ${sl.h}`,
-      description,
-      color: sl.color,
-      ...(count ? { footer: { text: `${count} chatteur${plS(count)}` } } : {}),
-    });
-  }
-  return { embeds, count: people.size };
+    return { title: `${sl.emoji} ${sl.l} · ${sl.h}${count ? ` · ${count}` : ""}`, description, color: sl.color };
+  });
+  return { content, embeds, count: people.size };
 }
 
 // Regroupe les embeds en messages de 6000 caractères max (limite Discord)
@@ -116,4 +112,4 @@ function chunkEmbeds(embeds) {
   return out;
 }
 
-module.exports = { SLOTS, planningEmbeds, slotLines, chunkEmbeds, dayLabel, boxList, boxesL, cap, withEmoji };
+module.exports = { SLOTS, planningEmbeds, slotLines, chunkEmbeds, dayLabel, boxList, boxesS, cap, withEmoji };
