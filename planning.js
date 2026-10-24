@@ -36,11 +36,10 @@ const dayLabel = (date) =>
   new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
 const plS = (n) => (n > 1 ? "s" : "");
 
-// Lignes d'un shift, une par modèle : « **Anna 🍑** Telegram · @Cruz `B1·2` · @Tina `B3` »
-function slotLines(day, slot) {
+// Chatteurs d'un shift regroupés par modèle (comme Planning › Jour dans l'app)
+function slotGroups(day, slot) {
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const off = new Set(day.offs);
-  const who = (id) => (byId[id].discordId ? `<@${byId[id].discordId}>` : byId[id].name);
   const groups = new Map(); // modèle -> chatteur -> { plats, boxes }
   for (const s of day.plan.filter((p) => p.slot === slot && byId[p.chatterId])) {
     const accts = (s.accts || []).length ? s.accts : ["|"];
@@ -55,25 +54,58 @@ function slotLines(day, slot) {
     }
   }
   const mName = (mid) => (mid ? day.models[mid]?.name || mid : "Sans modèle");
-  const lines = [];
-  for (const mid of [...groups.keys()].sort((a, b) => (!a) - (!b) || mName(a).localeCompare(mName(b), "fr"))) {
-    const g = groups.get(mid);
-    const plats = [...new Set([...g.values()].flatMap((e) => [...e.plats]))];
-    const samePlat = [...g.values()].every((e) => e.plats.size === plats.length);
-    const ids = [...g.keys()].sort((a, b) => boxIdx(g.get(a).boxes) - boxIdx(g.get(b).boxes) || byId[a].name.localeCompare(byId[b].name, "fr"));
-    const people = ids.map((id) => {
-      const e = g.get(id);
-      const bits = [who(id)];
-      if (e.boxes.length) bits.push(`\`${boxesS(e.boxes)}\``);
-      if (!samePlat && e.plats.size) bits.push(`(${[...e.plats].join(" + ")})`);
-      if (off.has(id)) bits.push("🏖️");
-      return bits.join(" ");
+  const out = [...groups.keys()]
+    .sort((a, b) => (!a) - (!b) || mName(a).localeCompare(mName(b), "fr"))
+    .map((mid) => {
+      const g = groups.get(mid);
+      const plats = [...new Set([...g.values()].flatMap((e) => [...e.plats]))];
+      const samePlat = [...g.values()].every((e) => e.plats.size === plats.length);
+      const people = [...g.keys()]
+        .sort((a, b) => boxIdx(g.get(a).boxes) - boxIdx(g.get(b).boxes) || byId[a].name.localeCompare(byId[b].name, "fr"))
+        .map((id) => ({
+          id, c: byId[id], boxes: g.get(id).boxes, plats: [...g.get(id).plats],
+          off: off.has(id), cut: day.marks?.[`${slot}_${id}`]?.status === "coupure",
+        }));
+      return { mid, name: withEmoji(mName(mid)), plats, samePlat, people };
     });
-    lines.push(`**${withEmoji(mName(mid))}**${samePlat && plats.length ? ` ${plats.join(" + ")}` : ""} · ${people.join(" · ")}`);
-  }
   const count = new Set(day.plan.filter((p) => p.slot === slot && byId[p.chatterId] && !off.has(p.chatterId)).map((p) => p.chatterId)).size;
+  return { groups: out, count };
+}
+const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
+const tagOf = (p) => (p.off ? " 🏖️" : p.cut ? " ✂️" : "");
+
+// Lignes d'un shift, une par modèle : « **Anna 🍑** Telegram · @Cruz **B1·2** · @Tina **B3** »
+// (box en gras : plus lisibles que du code, qui s'affiche en petit sur Discord)
+function slotLines(day, slot) {
+  const { groups, count } = slotGroups(day, slot);
+  const lines = groups.map((g) => {
+    const people = g.people.map((p) =>
+      [whoOf(p.c), p.boxes.length ? `**${boxesS(p.boxes)}**` : "", !g.samePlat && p.plats.length ? `(${p.plats.join(" + ")})` : ""].filter(Boolean).join(" ") + tagOf(p)
+    );
+    return `**${g.name}**${g.samePlat && g.plats.length ? ` ${g.plats.join(" + ")}` : ""} · ${people.join(" · ")}`;
+  });
   return { lines, count };
 }
+
+// Box en grands chiffres (emoji) : 1️⃣·2️⃣, 🔟, 1️⃣2️⃣ (box 12), 📥 All
+const keycap = (b) => (b === "10" ? "🔟" : [...String(b)].map((ch) => `${ch}\uFE0F\u20E3`).join(""));
+const boxesE = (l) => (!l.length ? "" : l.includes("all") ? "📥 **All**" : l.map(keycap).join("·"));
+// Message de début de shift : un chatteur par ligne, ses box en gros devant le nom, regroupés par modèle
+function rosterLines(day, slot) {
+  const { groups, count } = slotGroups(day, slot);
+  const lines = [];
+  for (const g of groups) {
+    lines.push(`**${g.name}**${g.samePlat && g.plats.length ? ` · ${g.plats.join(" + ")}` : ""}`);
+    for (const p of g.people)
+      lines.push(`${boxesE(p.boxes) || "▫️"} ${whoOf(p.c)}${!g.samePlat && p.plats.length ? ` (${p.plats.join(" + ")})` : ""}${tagOf(p)}`);
+  }
+  return { lines, count };
+}
+// Repère d'un modèle (🍑) ou son nom s'il n'en a pas
+const modelMark = (name) => {
+  const w = withEmoji(name);
+  return w === name ? `**${name}**` : w.slice(String(name).split(/\s/)[0].length).trim().split(/\s/)[0];
+};
 
 // Un message : l'en-tête en texte, puis un bloc de couleur par shift (objets simples, acceptés tels quels par channel.send)
 function planningEmbeds(day) {
@@ -112,4 +144,4 @@ function chunkEmbeds(embeds) {
   return out;
 }
 
-module.exports = { SLOTS, planningEmbeds, slotLines, chunkEmbeds, dayLabel, boxList, boxesS, cap, withEmoji };
+module.exports = { SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, modelMark, cap, withEmoji };

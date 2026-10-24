@@ -6,6 +6,10 @@
 //  - config/discord : les membres du bot, pour pouvoir les relier depuis l'app
 //  - Planning (plan/<date>) : pour l'envoyer dans le salon planning
 //  - config/discordPost : demande d'envoi du planning faite depuis l'app
+//  - Planning modifié depuis Discord (plan/<date>, même format que l'app) et day off (offs/<id>)
+//  - Double shift : un seul clock in compte présent sur le shift suivant (coverShifts)
+//  - Coupures : début (cutAt), retour (cutEnd) et minutes réelles cumulées (min), affichés dans le Pointage
+//  - Virer un chatteur : retiré du planning à venir et des day off à venir, passé inactif (retireChatter)
 // Désactivé tant que SUPABASE_URL et SUPABASE_SERVICE_KEY ne sont pas renseignés dans Railway.
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
 const SUPABASE_KEY = (process.env.SUPABASE_SERVICE_KEY || "").trim();
@@ -59,6 +63,9 @@ async function mergeDoc(coll, id, patch, base) {
     await merge();
   }
 }
+async function delDoc(coll, id) {
+  await rest("DELETE", `coll=eq.${enc(coll)}&id=eq.${enc(id)}`);
+}
 async function collMap(coll) {
   const rows = await rest("GET", `select=id,data&coll=eq.${enc(coll)}`);
   return Object.fromEntries(rows.map((r) => [r.id, r.data || {}]));
@@ -75,6 +82,7 @@ async function appChatters(force) {
       name: r.data?.name || "",
       active: r.data?.active !== false,
       discordId: r.data?.discordId ? String(r.data.discordId) : "",
+      shift: r.data?.shift && typeof r.data.shift === "object" ? r.data.shift : null, // shift habituel { slot, accts, days }
     }))
     .filter((c) => c.name);
   chattersCache = { at: Date.now(), list };
@@ -212,10 +220,113 @@ async function offsOn(date) {
   const rows = await rest("GET", `select=data&coll=eq.offs&data->>date=eq.${enc(date)}`);
   return new Set(rows.map((r) => r.data?.chatterId).filter(Boolean));
 }
+// Day off entre deux dates (incluses), avec leur identifiant
+async function offsBetween(from, to) {
+  const rows = await rest("GET", `select=id,data&coll=eq.offs&data->>date=gte.${enc(from)}&data->>date=lte.${enc(to)}`);
+  return rows.map((r) => ({ ...(r.data || {}), id: r.id })).filter((o) => o.chatterId && o.date);
+}
+async function dayOffQuota() {
+  return Number((await getDoc("config", "settings"))?.dayOffQuota) || 3;
+}
+// Lundi = 0, comme les jours du shift habituel dans l'app
+const weekday = (date) => (new Date(date + "T12:00:00Z").getUTCDay() + 6) % 7;
+const midsOf = (accts) => [...new Set((accts || []).map((k) => String(k).split("|")[0]).filter(Boolean))];
+// Shift(s) et modèles d'un day off : ceux enregistrés avec lui, sinon le planning du jour, sinon le shift habituel
+function offScope(chatter, date, off, plan) {
+  if (off && Array.isArray(off.slots) && off.slots.length) return { slots: off.slots, accts: off.accts || [], mids: midsOf(off.accts) };
+  const mine = (plan || []).filter((s) => s.chatterId === chatter?.id);
+  if (mine.length) {
+    const accts = [...new Set(mine.flatMap((s) => s.accts || []))];
+    return { slots: [...new Set(mine.map((s) => s.slot))], accts, mids: midsOf(accts) };
+  }
+  const h = chatter?.shift;
+  if (h && START_OF[h.slot] != null && (!Array.isArray(h.days) || h.days.includes(weekday(date))))
+    return { slots: [h.slot], accts: h.accts || [], mids: midsOf(h.accts) };
+  return { slots: [], accts: [], mids: [] };
+}
+// Pose un day off avec les règles de l'agence : pas deux fois le même jour, `quota` par mois,
+// et un seul chatteur off par shift et par modèle le même jour. removeShifts : le retire du planning ce jour-là.
+async function addOff({ cid, date, note = "", removeShifts = true, by = "discord", t = Date.now() }) {
+  const month = date.slice(0, 7);
+  const [chatters, plan, monthOffs, quota] = await Promise.all([appChatters(true), planOf(date), offsBetween(`${month}-01`, `${month}-31`), dayOffQuota()]);
+  const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
+  const c = byId[cid];
+  if (!c) return { error: "unknown" };
+  const mine = monthOffs.filter((o) => o.chatterId === cid);
+  if (mine.some((o) => o.date === date)) return { error: "already", chatter: c };
+  if (mine.length >= quota) return { error: "quota", chatter: c, quota, taken: mine.map((o) => o.date).sort() };
+  const scope = offScope(c, date, null, plan);
+  const clash = monthOffs
+    .filter((o) => o.date === date && o.chatterId !== cid && byId[o.chatterId])
+    .map((o) => ({ off: o, chatter: byId[o.chatterId], scope: offScope(byId[o.chatterId], date, o, plan) }))
+    .find((x) => x.scope.slots.some((k) => scope.slots.includes(k)) && x.scope.mids.some((m) => scope.mids.includes(m)));
+  if (clash) return { error: "conflict", chatter: c, scope, other: clash.chatter, otherScope: clash.scope };
+  const id = newId();
+  await putDoc("offs", id, { chatterId: cid, date, note, at: t, slots: scope.slots, accts: scope.accts, by });
+  const removed = removeShifts ? plan.filter((s) => s.chatterId === cid) : [];
+  if (removed.length) await writePlan(date, Object.fromEntries(removed.map((s) => [s.sid, null])));
+  return { id, chatter: c, scope, removed: removed.length, count: mine.length + 1, quota };
+}
+// Chatteur viré : retiré du planning à partir de `from` (box comprises), day off à venir supprimés,
+// inactif dans l'app sans shift habituel. Ses ventes, paies et pointages passés restent. dry : compte sans rien changer.
+async function retireChatter(cid, from, { dry = false } = {}) {
+  const rows = await rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}`);
+  let shifts = 0;
+  const dates = [];
+  for (const r of rows) {
+    const patch = Object.fromEntries(Object.entries(r.data?.shifts || {}).filter(([, s]) => s?.chatterId === cid).map(([sid]) => [sid, null]));
+    const n = Object.keys(patch).length;
+    if (!n) continue;
+    shifts += n;
+    dates.push(r.id);
+    if (!dry) await writePlan(r.id, patch);
+  }
+  const offs = (await offsBetween(from, "9999-12-31")).filter((o) => o.chatterId === cid);
+  if (!dry) {
+    for (const o of offs) await delDoc("offs", o.id);
+    await mergeDoc("chatters", cid, { active: false, shift: null });
+    chattersCache.at = 0;
+  }
+  return { shifts, dates: dates.sort(), offs: offs.length };
+}
+// Chatteurs en coupure en ce moment (pas encore revenus)
+async function openCoupures(t = Date.now()) {
+  const today = parisParts(t).date;
+  const [chatters, ...days] = await Promise.all([appChatters(), readMarks(addDays(today, -1)), readMarks(today)]);
+  const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
+  return days
+    .flatMap((m) => Object.values(m))
+    .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId])
+    .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot }))
+    .sort((a, b) => a.since - b.since);
+}
 // Tout ce qu'il faut pour afficher le planning d'un jour
 async function planningDay(date) {
-  const [plan, offs, chatters, cat] = await Promise.all([planOf(date), offsOn(date), appChatters(), appCatalog()]);
-  return { date, plan, offs: [...offs], chatters, models: cat.models, platName: cat.platName };
+  const [plan, offs, chatters, cat, marks] = await Promise.all([planOf(date), offsOn(date), appChatters(), appCatalog(), readMarks(date)]);
+  return { date, plan, offs: [...offs], chatters, models: cat.models, platName: cat.platName, marks };
+}
+// Identifiant d'une entrée du planning ou d'un day off (même format que l'app)
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+// Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app
+async function writePlan(date, patch) {
+  await mergeDoc("plan", date, { date, shifts: patch }, { date, shifts: {} });
+}
+// Shift prévu au planning pour ce chatteur à l'instant t : de 1 h 30 avant le début jusqu'à la fin du shift
+// (6 h). Si deux shifts conviennent (double shift), celui qui commence le plus près de t.
+async function plannedSlotAt(uid, names, t) {
+  const c = await chatterOf(uid, names, false);
+  if (!c) return null;
+  const today = parisParts(t).date;
+  const dates = [addDays(today, -1), today, addDays(today, 1)];
+  const plans = await Promise.all(dates.map(planOf));
+  const hits = [];
+  dates.forEach((date, k) => {
+    for (const s of plans[k].filter((p) => p.chatterId === c.id && START_OF[p.slot] != null)) {
+      const start = parisMs(date, START_OF[s.slot]);
+      if (t >= start - 90 * 60e3 && t < start + 6 * 3600e3) hits.push({ slot: s.slot, date, gap: Math.abs(t - start) });
+    }
+  });
+  return hits.sort((a, b) => a.gap - b.gap)[0] || null;
 }
 // Comptes (modèle|plateforme) prévus au planning pour ce chatteur sur ce shift
 async function plannedAccts(uid, names, shift, t) {
@@ -261,29 +372,99 @@ async function onClockIn({ uid, names, shift, t }) {
 
 async function onClockOut({ app, t }) {
   if (!enabled() || !app?.key) return;
-  const prev = (await readMarks(app.date))[app.key];
-  if (prev) await writeMark(app.date, app.key, { out: t });
+  // le shift du clock in, puis ceux couverts par le même clock in (double shift)
+  for (const x of [{ date: app.date, key: app.key }, ...(app.extra || [])]) {
+    const prev = (await readMarks(x.date))[x.key];
+    if (prev) await writeMark(x.date, x.key, { out: t });
+  }
+}
+
+// Double shift : un chatteur encore clock in au début d'un autre shift prévu pour lui ce jour-là est
+// présent sur ce shift aussi (arrivée = son clock in), sans avoir à refaire clock in.
+// sessions : [{ uid, cid, t }] = clock in en cours. Renvoie les pointages écrits.
+const coversSlot = (t, out, start) => t < start && start - t < 12 * 3600e3 && (out == null || out >= start + 30 * 60e3);
+async function coverShifts({ sessions, now = Date.now() }) {
+  if (!enabled() || !sessions.length) return [];
+  const today = parisParts(now).date;
+  const dates = [addDays(today, -1), today];
+  const [plans, offs] = await Promise.all([Promise.all(dates.map(planOf)), Promise.all(dates.map(offsOn))]);
+  const done = [];
+  for (const [k, date] of dates.entries()) {
+    let marks = null;
+    for (const p of plans[k]) {
+      const start = parisMs(date, START_OF[p.slot]);
+      if (start > now || offs[k].has(p.chatterId)) continue;
+      const s = sessions.find((x) => x.cid === p.chatterId && coversSlot(x.t, null, start));
+      if (!s) continue;
+      marks ||= await readMarks(date);
+      const key = markKey(p.slot, p.chatterId);
+      const prev = marks[key];
+      // déjà pointé (sauf l'absent mis tout seul par le bot)
+      if (prev?.status && !(prev.src === "discord" && prev.auto)) continue;
+      const mark = presentMark(p.chatterId, p.slot, s.t, 0, prev);
+      await writeMark(date, key, mark);
+      marks[key] = mark;
+      done.push({ uid: s.uid, cid: p.chatterId, date, slot: p.slot, key });
+    }
+  }
+  return done;
 }
 
 // Coupure notée par un admin (/coupure) : statut « Coupure » dans le pointage de l'app, en gardant
 // les heures de clock in / out déjà enregistrées
-async function markCoupure({ uid, names, slot, date, min, note, t = Date.now() }) {
+async function markCoupure({ uid, cid, names, slot, date, min, note, t = Date.now() }) {
   if (!enabled()) return { skipped: "off" };
-  const c = await chatterOf(uid, names);
+  const c = cid ? (await appChatters()).find((x) => x.id === cid) : await chatterOf(uid, names);
   if (!c) return { skipped: "unlinked" };
   const key = markKey(slot, c.id);
-  const patch = { chatterId: c.id, slot, status: "coupure", min: min || "", at: t, src: "discord", auto: null };
+  const prev = (await readMarks(date))[key];
+  // cutAt : début de la coupure en cours ; le temps réel est calculé au retour (endCoupure).
+  // Déjà en coupure (ex. noté puis remplacé) : on garde l'heure de départ.
+  const going = prev?.status === "coupure" && prev.cutAt && !prev.cutEnd;
+  const patch = { chatterId: c.id, slot, status: "coupure", min: min || (going ? prev.min : prev?.cutDone) || "", at: t, src: "discord", auto: null, cutAt: going ? prev.cutAt : t, cutEnd: null };
   if (note) patch.note = note;
   await writeMark(date, key, patch);
   return { chatterId: c.id, name: c.name, date, slot, key };
 }
+// Retour de coupure : temps de coupure réel (ajouté aux coupures précédentes du même shift), comme un retard
+async function endCoupure({ uid, cid, names, t = Date.now() }) {
+  if (!enabled()) return { skipped: "off" };
+  const c = cid ? (await appChatters()).find((x) => x.id === cid) : await chatterOf(uid, names);
+  if (!c) return { skipped: "unlinked" };
+  const today = parisParts(t).date;
+  const found = [];
+  for (const date of [addDays(today, -1), today])
+    for (const [key, m] of Object.entries(await readMarks(date)))
+      if (m?.chatterId === c.id && m.status === "coupure" && m.cutAt && !m.cutEnd && m.cutAt <= t) found.push({ date, key, m });
+  const cur = found.sort((a, b) => b.m.cutAt - a.m.cutAt)[0];
+  if (!cur) return { chatterId: c.id, name: c.name, discordId: c.discordId, notCut: true };
+  const took = Math.max(1, Math.round((t - cur.m.cutAt) / 60000));
+  const total = (Number(cur.m.cutDone) || 0) + took;
+  await writeMark(cur.date, cur.key, { min: total, cutDone: total, cutEnd: t, at: t });
+  return { chatterId: c.id, name: c.name, discordId: c.discordId, date: cur.date, slot: cur.m.slot, key: cur.key, took, total, since: cur.m.cutAt };
+}
 
+// Pointage posé à la main par un admin depuis Discord (comme dans l'app : jamais écrasé par le bot)
+async function setMark(date, slot, cid, patch, t = Date.now()) {
+  await writeMark(date, markKey(slot, cid), { chatterId: cid, slot, ...patch, at: t, src: "discord-admin", auto: null });
+}
 // Effectif d'un shift : chatteurs prévus au planning de l'app, avec leur day off et leur pointage
 async function slotStaff(date, slot) {
   const [plan, marks, offs, chatters] = await Promise.all([planOf(date), readMarks(date), offsOn(date), appChatters(true)]);
   const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
-  const ids = [...new Set(plan.filter((p) => p.slot === slot && byId[p.chatterId] && byId[p.chatterId].active !== false).map((p) => p.chatterId))];
-  return ids.map((id) => ({ ...byId[id], off: offs.has(id), mark: marks[markKey(slot, id)] || null }));
+  const mine = plan.filter((p) => p.slot === slot && byId[p.chatterId] && byId[p.chatterId].active !== false);
+  const ids = [...new Set(mine.map((p) => p.chatterId))];
+  // ses comptes et ses box sur ce shift : { modèle: [box] }
+  const boxesOf = (id) => {
+    const out = {};
+    for (const p of mine.filter((x) => x.chatterId === id))
+      for (const mid of new Set((p.accts || []).map((k) => k.split("|")[0]))) {
+        const v = p.boxes?.[mid];
+        out[mid] = [...new Set([...(out[mid] || []), ...(Array.isArray(v) ? v : v ? [v] : []).map(String)])];
+      }
+    return out;
+  };
+  return ids.map((id) => ({ ...byId[id], off: offs.has(id), mark: marks[markKey(slot, id)] || null, boxes: boxesOf(id) }));
 }
 
 // Absents automatiques : chatteur prévu au planning, relié à Discord, pas en day off, sans pointage
@@ -309,9 +490,13 @@ async function sweepAbsents({ now = Date.now(), clockIns = [] } = {}) {
         const key = c && markKey(slot, c.id);
         if (!c || !c.active || !c.discordId || marks[key]?.status || offs.has(c.id)) continue;
         const ci = clockIns.find((x) => x.uid === c.discordId && SLOT_OF[x.shift] === slot && shiftDay(slot, x.t).date === date);
+        // double shift : clock in fait avant ce shift et encore là au début
+        const cover = !ci && clockIns.find((x) => x.uid === c.discordId && coversSlot(x.t, x.out, parisMs(date, START_OF[slot])));
         const mark = ci
           ? presentMark(c.id, slot, ci.t, lateness(slot, ci.t).late, null)
-          : { chatterId: c.id, slot, status: "absent", min: "", note: "", at: now, src: "discord", auto: true };
+          : cover
+            ? presentMark(c.id, slot, cover.t, 0, null)
+            : { chatterId: c.id, slot, status: "absent", min: "", note: "", at: now, src: "discord", auto: true };
         await writeMark(date, key, mark);
         marks[key] = mark;
         done.push({ date, slot, chatterId: c.id, name: c.name, status: mark.status });
@@ -335,7 +520,8 @@ async function finishPost(req, patch) {
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers,
-  onClockIn, onClockOut, sweepAbsents, markCoupure, slotStaff, lateness, shiftDay,
-  planningDay, plannedAccts, pendingPost, finishPost,
+  onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
+  planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
+  offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures,
   norm, parisParts, parisMs, addDays,
 };

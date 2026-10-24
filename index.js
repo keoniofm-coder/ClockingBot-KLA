@@ -1,13 +1,19 @@
 const {
-  Client, GatewayIntentBits, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  Client, GatewayIntentBits, Events, EmbedBuilder, ButtonStyle,
   StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
-  SlashCommandBuilder, REST, Routes, PermissionFlagsBits, MessageFlags,
+  SlashCommandBuilder, REST, Routes, PermissionFlagsBits,
 } = require("discord.js");
 const cron = require("node-cron");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const appSync = require("./app-sync");
 const planning = require("./planning");
+const planEdit = require("./planedit");
+const dayoff = require("./dayoff");
+const voice = require("./voice");
+const gestion = require("./gestion");
+const { EPHEMERAL, reply, done, row, button, opt, chunk, fit, plS } = require("./ui");
 const { withEmoji } = planning;
 
 // ================== CONFIG ==================
@@ -25,8 +31,6 @@ const FICHE_MODELES = new RegExp(process.env.FICHE_MODELES || "uncove", "i");
 // Récap de l'effectif dans le salon clocking, N minutes après le début de chaque shift (0 = pas de récap)
 const EFFECTIF_APRES = Math.min(300, Math.max(0, Number(process.env.EFFECTIF_APRES_MIN ?? 20) || 0));
 const TZ = "Europe/Paris";
-const EPHEMERAL_TTL = 25000; // 25 secondes
-const EPHEMERAL = MessageFlags.Ephemeral;
 
 const DATA_DIR = process.env.DATA_DIR || "/data"; // Volume Railway
 const DATA_FILE = path.join(DATA_DIR, "data.json");
@@ -51,7 +55,10 @@ const DEFAULT_DATA = {
   historique: [], // shifts terminés (pour /stats)
   admins: [], // userIds des admins du bot
   membres: {}, // userId -> { name, username } : noms affichés dans les menus et dans l'app
-  planningMsgs: {}, // date -> { channelId, ids } : dernier planning envoyé (remplacé au prochain envoi)
+  planningMsgs: {}, // date -> { channelId, ids, hash } : dernier planning envoyé (mis à jour en direct)
+  shiftMsgs: {}, // « date|créneau » -> { channelId, id, hash } : message de début de shift (mis à jour en direct)
+  dayoffBoard: null, // { channelId, messageId, hash } : tableau du salon day off
+  gestionPanel: null, // { channelId, messageId, hash } : panneau des admins du salon gestion
   appLinks: {}, // ancien lien /lien_app, recopié dans la fiche du chatteur de l'app au démarrage
 };
 
@@ -82,21 +89,24 @@ const modeleOf = (name) => data.modeles.find((m) => m.name === name);
 const deviseOf = (name) => modeleOf(name)?.devise || "$";
 const needsFiche = (name) => FICHE_MODELES.test(`${name} ${modeleOf(name)?.app || ""}`);
 const shiftTxt = (shift) => `${SHIFTS[shift]?.emoji || ""} Shift ${shift} (${SHIFTS[shift]?.label || "?"})`;
-const plS = (n) => (n > 1 ? "s" : "");
 const mentions = (ids) => ids.map((u) => `<@${u}>`).join(", ");
 const modelesTxt = (names) => names.map(withEmoji).join(", ");
-const chunk = (list, n) => Array.from({ length: Math.ceil(list.length / n) }, (_, k) => list.slice(k * n, k * n + n));
-// « Zoé (Inflow) » -> « zoe inflow »
-const fit = (lines, max = 1024) => {
-  let out = "";
-  for (const l of lines) {
-    if (out.length + l.length + 3 > max) return out + "\n…";
-    out += (out ? "\n" : "") + l;
-  }
-  return out;
-};
 // Shift en cours à l'instant t (heure de Paris)
 const shiftAt = (t) => SHIFT_ORDER.find((k) => (appSync.parisParts(t).h - SHIFTS[k].start + 24) % 24 < 6);
+const SHIFT_OF_SLOT = Object.fromEntries(Object.entries(appSync.SLOT_OF).map(([k, v]) => [v, k]));
+// Shift sur lequel est vraiment un chatteur clock in : celui du clock in, ou le suivant s'il fait un double shift
+function liveShift(s, t = Date.now()) {
+  const cur = shiftAt(t);
+  const covers = cur !== s.shift && (s.app?.extra || []).some((e) => e.key.startsWith(appSync.SLOT_OF[cur] + "_"));
+  return covers ? cur : s.shift;
+}
+// Ce shift est en cours ou commence dans l'heure et demie
+const nearShift = (k, t) => {
+  const p = appSync.parisParts(t);
+  const m = (((p.h * 60 + p.mi - SHIFTS[k].start * 60) % 1440) + 1440) % 1440;
+  return m < 360 || m >= 1440 - 90;
+};
+// « Zoé (Inflow) » -> « zoe inflow »
 const kNorm = (s) =>
   String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const namesOf = (i) => [i.member?.displayName || i.member?.nick, i.user.globalName, i.user.username].filter(Boolean);
@@ -110,26 +120,6 @@ function isAdmin(i) {
 }
 const ADMIN_PERM = PermissionFlagsBits.Administrator;
 
-// Répond en éphémère et supprime le message après 25 secondes
-async function reply(i, options, autoDelete = true) {
-  const payload = { allowedMentions: { parse: [] }, ...options, flags: EPHEMERAL };
-  const follow = i.replied || i.deferred;
-  const msg = follow ? await i.followUp(payload) : await i.reply(payload);
-  if (autoDelete) setTimeout(() => i.deleteReply(follow ? msg : undefined).catch(() => {}), EPHEMERAL_TTL);
-  return msg;
-}
-// Remplace le message éphémère (menu, réponse différée) par un texte final, puis le supprime
-async function done(i, content, ttl = EPHEMERAL_TTL) {
-  const payload = { content, components: [], embeds: [], allowedMentions: { parse: [] } };
-  if (i.deferred || i.replied) await i.editReply(payload);
-  else await i.update(payload);
-  setTimeout(() => i.deleteReply().catch(() => {}), ttl);
-}
-const row = (...c) => new ActionRowBuilder().addComponents(...c);
-function button(id, label, emoji, style, disabled = false) {
-  const b = new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style).setDisabled(disabled);
-  return emoji ? b.setEmoji(emoji) : b;
-}
 
 // ---------- Noms des membres (menus, listes, onglet Équipe de l'app) ----------
 const nameOf = (u) => data.membres[u]?.name || `membre …${String(u).slice(-4)}`;
@@ -171,39 +161,49 @@ function publishMembers() {
 }
 
 // Brouillons en mémoire
-const clockInDraft = new Map(); // userId -> { shift, modeles, plan }
+const clockInDraft = new Map(); // userId -> { shift, modeles, plan, planned }
 const outDraft = new Map(); // userId -> { modeles }
 const picks = new Map(); // `${userId}:${menu}` -> état d'un menu admin
 const closing = new Set(); // clock out en cours (évite le double clic)
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// GuildVoiceStates : arrivées et départs des vocaux
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
 // ================== COMPOSANTS ==================
-const clockInRow = (shift) =>
+// Boutons du message de début de shift (✏️ : modifier le planning du shift, admins)
+const clockInRow = (shift, date) =>
   row(
     button(`btn_clockin_${shift}`, "Clock In", "✅", ButtonStyle.Success),
-    button("btn_clockout", "Clock Out", "🔴", ButtonStyle.Danger)
+    button("btn_clockout", "Clock Out", "🔴", ButtonStyle.Danger),
+    ...(date && appSync.enabled() ? [button(`pl_edit_${date}_${appSync.SLOT_OF[shift]}`, "Modifier", "✏️", ButtonStyle.Secondary)] : [])
   );
 
-// Clock in : choix des modèles (plusieurs possibles) + Valider
+// Clock in : shift (pris dans le planning, modifiable) + modèles (plusieurs possibles) + Valider
 function clockInView(uid) {
   const d = clockInDraft.get(uid);
   const names = data.modeles.map((m) => m.name).slice(0, 25);
-  const lines = [`${SHIFTS[d.shift].emoji} **Clock in · Shift ${d.shift}** (${SHIFTS[d.shift].label})`];
+  const lines = [`${SHIFTS[d.shift].emoji} **Clock in · Shift ${d.shift}** (${SHIFTS[d.shift].label})${d.planned ? " · d'après le planning" : ""}`];
   if (d.plan.length) lines.push(`📋 Au planning : **${modelesTxt(d.plan)}**`);
   lines.push(
     d.modeles.length
       ? `Modèle(s) : **${modelesTxt(d.modeles)}**. Clique sur **Valider**.`
-      : "Choisis une ou plusieurs modèles, puis **Valider**."
+      : "Choisis un ou plusieurs modèles, puis **Valider**."
   );
-  // bouton au-dessus du menu : Discord ouvre la liste vers le bas, elle cacherait le bouton
+  lines.push("-# Pas le bon shift ? Change-le dans le premier menu.");
+  // bouton au-dessus des menus : Discord ouvre la liste vers le bas, elle cacherait le bouton
   return {
     content: lines.join("\n"),
     components: [
-      row(button(`ci_ok_${d.shift}`, "Valider le clock in", "✅", ButtonStyle.Success, !d.modeles.length)),
+      row(button("ci_ok", "Valider le clock in", "✅", ButtonStyle.Success, !d.modeles.length)),
       row(
         new StringSelectMenuBuilder()
-          .setCustomId(`ci_models_${d.shift}`)
+          .setCustomId("ci_shift")
+          .setPlaceholder("Ton shift")
+          .addOptions(shiftOptions(d.shift))
+      ),
+      row(
+        new StringSelectMenuBuilder()
+          .setCustomId("ci_models")
           .setPlaceholder("Tes modèles (plusieurs possibles)")
           .setMinValues(1)
           .setMaxValues(names.length)
@@ -296,28 +296,57 @@ function ficheEmbed(uid, v) {
 }
 
 // ================== ANNONCES AUTO ==================
-// Chatteurs prévus au planning de l'app sur ce shift (mentionnés sans les notifier)
-async function rosterText(shift) {
-  if (!appSync.enabled()) return "";
-  const slot = appSync.SLOT_OF[shift];
-  const { date } = appSync.shiftDay(slot, Date.now() + 15 * 60e3);
-  const day = await appSync.planningDay(date);
-  return planning.slotLines(day, slot).lines.join("\n").slice(0, 3500);
-}
-async function announceShift(name) {
+const hashOf = (payloads) =>
+  crypto.createHash("md5").update(JSON.stringify(payloads.map((p) => ({ ...p, components: (p.components || []).map((c) => c.toJSON()) })))).digest("hex");
+// Message de début de shift : un chatteur par ligne, ses box en gros devant son nom (mentionné sans notifier)
+async function announceView(name, date) {
   const sh = SHIFTS[name];
-  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-  const roster = await rosterText(name).catch((e) => (console.error("Planning de l'annonce :", e.message), ""));
+  let roster = "";
+  if (appSync.enabled() && date)
+    try {
+      roster = planning.rosterLines(await appSync.planningDay(date), appSync.SLOT_OF[name]).lines.join("\n").slice(0, 3800);
+    } catch (e) {
+      console.error("Planning de l'annonce :", e.message);
+    }
   const embed = new EmbedBuilder()
     .setColor(sh.color)
     .setTitle(`${sh.emoji} Shift ${name} · ${sh.label}`)
-    .setDescription(`Pensez bien à **clock in** avec le bouton ci-dessous, et bon shift ${sh.emoji}${roster ? `\n\n**Au planning**\n${roster}` : ""}`);
-  await ch.send({
+    .setDescription(`Pensez bien à **clock in** avec le bouton ci-dessous, et bon shift ${sh.emoji}${roster ? `\n\n${roster}` : ""}`);
+  return {
     content: `🔔 **C'est l'heure du shift ${name} (${sh.label})**`,
-    embeds: [embed],
-    components: [clockInRow(name)],
+    embeds: [embed.toJSON()],
+    components: [clockInRow(name, date)],
     allowedMentions: { parse: [] },
-  });
+  };
+}
+async function announceShift(name) {
+  const date = appSync.shiftDay(appSync.SLOT_OF[name], Date.now() + 15 * 60e3).date;
+  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+  const v = await announceView(name, date);
+  const msg = await ch.send(v);
+  // gardé pour le mettre à jour quand le planning change (box, remplacement…)
+  data.shiftMsgs[`${date}|${name}`] = { channelId: ch.id, id: msg.id, hash: hashOf([v]) };
+  const limit = appSync.addDays(appSync.parisParts(Date.now()).date, -2);
+  for (const k of Object.keys(data.shiftMsgs)) if (k.slice(0, 10) < limit) delete data.shiftMsgs[k];
+  saveData();
+}
+async function refreshAnnounces(date) {
+  for (const [k, m] of Object.entries(data.shiftMsgs)) {
+    const [d, name] = k.split("|");
+    if (d !== date || !SHIFTS[name]) continue;
+    const v = await announceView(name, d);
+    const hash = hashOf([v]);
+    if (hash === m.hash) continue;
+    try {
+      const ch = await client.channels.fetch(m.channelId);
+      await ch.messages.edit(m.id, v);
+      m.hash = hash;
+    } catch (e) {
+      console.warn("Message de shift à mettre à jour :", e.message);
+      if (/unknown message/i.test(e.message)) delete data.shiftMsgs[k];
+    }
+    saveData();
+  }
 }
 
 // 15 min avant chaque shift (heure de Paris)
@@ -327,28 +356,42 @@ for (const [name, sh] of Object.entries(SHIFTS)) {
 }
 
 // ================== EFFECTIF (quelques minutes après le début de chaque shift) ==================
-// Membres qui ont fait clock in sur ce shift (en cours ou terminé)
+// Membres qui ont fait clock in sur ce shift (en cours ou terminé), et ceux encore là depuis le shift
+// d'avant (double shift : un seul clock in pour les deux)
 function clockInsOf(name, date) {
   const slot = appSync.SLOT_OF[name];
   const start = appSync.parisMs(date, SHIFTS[name].start);
   const same = (t) => Math.abs(t - start) < 12 * 3600e3 && appSync.shiftDay(slot, t).date === date;
-  return new Set([
+  const seen = new Set([
     ...data.historique.filter((h) => h.shift === name && same(h.clockIn)).map((h) => h.userId),
     ...Object.entries(data.sessions).filter(([, s]) => s.shift === name && same(s.clockIn)).map(([uid]) => uid),
   ]);
+  const covering = new Set([
+    ...data.historique.filter((h) => appSync.coversSlot(h.clockIn, h.clockOut, start)).map((h) => h.userId),
+    ...Object.entries(data.sessions).filter(([, s]) => appSync.coversSlot(s.clockIn, null, start)).map(([uid]) => uid),
+  ]);
+  return { seen, covering };
 }
 // Qui est là sur ce shift, sur combien de prévus, et qui manque
 async function effectifView(name, date) {
   const sh = SHIFTS[name];
   const slot = appSync.SLOT_OF[name];
-  const seen = clockInsOf(name, date);
+  const { seen, covering } = clockInsOf(name, date);
   // prévus : planning de l'app (hors day off), sinon les chatteurs du bot sur ce shift
   let staff = appSync.enabled() ? await appSync.slotStaff(date, slot) : [];
   if (!staff.length) staff = Object.keys(data.chatteurs).filter((u) => data.chatteurs[u] === name).map((u) => ({ discordId: u, name: nameOf(u) }));
   const due = staff.filter((p) => !p.off);
-  const who = (p) => (p.discordId ? `<@${p.discordId}>` : `**${p.name}**`);
-  // présent : clock in sur Discord, ou pointé présent / retard / coupure dans l'app
-  const isHere = (p) => seen.has(p.discordId) || ["present", "retard", "coupure"].includes(p.mark?.status);
+  // box à côté du nom : « @Kelly · 🍑 1️⃣·2️⃣ »
+  const models = appSync.enabled() && due.some((p) => p.boxes) ? (await appSync.appCatalog()).models : {};
+  const boxTag = (p) =>
+    Object.entries(p.boxes || {})
+      .map(([mid, l]) => [mid, planning.boxList(l)])
+      .filter(([, l]) => l.length)
+      .map(([mid, l]) => `${planning.modelMark(models[mid]?.name || mid)} ${planning.boxesE(l)}`)
+      .join(" · ");
+  const who = (p) => `${p.discordId ? `<@${p.discordId}>` : `**${p.name}**`}${boxTag(p) ? ` · ${boxTag(p)}` : ""}`;
+  // présent : clock in sur Discord (ou encore là depuis le shift d'avant), ou pointé présent / retard / coupure
+  const isHere = (p) => seen.has(p.discordId) || covering.has(p.discordId) || ["present", "retard", "coupure"].includes(p.mark?.status);
   const here = due.filter(isHere).map(who);
   const missing = due.filter((p) => !isHere(p)).map(who);
   // clock in sur ce shift sans être prévu : listés avec les présents, sans compter dans le total
@@ -374,26 +417,148 @@ if (EFFECTIF_APRES > 0)
     cron.schedule(`${m % 60} ${Math.floor(m / 60) % 24} * * *`, () => postEffectif(name).catch((e) => console.error("Effectif :", e.message)), { timezone: TZ });
   }
 
+// ================== POINTAGE EN DIRECT (salon gestion) ==================
+// Le shift en cours comme Pointage dans l'app : qui est là, en retard, en coupure, absent, pas encore là
+const ST = {
+  present: { e: "🟢", sq: "🟩", l: "présent" }, retard: { e: "🟠", sq: "🟧", l: "retard" }, coupure: { e: "🔵", sq: "🟦", l: "coupure" },
+  absent: { e: "🔴", sq: "🟥", l: "absent" }, todo: { e: "⚪", sq: "⬜", l: "à pointer" },
+};
+// État d'un shift : prévus, pointage de l'app, clock in Discord (y compris le double shift)
+async function shiftBoard(name, date) {
+  const slot = appSync.SLOT_OF[name];
+  const [day, staff] = await Promise.all([appSync.planningDay(date), appSync.slotStaff(date, slot)]);
+  const { seen, covering } = clockInsOf(name, date);
+  const here = (p) => seen.has(p.discordId) || covering.has(p.discordId);
+  const stOf = (p) =>
+    p.off ? "off" : ST[p.mark?.status] && !(p.mark.status === "absent" && here(p)) ? p.mark.status : here(p) ? "present" : "todo";
+  const detail = (p) => {
+    const m = p.mark || {}, s = p.discordId && data.sessions[p.discordId];
+    const k = stOf(p);
+    const inT = m.in || s?.clockIn;
+    const bits = [];
+    if (k === "off") bits.push("day off");
+    else if (k === "todo") bits.push("pas encore là");
+    else if (k === "present") bits.push(covering.has(p.discordId) && !seen.has(p.discordId) ? `double shift, là depuis ${inT ? fmtTime(inT) : "le shift d'avant"}` : inT ? `arrivé ${fmtTime(inT)}` : "présent");
+    else if (k === "retard") bits.push(`retard ${m.min || "?"} min`);
+    else if (k === "coupure") bits.push(m.cutAt && !m.cutEnd ? `en coupure depuis ${fmtTime(m.cutAt)}` : `coupure ${m.min ? m.min + " min" : ""}`.trim());
+    else if (k === "absent") bits.push("absent");
+    if (m.out && k !== "off") bits.push(`parti ${fmtTime(m.out)}`);
+    if (m.note) bits.push(`« ${m.note} »`);
+    return bits.join(" · ");
+  };
+  return { name, slot, date, day, staff, seen, covering, stOf, detail };
+}
+async function pointageEmbed(t = Date.now()) {
+  const name = shiftAt(t);
+  const sh = SHIFTS[name];
+  const b = await shiftBoard(name, appSync.shiftDay(appSync.SLOT_OF[name], t).date);
+  const { slot, date, day, staff, seen, stOf, detail } = b;
+  const byId = Object.fromEntries(staff.map((p) => [p.id, p]));
+  // une ligne par chatteur et par modèle, rangés par box (comme le message de début de shift)
+  const lines = [];
+  for (const g of planning.slotGroups(day, slot).groups) {
+    lines.push(`**${g.name}**${g.samePlat && g.plats.length ? ` · ${g.plats.join(" + ")}` : ""}`);
+    for (const x of g.people) {
+      const p = byId[x.id] || { ...x.c, off: x.off };
+      const k = stOf(p);
+      lines.push(`${k === "off" ? "🏖️" : ST[k].e} ${planning.boxesE(x.boxes) || "▫️"} ${x.c.discordId ? `<@${x.c.discordId}>` : `**${x.c.name}**`} · ${detail(p)}`);
+    }
+  }
+  const due = staff.filter((p) => !p.off);
+  const n = Object.fromEntries(Object.keys(ST).map((k) => [k, due.filter((p) => stOf(p) === k).length]));
+  const done = due.length - n.todo;
+  // barre comme dans l'app : une case par chatteur (15 max)
+  const scale = due.length > 15 ? 15 / due.length : 1;
+  const bar = ["present", "retard", "coupure", "absent", "todo"].map((k) => ST[k].sq.repeat(Math.round(n[k] * scale))).join("");
+  const dueIds = new Set(due.map((p) => p.discordId).filter(Boolean));
+  const extra = [...seen].filter((u) => !dueIds.has(u) && !staff.some((p) => p.discordId === u));
+  const head = due.length
+    ? [`**${done}/${due.length}** pointés  ${bar}`, ["present", "retard", "coupure", "absent", "todo"].filter((k) => n[k]).map((k) => `${ST[k].e} ${n[k]} ${ST[k].l}${n[k] > 1 && k !== "todo" ? "s" : ""}`).join(" · ")]
+    : ["_Personne au planning sur ce shift._"];
+  return {
+    title: `${sh.emoji} Pointage · ${name} ${sh.label} · ${planning.dayLabel(date)}`,
+    color: sh.color,
+    description: [...head, "", ...lines, ...(extra.length ? ["", `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}`] : [])].join("\n").slice(0, 4000),
+    footer: { text: "En direct, relié au Pointage de l'app · boutons réservés aux admins" },
+  };
+}
+
 // ================== PLANNING -> DISCORD ==================
-async function postPlanning(date) {
+// Le planning d'un jour : un message (ou plus s'il est très long), boutons Modifier / Remplacer / Ajouter dessous
+async function planningPayloads(date) {
   const { content, embeds, count } = planning.planningEmbeds(await appSync.planningDay(date));
+  const parts = embeds.length ? planning.chunkEmbeds(embeds) : [[]];
+  const payloads = parts.map((part, k) => ({
+    ...(k ? {} : { content }),
+    embeds: part,
+    components: k === parts.length - 1 ? planEdit.planButtons(date) : [],
+    allowedMentions: { parse: [] },
+  }));
+  return { payloads, count, hash: hashOf(payloads) };
+}
+async function postPlanning(date, r) {
+  r ||= await planningPayloads(date);
   const ch = await client.channels.fetch(PLANNING_CHANNEL_ID);
   // un nouvel envoi du même jour remplace le précédent
   const old = data.planningMsgs[date];
   if (old?.channelId === ch.id) for (const id of old.ids || []) await ch.messages.delete(id).catch(() => {});
   const ids = [];
   let first = null;
-  const parts = embeds.length ? planning.chunkEmbeds(embeds) : [[]];
-  for (const part of parts) {
-    const msg = await ch.send({ ...(first ? {} : { content }), embeds: part, allowedMentions: { parse: [] } });
+  for (const p of r.payloads) {
+    const msg = await ch.send(p);
     first ||= msg;
     ids.push(msg.id);
   }
-  data.planningMsgs[date] = { channelId: ch.id, ids, at: Date.now() };
+  data.planningMsgs[date] = { channelId: ch.id, ids, at: Date.now(), hash: r.hash };
   const limit = appSync.addDays(appSync.parisParts(Date.now()).date, -21);
   for (const d of Object.keys(data.planningMsgs)) if (d < limit) delete data.planningMsgs[d];
   saveData();
-  return { url: first.url, count };
+  return { url: first.url, count: r.count };
+}
+// Met à jour le planning déjà envoyé (changé depuis Discord ou dans l'app)
+async function refreshPlanning(date) {
+  const old = data.planningMsgs[date];
+  if (!old?.ids?.length) return;
+  const r = await planningPayloads(date);
+  if (r.hash === old.hash) return;
+  if (r.payloads.length !== old.ids.length) return postPlanning(date, r);
+  try {
+    const ch = await client.channels.fetch(old.channelId);
+    for (const [k, p] of r.payloads.entries()) await ch.messages.edit(old.ids[k], p);
+    old.hash = r.hash;
+  } catch (e) {
+    console.warn("Planning à mettre à jour :", e.message);
+    if (/unknown message/i.test(e.message)) delete data.planningMsgs[date]; // supprimé à la main : on n'y touche plus
+  }
+  saveData();
+}
+// Après un changement : planning du salon + message de début de shift (regroupé, 1,5 s après le dernier)
+const refreshTimers = new Map();
+function refreshSoon(date) {
+  clearTimeout(refreshTimers.get(date));
+  refreshTimers.set(date, setTimeout(() => {
+    refreshTimers.delete(date);
+    refreshDate(date).catch((e) => console.error("Mise à jour du planning :", e.message));
+  }, 1500));
+}
+async function refreshDate(date) {
+  await refreshPlanning(date);
+  await refreshAnnounces(date);
+  gestion.panelSoon();
+}
+// Toutes les minutes : les changements faits dans l'app arrivent sur Discord
+let liveBusy = false;
+async function refreshLive() {
+  if (liveBusy || !appSync.enabled()) return;
+  liveBusy = true;
+  try {
+    const from = appSync.addDays(appSync.parisParts(Date.now()).date, -1);
+    const dates = new Set([...Object.keys(data.planningMsgs), ...Object.keys(data.shiftMsgs).map((k) => k.slice(0, 10))].filter((d) => d >= from));
+    for (const d of dates) await refreshDate(d).catch((e) => console.error(`Planning du ${d} :`, e.message));
+    await gestion.ensurePanel().catch((e) => console.error("Panneau gestion :", e.message));
+  } finally {
+    liveBusy = false;
+  }
 }
 // « demain », « 23/10 », « 2026-10-23 » -> « 2026-10-23 »
 function parseDay(s) {
@@ -462,10 +627,23 @@ async function sweep() {
   if (sweeping || !appSync.enabled()) return;
   sweeping = true;
   try {
+    // double shift : encore clock in au début d'un autre shift prévu ce jour-là -> présent aussi sur celui-là
+    const live = Object.entries(data.sessions)
+      .filter(([, s]) => s.app?.key)
+      .map(([uid, s]) => ({ uid, cid: s.app.cid || s.app.key.slice(s.app.key.indexOf("_") + 1), t: s.clockIn }));
+    let moved = false;
+    for (const x of await appSync.coverShifts({ sessions: live })) {
+      const s = data.sessions[x.uid];
+      if (!s?.app || (s.app.key === x.key && s.app.date === x.date)) continue;
+      s.app.extra = [...(s.app.extra || []).filter((e) => e.key !== x.key || e.date !== x.date), { date: x.date, key: x.key }];
+      moved = true;
+      console.log(`Double shift : ${nameOf(x.uid)} présent aussi en ${x.slot} du ${x.date}`);
+    }
+    if (moved) saveData();
     const since = Date.now() - 2 * 864e5;
     const clockIns = [
-      ...Object.entries(data.sessions).map(([uid, s]) => ({ uid, shift: s.shift, t: s.clockIn })),
-      ...data.historique.filter((h) => h.clockIn >= since).map((h) => ({ uid: h.userId, shift: h.shift, t: h.clockIn })),
+      ...Object.entries(data.sessions).map(([uid, s]) => ({ uid, shift: s.shift, t: s.clockIn, out: null })),
+      ...data.historique.filter((h) => h.clockIn >= since).map((h) => ({ uid: h.userId, shift: h.shift, t: h.clockIn, out: h.clockOut })),
     ];
     for (const x of await appSync.sweepAbsents({ clockIns }))
       console.log(`Pointage auto : ${x.name} ${x.status} (${x.slot} du ${x.date})`);
@@ -504,7 +682,12 @@ const commands = [
     .addStringOption((o) => o.setName("raison").setDescription("La raison (le chatteur la verra)").setMaxLength(200))
     .addStringOption((o) =>
       o.setName("shift").setDescription("Le shift concerné (par défaut : celui en cours)").addChoices(...shiftChoices)
+    )
+    .addBooleanOption((o) =>
+      o.setName("retour").setDescription("Il revient de sa coupure : compte le temps de coupure au pointage (comme un retard)")
     ),
+  adminCmd("dayoff", "Renvoyer le tableau des day off en bas du salon day off"),
+  adminCmd("gestion", "Renvoyer le panneau des admins en bas du salon gestion"),
 ].map((c) => c.toJSON());
 
 client.once(Events.ClientReady, async () => {
@@ -516,6 +699,7 @@ client.once(Events.ClientReady, async () => {
   }
   console.log(`Connecté en tant que ${client.user.tag}`);
   await resolveNames().catch((e) => console.error("Noms des membres :", e.message));
+  gestion.ensurePanel().catch((e) => console.error("Panneau gestion :", e.message));
   if (!appSync.enabled()) return console.warn("Lien avec l'app désactivé (SUPABASE_URL / SUPABASE_SERVICE_KEY manquants)");
   try {
     const n = await appSync.migrateLinks(data.appLinks);
@@ -527,6 +711,11 @@ client.once(Events.ClientReady, async () => {
   cron.schedule("*/5 * * * *", sweep, { timezone: TZ });
   setTimeout(sweep, 30000);
   setInterval(pollPost, 15000);
+  // changements faits dans l'app -> planning, messages de shift et tableau des day off sur Discord
+  setInterval(refreshLive, 60000);
+  const board = () => dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
+  setTimeout(board, 10000);
+  setInterval(board, 120000);
   const auto = PLANNING_AUTO.match(/^(\d{1,2})[:h](\d{2})$/);
   if (auto)
     cron.schedule(`${+auto[2]} ${+auto[1]} * * *`, () => {
@@ -569,9 +758,6 @@ const homeRow = (g, n) =>
     button(`adm_${g}home_to_${g}add`, "Ajouter", "➕", ButtonStyle.Success),
     button(`adm_${g}home_to_${g}rem`, "Retirer", "🗑️", ButtonStyle.Danger, !n)
   );
-const opt = (label, value, description, emoji) => ({
-  label: String(label).slice(0, 100), value, ...(description ? { description: String(description).slice(0, 100) } : {}), ...(emoji ? { emoji } : {}),
-});
 const byShift = (ids) =>
   ids.sort((a, b) => SHIFT_ORDER.indexOf(data.chatteurs[a]) - SHIFT_ORDER.indexOf(data.chatteurs[b]) || nameOf(a).localeCompare(nameOf(b), "fr"));
 
@@ -858,6 +1044,13 @@ async function handleInteraction(i) {
 
     remember(i.user, i.member);
 
+    // planning modifiable (pl_ / pe_), salon day off (do_), vocaux (vc_), panneau gestion (g_)
+    const cid = i.customId || "";
+    if (/^p[le]_/.test(cid)) return planEdit.handle(i);
+    if (cid.startsWith("do_")) return dayoff.handle(i);
+    if (cid.startsWith("vc_")) return voice.handle(i);
+    if (cid.startsWith("g_")) return gestion.handle(i);
+
     // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
       if (!isAdmin(i)) return reply(i, { content: "⛔ Cette commande est réservée aux admins." });
@@ -883,6 +1076,20 @@ async function handleInteraction(i) {
           return lienApp(i);
         case "coupure":
           return coupure(i);
+        case "gestion": {
+          if (!gestion.GESTION_CHANNEL_ID) return reply(i, { content: "⚠️ Aucun salon gestion : ajoute GESTION_CHANNEL_ID dans Railway." });
+          await i.deferReply({ flags: EPHEMERAL });
+          const p = await gestion.ensurePanel({ resend: true });
+          return done(i, `✅ Panneau envoyé dans <#${p.channelId}> : ${p.url}`);
+        }
+        case "dayoff": {
+          if (!appSync.enabled())
+            return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+          if (!dayoff.DAYOFF_CHANNEL_ID) return reply(i, { content: "⚠️ Aucun salon day off : ajoute DAYOFF_CHANNEL_ID dans Railway." });
+          await i.deferReply({ flags: EPHEMERAL });
+          const b = await dayoff.refreshBoard({ resend: true });
+          return done(i, b ? `✅ Tableau des day off envoyé dans <#${b.channelId}> : ${b.url}` : "⚠️ Tableau pas envoyé, réessaie dans un instant.");
+        }
       }
     }
 
@@ -899,9 +1106,9 @@ async function handleInteraction(i) {
       }
       // Clock Out (bouton du salon)
       if (id === "btn_clockout") return startClockOut(i);
-      // Clock In (bouton du salon)
-      if (id.startsWith("btn_clockin_") && SHIFTS[id.slice(12)]) return startClockIn(i, id.slice(12));
-      if (id.startsWith("ci_ok_")) return validateClockIn(i, id.slice(6));
+      // Clock In (bouton du salon) : le shift vient du planning, pas du message cliqué
+      if (id.startsWith("btn_clockin_")) return startClockIn(i);
+      if (id === "ci_ok" || id.startsWith("ci_ok_")) return validateClockIn(i);
       if (id === "co_go") {
         const d = outDraft.get(uid);
         if (!data.sessions[uid] || !d) return done(i, "Session expirée, refais Clock Out.");
@@ -918,8 +1125,20 @@ async function handleInteraction(i) {
     // ---------- Menus ----------
     if (i.isStringSelectMenu() || i.isUserSelectMenu()) {
       if (i.customId.startsWith("adm_")) return onPanel(i);
+      // Changement de shift au clock in : les modèles prévues sur ce shift sont recochées
+      if (i.customId === "ci_shift") {
+        const d = clockInDraft.get(uid);
+        if (!d) return done(i, "Ce menu a expiré, refais Clock In.", 8000);
+        const shift = i.values[0];
+        if (!SHIFTS[shift]) return i.deferUpdate();
+        await i.deferUpdate();
+        const plan = await plannedModeles(i, shift, Date.now());
+        const untouched = d.modeles.length === d.plan.length && d.modeles.every((n) => d.plan.includes(n));
+        Object.assign(d, { shift, plan, planned: false }, untouched ? { modeles: plan } : {});
+        return i.editReply(clockInView(uid));
+      }
       // Choix des modèles au clock in (ne valide pas tout seul)
-      if (i.customId.startsWith("ci_models_")) {
+      if (i.customId.startsWith("ci_models")) {
         const d = clockInDraft.get(uid);
         if (!d) return done(i, "Ce menu a expiré, refais Clock In.", 8000);
         d.modeles = i.values;
@@ -959,6 +1178,105 @@ async function handleInteraction(i) {
   }
 }
 client.on(Events.InteractionCreate, handleInteraction);
+client.on(Events.VoiceStateUpdate, (o, n) => voice.onVoice(o, n).catch((e) => console.error("Vocal :", e.message)));
+
+// ================== MODULES (planning modifiable, day off, vocaux) ==================
+Object.assign(planEdit.ctx, {
+  isAdmin,
+  refresh: refreshSoon,
+  notify: async (payload) => (await client.channels.fetch(CLOCKING_CHANNEL_ID)).send(payload),
+  coupure: ({ cid, slot, date }) => appSync.markCoupure({ cid, slot, date }),
+});
+Object.assign(gestion.ctx, {
+  isAdmin, client, SHIFTS, getData: () => data, saveData, liveEmbed: () => pointageEmbed(),
+  currentShift: () => {
+    const name = shiftAt(Date.now());
+    return { name, date: appSync.shiftDay(appSync.SLOT_OF[name], Date.now()).date };
+  },
+  shiftBoard,
+  setMark: async (date, slot, cid, patch) => {
+    await appSync.setMark(date, slot, cid, patch);
+    refreshSoon(date);
+  },
+  openMenu: openPanel,
+  openPlanning: (i, date, view) => planEdit.open(i, date, view),
+  dayoffView: (month) => dayoff.boardView(month),
+  coupure: runCoupure,
+  retour: retourCoupure,
+  postPlanning: (date) => postPlanning(date),
+  announceShift,
+  dayChoices: () => dayChoices(""),
+  fireTargets, firePreview, fire: fireChatter,
+});
+Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
+Object.assign(voice.ctx, {
+  client,
+  isAdmin,
+  fmtTime,
+  sessionText: (uid) => {
+    const s = data.sessions[uid];
+    const k = s && liveShift(s);
+    return s ? `${SHIFTS[k]?.emoji || ""} ${k} · ${modelesTxt(s.modeles)}` : "";
+  },
+  openReplace: (i, uid) => planEdit.openReplaceFor(i, uid),
+  coupure: async (i, uid, opts) => {
+    return runCoupure(i, await client.users.fetch(uid), opts);
+  },
+});
+
+// ================== VIRER UN CHATTEUR ==================
+// Les chatteurs de l'app (actifs) et ceux du clocking Discord qui ne sont reliés à aucun chatteur de l'app
+async function fireTargets() {
+  const app = appSync.enabled() ? (await appSync.appChatters(true)).filter((c) => c.active) : [];
+  const linked = new Set(app.map((c) => c.discordId).filter(Boolean));
+  const sh = (c) => c.shift?.slot && planning.SLOTS.find((x) => x.k === c.shift.slot);
+  return [
+    ...app.map((c) => ({
+      value: `c:${c.id}`, cid: c.id, uid: c.discordId || "", label: c.name, emoji: sh(c)?.emoji || "👤",
+      desc: [sh(c) ? `Habituellement ${sh(c).l}` : "", c.discordId ? `Discord : ${nameOf(c.discordId)}` : "Pas relié à Discord"].filter(Boolean).join(" · "),
+    })),
+    ...Object.keys(data.chatteurs)
+      .filter((u) => !linked.has(u))
+      .map((u) => ({ value: `u:${u}`, uid: u, label: nameOf(u), emoji: "💬", desc: `Seulement dans le clocking Discord (${data.chatteurs[u]})` })),
+  ].sort((a, b) => a.label.localeCompare(b.label, "fr"));
+}
+async function firePreview(t) {
+  const out = [];
+  if (t.uid && data.chatteurs[t.uid]) out.push(`retiré du clocking Discord (shift ${data.chatteurs[t.uid]})`);
+  if (t.uid && data.sessions[t.uid]) out.push("son clock in en cours est terminé maintenant");
+  if (t.cid) {
+    const r = await appSync.retireChatter(t.cid, appSync.parisParts(Date.now()).date, { dry: true });
+    out.push(`retiré du planning à venir : ${r.shifts} shift${plS(r.shifts)}${r.dates.length ? ` (${r.dates.map((d) => +d.slice(8)).join(", ")})` : ""}`);
+    if (r.offs) out.push(`${r.offs} day off à venir supprimé${plS(r.offs)}`);
+    out.push("inactif dans l'app, sans shift habituel");
+  }
+  return out;
+}
+async function fireChatter(t) {
+  const gone = [];
+  if (t.uid && data.sessions[t.uid]) {
+    const s = data.sessions[t.uid];
+    data.historique.push({ userId: t.uid, shift: s.shift, clockIn: s.clockIn, clockOut: Date.now(), modeles: s.modeles, ventes: [] });
+    delete data.sessions[t.uid];
+    appSync.onClockOut({ app: s.app, t: Date.now() }).catch((e) => console.error("Pointage app (viré) :", e.message));
+  }
+  if (t.uid && data.chatteurs[t.uid]) {
+    delete data.chatteurs[t.uid];
+    gone.push("clocking Discord");
+  }
+  saveData();
+  publishMembers();
+  if (t.cid) {
+    const r = await appSync.retireChatter(t.cid, appSync.parisParts(Date.now()).date);
+    if (r.shifts) gone.push(`planning (${r.shifts} shift${plS(r.shifts)} à venir)`);
+    if (r.offs) gone.push(`${r.offs} day off à venir`);
+    gone.push("passé inactif dans l'app");
+    r.dates.forEach(refreshSoon);
+    dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
+  }
+  console.log(`Chatteur viré : ${t.label} (${t.value})`);
+  return `🚫 **${t.label}** a été retiré : ${gone.join(", ") || "rien à retirer"}. Son historique reste dans l'app.`;
+}
 
 // ================== LIEN APP ==================
 async function lienApp(i) {
@@ -993,58 +1311,108 @@ async function lienApp(i) {
 async function coupure(i) {
   const m = i.options.getUser("chatteur");
   if (m.bot) return reply(i, { content: "❌ Choisis un chatteur, pas un bot." });
-  const min = i.options.getInteger("minutes");
-  const raison = (i.options.getString("raison") || "").trim();
+  remember(m, i.options.getMember("chatteur"));
+  const opts = { min: i.options.getInteger("minutes"), raison: (i.options.getString("raison") || "").trim(), shift: i.options.getString("shift") };
+  return i.options.getBoolean?.("retour") ? retourCoupure(i, { uid: m.id, names: namesOfUser(m) }) : runCoupure(i, m, opts);
+}
+const namesOfUser = (m) => [data.membres[m.id]?.name, m.globalName, m.username].filter(Boolean);
+// Début de coupure : « Coupure » au pointage de l'app, et une ligne qui notifie le chatteur dans le salon clocking
+// update : vient d'un menu éphémère (panneau gestion), le résultat remplace le menu
+async function runCoupure(i, m, { min, raison, shift: forced, update = false }) {
   const t = Date.now();
   const s = data.sessions[m.id];
-  // par défaut : le shift sur lequel il est clock in, sinon celui en cours
-  const shift = i.options.getString("shift") || s?.shift || shiftAt(t);
+  // par défaut : le shift sur lequel il est clock in (le 2e en cas de double shift), sinon celui en cours
+  const shift = forced || (s ? liveShift(s, t) : shiftAt(t));
   const date = appSync.shiftDay(appSync.SLOT_OF[shift], s?.shift === shift ? s.clockIn : t).date;
-  await i.deferReply({ flags: EPHEMERAL });
-  remember(m, i.options.getMember("chatteur"));
+  await (update ? i.deferUpdate() : i.deferReply({ flags: EPHEMERAL }));
 
   let point = "";
   if (!appSync.enabled()) point = "⚠️ Lien avec l'app désactivé : pas noté au pointage.";
   else
     try {
-      const names = [data.membres[m.id]?.name, m.globalName, m.username].filter(Boolean);
-      const r = await appSync.markCoupure({ uid: m.id, names, slot: appSync.SLOT_OF[shift], date, min, note: raison, t });
+      const r = await appSync.markCoupure({ uid: m.id, names: namesOfUser(m), slot: appSync.SLOT_OF[shift], date, min, note: raison, t });
       point = r.skipped === "unlinked"
         ? "⚠️ Ce compte Discord n'est relié à aucun chatteur de l'app : pas noté au pointage (à relier dans Équipe › Comptes Discord)."
-        : `📋 Noté « Coupure » au pointage de l'app (${r.name}).`;
+        : `📋 Noté « Coupure » au pointage de l'app (${r.name}). À son retour : 🟢 **Retour de coupure** dans le salon gestion (ou \`/coupure retour:True\`) pour compter le temps.`;
     } catch (e) {
       console.error("Pointage app (coupure) :", e.message);
       point = `⚠️ Pas noté au pointage : ${String(e.message || e).slice(0, 200)}`;
     }
 
-  const embed = new EmbedBuilder()
-    .setColor(0x4f8fd6)
-    .setTitle("✂️ Coupure")
-    .setDescription(`<@${m.id}>, une coupure a été notée sur ton shift.`)
-    .addFields(
-      { name: "Shift", value: `${SHIFTS[shift].emoji} ${shift} · ${planning.dayLabel(date)}`, inline: true },
-      ...(min ? [{ name: "Durée", value: `${min} min`, inline: true }] : []),
-      ...(raison ? [{ name: "Raison", value: raison }] : [])
-    )
-    .setTimestamp(t);
+  // une seule ligne, comme les clock in : « ✂️ @Keoni Coupure 00:49 · 🌆 SOIR · 15 min · Connexion coupée »
+  const line = [`✂️ <@${m.id}> **Coupure** ${fmtTime(t)}`, `${SHIFTS[shift].emoji} ${shift}`, min ? `${min} min` : "", raison].filter(Boolean).join(" · ");
   let sent = "";
   try {
     const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await ch.send({ content: `<@${m.id}>`, embeds: [embed], allowedMentions: { users: [m.id] } });
+    await ch.send({ content: line, allowedMentions: { users: [m.id] } });
     sent = `🔔 Notifié dans <#${CLOCKING_CHANNEL_ID}>.`;
   } catch (e) {
     console.error("Coupure (salon clocking) :", e.message);
     sent = `⚠️ Message pas envoyé dans le salon clocking : ${String(e.message || e).slice(0, 200)}`;
   }
+  refreshSoon(date);
   return done(
     i,
     [`✂️ Coupure pour <@${m.id}> · ${SHIFTS[shift].emoji} ${shift} du ${planning.dayLabel(date)}${min ? ` · ${min} min` : ""}`, point, sent].join("\n"),
     60000
   );
 }
+// Retour de coupure : temps réel compté au pointage (comme un retard) et une ligne dans le salon clocking
+// target : { uid, names } (compte Discord) ou { cid } (chatteur de l'app)
+async function retourCoupure(i, { uid, cid, names = [] }, { update = false } = {}) {
+  const t = Date.now();
+  await (update ? i.deferUpdate() : i.deferReply({ flags: EPHEMERAL }));
+  if (!appSync.enabled()) return done(i, "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway.");
+  const r = await appSync.endCoupure({ uid, cid, names, t });
+  const tag = uid || r.discordId ? `<@${uid || r.discordId}>` : `**${r.name}**`;
+  if (r.skipped === "unlinked") return done(i, `⚠️ <@${uid}> n'est relié à aucun chatteur de l'app (Équipe › Comptes Discord).`);
+  if (r.notCut) return done(i, `⚠️ ${tag} n'a pas de coupure en cours (lance d'abord une coupure).`);
+  const shift = SHIFT_OF_SLOT[r.slot];
+  const line = [
+    `🟢 ${tag} **Retour de coupure** ${fmtTime(t)}`,
+    shift ? `${SHIFTS[shift].emoji} ${shift}` : "",
+    `${r.took} min${r.total > r.took ? ` (${r.total} min sur le shift)` : ""}`,
+  ].filter(Boolean).join(" · ");
+  try {
+    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
+    await ch.send({ content: line, allowedMentions: { parse: [] } });
+  } catch (e) {
+    console.error("Retour de coupure (salon clocking) :", e.message);
+  }
+  refreshSoon(r.date);
+  return done(i, `🟢 ${tag} est de retour : ${r.took} min de coupure (parti à ${fmtTime(r.since)}), noté au pointage de l'app (${r.name}).`, 60000);
+}
 
 // ================== CLOCK IN ==================
-async function startClockIn(i, shift) {
+// Shift du clock in : celui où il est prévu au planning de l'app (de 1 h 30 avant le début à la fin), sinon
+// son shift du bot s'il est en cours ou commence bientôt, sinon celui en cours dans 30 min.
+// Le bouton cliqué ne compte plus : un clock in à 13h40 sur le message du MATIN va bien sur APREM.
+async function detectShift(i, t) {
+  if (appSync.enabled())
+    try {
+      const p = await appSync.plannedSlotAt(i.user.id, namesOf(i), t);
+      if (p && SHIFT_OF_SLOT[p.slot]) return { shift: SHIFT_OF_SLOT[p.slot], planned: true };
+    } catch (e) {
+      console.error("Shift du clock in :", e.message);
+    }
+  const h = data.chatteurs[i.user.id];
+  if (SHIFTS[h] && nearShift(h, t)) return { shift: h, planned: false };
+  return { shift: shiftAt(t + 30 * 60e3), planned: false };
+}
+// Modèles prévues pour lui au planning de l'app sur ce shift (déjà cochées)
+async function plannedModeles(i, shift, t) {
+  if (!appSync.enabled()) return [];
+  try {
+    const accts = await appSync.plannedAccts(i.user.id, namesOf(i), shift, t);
+    if (!accts.length) return [];
+    const cat = await appSync.appCatalog();
+    return [...new Set(accts.map((k) => modeleForAcct(k, cat)?.name).filter(Boolean))];
+  } catch (e) {
+    console.error("Planning du clock in :", e.message);
+    return [];
+  }
+}
+async function startClockIn(i) {
   const uid = i.user.id;
   if (!data.chatteurs[uid])
     return reply(i, { content: "❌ Tu n'es pas dans la liste des chatteurs. Demande à un admin." });
@@ -1055,27 +1423,19 @@ async function startClockIn(i, shift) {
     return reply(i, { content: "❌ Aucun modèle configuré." });
 
   await i.deferReply({ flags: EPHEMERAL });
-  // les modèles prévues pour lui au planning de l'app sont déjà cochées
-  let plan = [];
-  if (appSync.enabled())
-    try {
-      const accts = await appSync.plannedAccts(uid, namesOf(i), shift, Date.now());
-      if (accts.length) {
-        const cat = await appSync.appCatalog();
-        plan = [...new Set(accts.map((k) => modeleForAcct(k, cat)?.name).filter(Boolean))];
-      }
-    } catch (e) {
-      console.error("Planning du clock in :", e.message);
-    }
-  clockInDraft.set(uid, { shift, modeles: plan, plan });
+  const t = Date.now();
+  const { shift, planned } = await detectShift(i, t);
+  const plan = await plannedModeles(i, shift, t);
+  clockInDraft.set(uid, { shift, modeles: plan, plan, planned });
   // Pas de suppression auto : le chatteur doit avoir le temps de choisir
   return i.editReply(clockInView(uid));
 }
 
-async function validateClockIn(i, shift) {
+async function validateClockIn(i) {
   const uid = i.user.id;
   const d = clockInDraft.get(uid);
   if (!d?.modeles.length) return reply(i, { content: "❌ Choisis au moins un modèle." });
+  const shift = d.shift;
   if (data.sessions[uid]) return done(i, "⚠️ Tu es déjà clock in.");
   await i.deferUpdate();
   const t = Date.now();
@@ -1087,6 +1447,7 @@ async function validateClockIn(i, shift) {
   const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   await ch.send({ content: clockLine("in", uid, s, t, isLate ? late : 0), allowedMentions: { parse: [] } });
   const note = await syncClockIn(i, shift, t);
+  gestion.panelSoon();
   return done(i, [`✅ Clock in enregistré à **${fmtTime(t)}** · ${shiftTxt(shift)}`, isLate ? `⏰ ${late} min de retard.` : "", note].filter(Boolean).join("\n"));
 }
 
@@ -1101,7 +1462,7 @@ async function syncClockIn(i, shift, t) {
       return "⚠️ Ton compte Discord n'est relié à aucun chatteur de l'app : ton pointage n'y apparaît pas. Préviens un admin.";
     }
     if (r.chatterId && data.sessions[uid]) {
-      data.sessions[uid].app = { date: r.date, key: r.key };
+      data.sessions[uid].app = { date: r.date, key: r.key, cid: r.chatterId };
       saveData();
     }
   } catch (e) {
@@ -1166,7 +1527,7 @@ async function finalizeClockOut(i, ventes) {
     }
     const clockCh = await client.channels.fetch(CLOCKING_CHANNEL_ID);
     await clockCh.send({ content: clockLine("out", uid, { ...s, modeles }, tOut), allowedMentions: { parse: [] } });
-    appSync.onClockOut({ app: s.app, t: tOut }).catch((e) => console.error("Pointage app (clock out) :", e.message));
+    appSync.onClockOut({ app: s.app, t: tOut }).catch((e) => console.error("Pointage app (clock out) :", e.message)).finally(() => gestion.panelSoon());
 
     return done(i, `✅ Shift terminé à **${fmtTime(tOut)}** (${fmtDuration(tOut - s.clockIn)}).${ventes.length ? ` Fiche envoyée dans <#${VENTES_CHANNEL_ID}>.` : ""}`);
   } finally {
@@ -1176,4 +1537,7 @@ async function finalizeClockOut(i, ventes) {
 
 if (require.main === module) client.login(TOKEN);
 // pour les tests
-module.exports = { client, handleInteraction, postPlanning, postEffectif, pollPost, sweep, parseDay, dayChoices, getData: () => data, SHIFTS };
+module.exports = {
+  client, handleInteraction, postPlanning, refreshPlanning, refreshLive, announceShift, postEffectif, pollPost, sweep,
+  parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion,
+};
