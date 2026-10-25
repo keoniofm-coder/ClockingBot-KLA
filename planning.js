@@ -72,7 +72,7 @@ function slotGroups(day, slot) {
   return { groups: out, count };
 }
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
-const tagOf = (p) => (p.off ? " 🏖️" : p.cut ? " ✂️" : "");
+const tagOf = (p) => (p.off ? " 🏖️" : p.cut ? " ⚡" : "");
 
 // Lignes d'un shift, une par modèle : « **Anna 🍑** Telegram · @Cruz **B1·2** · @Tina **B3** »
 // (box en gras : plus lisibles que du code, qui s'affiche en petit sur Discord)
@@ -124,26 +124,43 @@ const modelMark = (name) => {
   return w === name ? `**${name}**` : w.slice(String(name).split(/\s/)[0].length).trim().split(/\s/)[0];
 };
 
-// Un message : l'en-tête en texte, puis un bloc de couleur par shift, un chatteur par ligne
-// (objets simples, acceptés tels quels par channel.send)
-function planningEmbeds(day) {
+// Un message : l'en-tête en texte, puis un bloc de couleur par shift rempli (les shifts vides tiennent en une ligne).
+// Dans chaque bloc, par modèle « **ANNA 🍑** · Telegram · 4 box », puis un chatteur par ligne « **Jean** · Box : 1️⃣ & 2️⃣ »
+// (prénoms en gras plutôt que des mentions : plus lisible). live[créneau] (shift commencé) : { st(id) -> emoji du
+// pointage, sub : « ✅ 4 présents · ⭕ 7 à pointer », done, due, now : en cours }. Objets simples, acceptés par channel.send.
+function planningEmbeds(day, live = {}) {
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const plan = day.plan.filter((p) => byId[p.chatterId]);
   const offs = day.offs.filter((id) => byId[id]);
   const people = new Set(plan.map((p) => p.chatterId).filter((id) => !offs.includes(id)));
-  const who = (id) => (byId[id].discordId ? `<@${byId[id].discordId}>` : byId[id].name);
+  const filled = SLOTS.filter((sl) => plan.some((p) => p.slot === sl.k));
+  const empty = SLOTS.filter((sl) => !filled.includes(sl));
   const head = [
-    `📅 **Planning du ${dayLabel(day.date)}**` +
+    `📅 **Planning · ${dayLabel(day.date)}**` +
       (plan.length ? ` · **${people.size}** chatteur${plS(people.size)}` : "\n_Rien de prévu ce jour-là dans l'app._"),
   ];
-  if (offs.length) head.push(`🏖️ Day off : ${offs.map(who).join(", ")}`);
+  if (plan.length && empty.length) head.push(`-# ${empty.map((sl) => `${sl.emoji} ${sl.l}`).join(" · ")} : personne`);
+  if (offs.length) head.push(`🏖️ Day off : ${offs.map((id) => byId[id].name).join(", ")}`);
   const content = head.join("\n");
   if (!plan.length) return { content, embeds: [], count: 0 };
-  const embeds = SLOTS.map((sl) => {
-    const { lines, count } = rosterLines(day, sl.k);
-    let description = lines.length ? lines.join("\n") : "_Personne de prévu_";
+  const embeds = filled.map((sl) => {
+    const L = live[sl.k];
+    const { groups, count } = slotGroups(day, sl.k);
+    const blocks = groups.map((g) => {
+      const n = Number(day.nbox?.[`${sl.k}|${g.mid}`]) || 0;
+      return [
+        `${modelHead(g)}${n ? ` · ${n} box` : ""}`,
+        ...g.people.map((p) => {
+          const e = L?.st?.(p.id) || "";
+          // shift commencé : la coupure se voit déjà au pointage (⚡ devant le prénom)
+          return `${e ? `${e} ` : ""}**${p.c.name}**${!g.samePlat && p.plats.length ? ` (${p.plats.join(" + ")})` : ""}${p.boxes.length ? ` · ${boxLabel(p.boxes)}` : ""}${L ? (p.off ? " 🏖️" : "") : tagOf(p)}`;
+        }),
+      ].join("\n");
+    });
+    let description = [L?.sub, ...blocks].filter(Boolean).join("\n\n");
     if (description.length > 4000) description = description.slice(0, 3990) + "\n…";
-    return { title: `${sl.emoji} ${sl.l} · ${sl.h}${count ? ` · ${count}` : ""}`, description, color: sl.color };
+    const nTxt = L?.due ? `${L.done}/${L.due} pointés` : `${count} chatteur${plS(count)}`;
+    return { title: `${sl.emoji} ${sl.l.toLocaleUpperCase("fr")} · ${sl.h} · ${nTxt}${L?.now ? " · 🔴 en cours" : ""}`, description, color: sl.color };
   });
   return { content, embeds, count: people.size };
 }

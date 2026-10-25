@@ -327,10 +327,17 @@ async function setBoxCount(date, slot, mid, n) {
 }
 // Identifiant d'une entrée du planning ou d'un day off (même format que l'app)
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-// Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app
-async function writePlan(date, patch) {
-  await mergeDoc("plan", date, { date, shifts: patch }, { date, shifts: {} });
+// Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app ;
+// nbox : le nombre de box par shift et modèle, écrit en même temps ({ "soir|m-anna": 4 })
+// loud : le bot veut que le salon clocking en soit prévenu (sinon l'action qui écrit le dit elle-même)
+async function writePlan(date, patch, nbox, { loud = false } = {}) {
+  if (loud) await hooks.beforeLoud?.(date).catch(() => {});
+  await mergeDoc("plan", date, { date, shifts: patch, ...(nbox && Object.keys(nbox).length ? { nbox } : {}) }, { date, shifts: {} });
+  hooks.planWritten?.(date, patch, loud);
 }
+// Fourni par index.js : planWritten(date, patch, loud) après chaque écriture du planning par le bot,
+// beforeLoud(date) juste avant une écriture à annoncer (pour avoir l'état d'avant)
+const hooks = {};
 // Shift prévu au planning pour ce chatteur à l'instant t : de 1 h 30 avant le début jusqu'à la fin du shift
 // (6 h). Si deux shifts conviennent (double shift), celui qui commence le plus près de t.
 async function plannedSlotAt(uid, names, t) {
@@ -655,7 +662,7 @@ module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
-  planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
+  planningDay, planOf, writePlan, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
   norm, parisParts, parisMs, addDays,
 };
