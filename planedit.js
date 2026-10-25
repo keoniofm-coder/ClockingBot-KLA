@@ -1,14 +1,17 @@
 // ================== PLANNING MODIFIABLE DEPUIS DISCORD ==================
 // Sous le planning du salon planning : ✏️ Modifier, 🔁 Remplacer, 🔀 Déplacer, ➕ Ajouter, 📋 Préparer le lendemain,
 // et un menu par shift pour changer vite les box d'un chatteur (admins, en message éphémère).
+// ✏️ Modifier ouvre un shift sur un seul écran : le shift se choisit dans un menu déroulant, on choisit un chatteur
+// et ses box changent dès qu'on les coche ; remplacer, déplacer, ajouter partent de là et y reviennent.
 // Chaque changement est écrit tout de suite dans le planning de l'app (plan/<date>, comme l'app le fait),
 // puis le message du salon se met à jour. L'app reste la vue complète ; Discord sert à saisir vite.
 // Une box donnée à quelqu'un est retirée à celui du même shift et de la même modèle qui l'avait.
-const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
+const { StringSelectMenuBuilder, TextDisplayBuilder, MessageFlags, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
 const { SLOTS, withEmoji, boxList, boxesS, boxesE, boxLabel, dayLabel } = planning;
+const { pickRow, altButton, picked } = require("./pick");
 
 // Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date),
 // presence(date, slot) : { chatterId: present | retard | coupure | absent | todo | off } d'après le pointage
@@ -19,7 +22,7 @@ const slotOf = (k) => SLOTS.find((s) => s.k === k) || { k, l: k, emoji: "", h: "
 const BOX_OPTS = [["all", "All Inbox"], ...Array.from({ length: 15 }, (_, k) => [String(k + 1), `Box ${k + 1}`])];
 
 // Tout ce qu'il faut pour un jour : planning, chatteurs, comptes de l'app, day off
-async function load(date) {
+async function loadNow(date) {
   const [day, cat] = await Promise.all([appSync.planningDay(date), appSync.appCatalog()]);
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const plan = day.plan
@@ -27,6 +30,12 @@ async function load(date) {
     .sort((a, b) => SLOTS.findIndex((x) => x.k === a.slot) - SLOTS.findIndex((x) => x.k === b.slot) || byId[a.chatterId].name.localeCompare(byId[b.chatterId].name, "fr"));
   const mName = (mid) => withEmoji(cat.models[mid]?.name || mid);
   return { ...day, plan, byId, cat, off: new Set(day.offs), mName };
+}
+// Un jour n'est lu qu'une fois par clic (l'action puis l'affichage) ; oublié dès qu'on écrit
+let memo = new Map();
+function load(date) {
+  if (!memo.has(date)) memo.set(date, loadNow(date).catch((e) => (memo.delete(date), Promise.reject(e))));
+  return memo.get(date);
 }
 const midsOf = (accts) => [...new Set((accts || []).map((k) => k.split("|")[0]).filter(Boolean))];
 const platsOf = (d, accts, mid) => (accts || []).filter((k) => k.startsWith(mid + "|")).map((k) => d.cat.platName(k.split("|")[1]));
@@ -44,15 +53,6 @@ function acctsText(d, accts, boxes, md = true, only) {
 }
 const whoMd = (c) => `**${c.name}**`;
 const tag = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
-const habitTxt = (d, c) => {
-  const l = appSync.habSlots(c.shift).map(slotOf);
-  return l.length ? `Habituellement ${l.map((s) => s.l).join(" + ")} · ${acctsText(d, c.shift.accts, null, false)}` : "";
-};
-const chatterOpts = (d, { except = [] } = {}) =>
-  Object.values(d.byId)
-    .filter((c) => c.active && !except.includes(c.id))
-    .sort((a, b) => a.name.localeCompare(b.name, "fr"))
-    .map((c) => opt(c.name, c.id, d.off.has(c.id) ? "En day off ce jour-là" : habitTxt(d, c), d.off.has(c.id) ? "🏖️" : slotOf(appSync.habSlots(c.shift)[0]).emoji || undefined));
 const entryOpts = (d, list = d.plan) =>
   list.map((s) => opt(`${d.byId[s.chatterId].name} · ${slotOf(s.slot).l}${d.off.has(s.chatterId) ? " (day off)" : ""}`, s.sid, acctsText(d, s.accts, s.boxes, false), slotOf(s.slot).emoji || undefined));
 const slotMenu = (id, cur, placeholder = "Shift") =>
@@ -72,38 +72,63 @@ const boxMenu = (id, d, mid, cur, placeholder) =>
 // un menu vide n'est pas permis par Discord : un choix grisé à la place
 const emptyMenu = (id, placeholder) =>
   new StringSelectMenuBuilder().setCustomId(id).setPlaceholder(placeholder).setDisabled(true).addOptions(opt("—", "none"));
-const navRow = () => row(button("pe_day_-1", "Jour d'avant", "◀️", ButtonStyle.Secondary), button("pe_day_1", "Jour d'après", "▶️", ButtonStyle.Secondary));
 const backBtn = () => button("pe_back", "Retour", "↩️", ButtonStyle.Secondary);
+const closeBtn = () => button("pe_x", "Fermer", null, ButtonStyle.Secondary);
 const head = (st, lines) => [st.note, ...lines].filter(Boolean).join("\n");
-// Lignes affichées : tout le jour, ou seulement le shift du message de début de shift
-const shown = (st, d) => (st.only ? d.plan.filter((s) => s.slot === st.only) : d.plan);
+// Box en toutes lettres dans les menus (les emojis de box n'y passent pas) : « Box 2 & 3 », « All Inbox »
+const boxesT = (l) => (!l.length ? "" : l.includes("all") ? "All Inbox" : `Box ${l.join(" & ")}`);
+const plS = (n) => (n > 1 ? "s" : "");
+// 2000 caractères au plus par message : sur un gros shift, les emojis de box (longs) passent en chiffres
+const fitMsg = (txt) => {
+  if (txt.length <= 2000) return txt;
+  const short = txt.replace(/<a?:klbox\d+_(\w+):\d+>/g, (m, k) => (k === "all" ? "All" : k));
+  return short.length <= 2000 ? short : short.slice(0, 1990) + "\n…";
+};
 // All Inbox seul, ou des box numérotées (celle choisie en dernier gagne)
 const cleanBoxes = (values, before) => {
   const l = boxList(values);
   return l.includes("all") && l.length > 1 ? (before.includes("all") ? l.filter((x) => x !== "all") : ["all"]) : l;
 };
 
-// Shift travaillé dans Remplacer / Déplacer : celui choisi, sinon celui en cours si c'est ce jour-là, sinon le premier rempli
+// Shift affiché : celui choisi, sinon celui en cours si c'est ce jour-là, sinon le premier rempli
 function workSlot(st, d) {
+  if (st.slot) return st.slot;
   const filled = SLOTS.filter((s) => d.plan.some((e) => e.slot === s.k)).map((s) => s.k);
-  if (st.slot && (filled.includes(st.slot) || !filled.length)) return st.slot;
-  if (st.only && filled.includes(st.only)) return st.only;
-  const now = Date.now();
-  const cur = SLOTS.find((s) => {
-    const start = appSync.parisMs(st.date, appSync.START_OF[s.k]);
-    return now >= start - 2 * 3600e3 && now < start + 6 * 3600e3;
-  });
+  const cur = SLOTS.find((s) => running(st.date, s.k));
   return (cur && filled.includes(cur.k) ? cur.k : filled[0]) || "soir";
 }
-const slotCycle = (st, d) => {
-  const filled = SLOTS.filter((s) => d.plan.some((e) => e.slot === s.k));
-  const cur = slotOf(workSlot(st, d));
-  return button("pe_sl", `Shift : ${cur.l}`, cur.emoji || null, ButtonStyle.Secondary, filled.length < 2);
-};
-const running = (date, slot) => {
-  const start = appSync.parisMs(date, appSync.START_OF[slot]);
-  return Date.now() >= start - 2 * 3600e3 && Date.now() < start + 6 * 3600e3;
-};
+const startOf = (date, slot) => appSync.parisMs(date, appSync.START_OF[slot]);
+// shift en cours, ou qui commence dans les 2 h (on prévient alors le salon clocking)
+const running = (date, slot) => Date.now() >= startOf(date, slot) - 2 * 3600e3 && Date.now() < startOf(date, slot) + 6 * 3600e3;
+const isNow = (date, slot) => Date.now() >= startOf(date, slot) && Date.now() < startOf(date, slot) + 6 * 3600e3;
+// « sam. 24 oct. »
+const shortDay = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+// Nombre de chatteurs par shift autour du jour affiché (une seule lecture), pour le menu des shifts
+const nearCounts = (date) => appSync.slotCounts(appSync.addDays(date, -2), appSync.addDays(date, 6)).catch(() => ({}));
+// Menu déroulant des shifts, dans l'ordre des heures : la veille, le jour même et le lendemain (depuis le salon
+// gestion, seulement ceux pas encore finis) ; jumps : d'autres jours pour y aller directement, même shift
+function shiftRow(st, counts, { jumps = false, id = "pe_ss" } = {}) {
+  const now = Date.now();
+  const shifts = [-1, 0, 1]
+    .flatMap((k) => SLOTS.map((s) => ({ date: appSync.addDays(st.date, k), slot: s.k })))
+    .map((x) => ({ ...x, t: startOf(x.date, x.slot) }))
+    .filter((x) => !st.live || x.t + 6 * 3600e3 > now || (x.date === st.date && x.slot === st.slot));
+  const nOf = (n) => (n ? `${n} chatteur${plS(n)}` : "personne");
+  const items = [
+    ...shifts.map((x) => {
+      const sl = slotOf(x.slot);
+      return { t: x.t, o: opt(`${sl.l} · ${shortDay(x.date)}`, `${x.date}|${x.slot}`, [sl.h, nOf(counts[x.date]?.[x.slot] || 0), isNow(x.date, x.slot) ? "en cours" : ""].filter(Boolean).join(" · "), sl.emoji, x.date === st.date && x.slot === st.slot) };
+    }),
+    ...(jumps ? [-2, 2, 3, 4, 5, 6] : []).map((k) => {
+      const x = appSync.addDays(st.date, k);
+      return { t: appSync.parisMs(x, 0), o: opt(cap(dayLabel(x)), `d|${x}`, `${nOf(counts[x]?.all || 0)} · ouvre ce jour`, "📅") };
+    }),
+  ].sort((a, b) => a.t - b.t);
+  return row(new StringSelectMenuBuilder().setCustomId(id).setPlaceholder("Choisir le shift").addOptions(items.slice(0, 25).map((x) => x.o)));
+}
+// Statut au pointage de chacun, une fois le shift commencé
+const presenceOf = (date, slot) =>
+  Date.now() >= startOf(date, slot) ? Promise.resolve(ctx.presence?.(date, slot)).then((p) => p || {}, () => ({})) : Promise.resolve({});
 
 // Statut au pointage, pour choisir qui prend des box
 const PRES = {
@@ -217,173 +242,129 @@ const noPing = (d, txt) =>
 
 // ---------- Vues ----------
 const VIEWS = {
-  // Liste des chatteurs du jour
-  async list(st) {
-    const d = await load(st.date);
-    const list = shown(st, d);
-    const only = st.only && slotOf(st.only);
-    const n = new Set(list.filter((s) => !d.off.has(s.chatterId)).map((s) => s.chatterId)).size;
+  // Un shift sur un seul écran : chaque modèle avec ses chatteurs et leurs box ; on choisit un chatteur
+  // dans le menu et ses box changent dès qu'on les coche (retirées à celui du shift qui les avait)
+  async sh(st) {
+    if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
+    const early = st.slot ? presenceOf(st.date, st.slot) : null;
+    const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
+    st.slot = workSlot(st, d);
+    const pres = await (early || presenceOf(st.date, st.slot));
+    const slot = st.slot, sl = slotOf(slot);
+    const here = d.plan.filter((s) => s.slot === slot);
+    const started = Date.now() >= startOf(st.date, slot);
+    const stOf = (s) => (d.off.has(s.chatterId) ? "off" : started ? pres[s.chatterId] || "todo" : "");
+    const name = (s) => d.byId[s.chatterId].name;
+    // chatteur choisi et la modèle dont on règle les box
+    const [selSid, selMid] = String(st.sel || "").split("|");
+    const sel = here.find((s) => s.sid === selSid);
+    const bm = sel ? (midsOf(sel.accts).includes(selMid) ? selMid : midsOf(sel.accts)[0] || "") : "";
+    st.sel = sel ? `${sel.sid}|${bm}` : null;
+    const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
+    const rank = (s, mid) => {
+      const l = boxList(s.boxes?.[mid]);
+      return l.length ? (l[0] === "all" ? 0 : Number(l[0])) : 99;
+    };
+    const line = (s, mid, multi) => {
+      const k = stOf(s), l = mid ? boxList(s.boxes?.[mid]) : [];
+      const who = sel?.sid === s.sid && bm === mid ? `👉 **${name(s)}**` : name(s);
+      const plats = multi ? ` ${platsOf(d, s.accts, mid).join(" + ")}` : "";
+      return [`${k ? `${PRES[k]?.e || "⚪"} ` : ""}${who}${plats}`, mid ? (l.length ? boxLabel(l) : "sans box") : "aucun compte", ["retard", "coupure", "absent", "off"].includes(k) ? PRES[k].l : ""].filter(Boolean).join(" · ");
+    };
+    const blocks = mids.map((mid) => {
+      const on = here.filter((s) => midsOf(s.accts).includes(mid)).sort((a, b) => rank(a, mid) - rank(b, mid) || name(a).localeCompare(name(b), "fr"));
+      const plats = [...new Set(on.flatMap((s) => platsOf(d, s.accts, mid)))];
+      const n = Number(d.nbox?.[`${slot}|${mid}`]) || 0;
+      const used = new Set(on.flatMap((s) => boxList(s.boxes?.[mid])));
+      const free = n && !used.has("all") ? Array.from({ length: n }, (_, k) => String(k + 1)).filter((b) => !used.has(b)) : [];
+      return [
+        [`**${d.mName(mid).toLocaleUpperCase("fr")}**`, plats.join(" + "), n ? `${n} box` : ""].filter(Boolean).join(" · "),
+        ...on.map((s) => line(s, mid, plats.length > 1)),
+        free.length ? `-# Libre${plS(free.length)} : ${boxLabel(free)}` : "",
+      ].filter(Boolean).join("\n");
+    });
+    const bare = here.filter((s) => !midsOf(s.accts).length);
+    if (bare.length) blocks.push(["**SANS COMPTE**", ...bare.map((s) => line(s, ""))].join("\n"));
+    const n = new Set(here.filter((s) => !d.off.has(s.chatterId)).map((s) => s.chatterId)).size;
+    // menu des chatteurs : une ligne par chatteur et par modèle (choisir la ligne = choisir les box de cette modèle)
+    const who = here
+      .flatMap((s) => (midsOf(s.accts).length ? midsOf(s.accts) : [""]).map((mid) => ({ s, mid })))
+      .slice(0, 25)
+      .map(({ s, mid }) => {
+        const k = stOf(s), l = mid ? boxList(s.boxes?.[mid]) : [];
+        return opt(`${name(s)}${mid ? ` · ${d.mName(mid)}` : ""}`, `${s.sid}|${mid}`, [k ? PRES[k]?.l : "", mid ? boxesT(l) || "sans box" : "aucun compte"].filter(Boolean).join(" · "), (k && PRES[k]?.e) || sl.emoji || null, st.sel === `${s.sid}|${mid}`);
+      });
+    const holder = (b) => here.filter((s) => s.sid !== sel?.sid && boxList(s.boxes?.[bm]).includes(b)).map(name).join(", ");
+    const cur = sel && bm ? boxList(sel.boxes?.[bm]) : [];
+    const boxRow = !sel
+      ? emptyMenu("pe_sb", here.length ? "Box : choisis d'abord un chatteur ☝️" : "Box")
+      : !bm
+        ? emptyMenu("pe_sb", "Aucun compte : ✏️ Comptes pour en mettre")
+        : new StringSelectMenuBuilder()
+            .setCustomId("pe_sb")
+            .setPlaceholder(`Box de ${name(sel)} sur ${d.mName(bm)} : aucune`.slice(0, 150))
+            .setMinValues(0)
+            .setMaxValues(BOX_OPTS.length)
+            .addOptions(BOX_OPTS.map(([v, l]) => opt(l, v, holder(v) ? `Prise par ${holder(v)}` : v === "all" ? "Toutes les box" : "Libre", null, cur.includes(v))));
     return {
-      content: head(st, [
-        `✏️ **Planning du ${dayLabel(st.date)}**${only ? ` · ${only.emoji} ${only.l}` : ""}${list.length ? ` · ${n} chatteur${n > 1 ? "s" : ""}` : ""}`,
-        list.length
-          ? "Choisis un chatteur pour changer son shift, ses comptes ou ses box."
-          : "_Personne au planning ce jour-là : 📋 copie un autre jour, ou ajoute quelqu'un avec ➕._",
-      ]),
+      content: fitMsg(head(st, [
+        `📅 **${sl.emoji} ${sl.l} · ${dayLabel(st.date)}** (${sl.h}) · ${n ? `${n} chatteur${plS(n)}` : "personne"}${isNow(st.date, slot) ? " · 🔴 en cours" : ""}`,
+        ...blocks,
+        !here.length
+          ? "_Personne sur ce shift : ➕ pour ajouter quelqu'un, ou 📋 pour copier un autre jour._"
+          : sel
+            ? ""
+            : "-# Choisis un chatteur dans le menu : ses box changent dès que tu les coches.",
+      ])),
       components: [
-        ...selectMenus("pe_pick", entryOpts(d, list), { placeholder: "Chatteur à modifier", max: 2 }),
+        shiftRow(st, counts, { jumps: true }),
+        row(who.length ? new StringSelectMenuBuilder().setCustomId("pe_sc").setPlaceholder("Chatteur").addOptions(who) : emptyMenu("pe_sc", "Personne sur ce shift")),
+        row(boxRow),
+        row(
+          button("pe_srp", sel ? `Remplacer ${name(sel)}`.slice(0, 80) : "Remplacer", "🔁", ButtonStyle.Secondary, !here.length),
+          button("pe_smv", sel ? `Déplacer ${name(sel)}`.slice(0, 80) : "Déplacer", "🔀", ButtonStyle.Secondary, !here.length),
+          button("pe_sed", "Comptes / shift", "✏️", ButtonStyle.Secondary, !sel),
+          button("pe_sdl", sel && st.delArm === sel.sid ? "Sûr ? Retirer" : "Retirer", "🗑️", ButtonStyle.Danger, !sel)
+        ),
         row(
           button("pe_add", "Ajouter", "➕", ButtonStyle.Success),
-          button("pe_rep", "Remplacer", "🔁", ButtonStyle.Secondary, !list.length),
-          button("pe_mv", "Déplacer", "🔀", ButtonStyle.Secondary, !list.length),
+          button("pe_bx", "Box du shift", "📦", ButtonStyle.Secondary, !mids.length),
           button("pe_copy", "Copier un jour", "📋", ButtonStyle.Secondary),
-          button("pe_send", "Envoyer", "📣", ButtonStyle.Primary, !d.plan.length)
+          button("pe_send", "Envoyer", "📣", ButtonStyle.Primary, !d.plan.length),
+          closeBtn()
         ),
-        navRow(),
       ],
     };
   },
-  // Un chatteur : shift, comptes, box
+  // Un chatteur : son shift et ses comptes (ses box se changent sur l'écran du shift)
   async edit(st) {
     const d = await load(st.date);
     const e = d.plan.find((s) => s.sid === st.sid);
-    if (!e) return VIEWS.list({ ...st, note: "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?)." });
+    if (!e) return VIEWS.sh(Object.assign(st, { view: "sh", sel: null, note: "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?)." }));
     const c = d.byId[e.chatterId];
-    const mids = midsOf(e.accts);
-    if (!mids.includes(st.bm)) st.bm = mids[0];
     const accts = d.cat.accounts.slice(0, 25);
     const sl = slotOf(e.slot);
-    const comps = [
-      slotMenu("pe_slot", e.slot, "Changer de shift"),
-      row(
-        new StringSelectMenuBuilder()
-          .setCustomId("pe_acc")
-          .setPlaceholder("Comptes (modèle et plateforme)")
-          .setMinValues(0)
-          .setMaxValues(Math.max(1, accts.length))
-          .addOptions(accts.length ? accts.map((a) => opt(`${withEmoji(a.model)} · ${a.platform}`, a.key, null, null, (e.accts || []).includes(a.key))) : [opt("Aucun compte dans l'app", "none")])
-      ),
-    ];
-    if (st.bm) comps.push(row(boxMenu("pe_box", d, st.bm, boxList(e.boxes?.[st.bm]))));
-    const next = mids.length > 1 && mids[(mids.indexOf(st.bm) + 1) % mids.length];
-    comps.push(
-      row(
-        ...(next ? [button("pe_bm", `Box de ${d.mName(next)}`.slice(0, 80), "🔀", ButtonStyle.Secondary)] : []),
-        button("pe_del", "Retirer du planning", "🗑️", ButtonStyle.Danger),
-        backBtn()
-      )
-    );
     return {
-      content: head(st, [
-        `✏️ ${whoMd(c)} · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}${d.off.has(c.id) ? " · 🏖️ day off" : ""}`,
-        acctsText(d, e.accts, e.boxes),
-        mids.length > 1 ? `_Les box se règlent modèle par modèle : 🔀 pour passer à l'autre._` : "",
-      ]),
-      components: comps,
-    };
-  },
-  // Box d'un chatteur, tout de suite (menu sous le planning du salon) : un menu par modèle
-  async qb(st) {
-    const d = await load(st.date);
-    const e = d.plan.find((s) => s.sid === st.sid);
-    if (!e) return VIEWS.list({ ...st, note: "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?)." });
-    const mids = midsOf(e.accts).slice(0, 3);
-    const sl = slotOf(e.slot);
-    return {
-      content: head(st, [
-        `📦 **Box de ${d.byId[e.chatterId].name}** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}`,
-        acctsText(d, e.accts, e.boxes),
-        mids.length ? "-# Une box donnée ici est retirée à celui du même shift qui l'avait." : "_Aucun compte : ✏️ pour en mettre._",
-      ]),
+      content: head(st, [`✏️ ${whoMd(c)} · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}${d.off.has(c.id) ? " · 🏖️ day off" : ""}`, acctsText(d, e.accts, e.boxes)]),
       components: [
-        ...mids.map((mid, k) => row(boxMenu(`pe_qbx_${k}`, d, mid, boxList(e.boxes?.[mid])))),
-        row(button("pe_pick_qb", "Tout modifier", "✏️", ButtonStyle.Secondary), button("pe_x", "Fermer", null, ButtonStyle.Secondary)),
-      ],
-    };
-  },
-  // Box d'un shift : combien de box pour une modèle et qui les prend (ex. 6 chatteurs dont 2 absents : 4 box)
-  async bx(st) {
-    if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
-    const d = await load(st.date);
-    st.slot = workSlot(st, d);
-    const slot = st.slot, sl = slotOf(slot);
-    const here = d.plan.filter((s) => s.slot === slot);
-    const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
-    if (!mids.includes(st.nbm)) Object.assign(st, { nbm: mids[0] || null, nbn: null, nbw: null });
-    const mid = st.nbm;
-    const on = here.filter((s) => midsOf(s.accts).includes(mid));
-    const pres = (await Promise.resolve(ctx.presence?.(st.date, slot)).catch(() => null)) || {};
-    const started = Date.now() >= appSync.parisMs(st.date, appSync.START_OF[slot]);
-    const stOf = (s) => (d.off.has(s.chatterId) ? "off" : started ? pres[s.chatterId] || "todo" : "");
-    // par défaut : ceux qui sont là (shift commencé) ; sinon ceux qui ont déjà des box, ou tous ceux prévus
-    const boxed = on.filter((s) => boxList(s.boxes?.[mid]).length && stOf(s) !== "off");
-    if (!st.nbw) st.nbw = (started ? on.filter((s) => ["present", "retard"].includes(stOf(s))) : boxed.length ? boxed : on.filter((s) => stOf(s) !== "off")).map((s) => s.sid);
-    const chosen = on.filter((s) => st.nbw.includes(s.sid));
-    if (!st.nbn) st.nbn = Number((await appSync.boxCounts(st.date).catch(() => ({})))[`${slot}|${mid}`]) || Math.max(chosen.length, 1);
-    const split = splitBoxes(chosen, st.nbn, mid);
-    const got = split.filter((p) => p.l.length);
-    const none = on.filter((s) => !got.some((p) => p.s.sid === s.sid));
-    const was = (s) => boxList(s.boxes?.[mid]);
-    return {
-      content: head(st, [
-        `📦 **Box du shift** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}`,
-        mid
-          ? [
-              `**${d.mName(mid).toLocaleUpperCase("fr")}** · ${on.length} chatteur${on.length > 1 ? "s" : ""} · **${st.nbn} box** pour ${chosen.length} chatteur${chosen.length > 1 ? "s" : ""}`,
-              ...got.map((p) => `${whoMd(d.byId[p.s.chatterId])} · ${boxLabel(p.l)}${was(p.s).join() !== p.l.join() ? ` _(avant : ${was(p.s).length ? boxesS(was(p.s)) : "aucune"})_` : ""}`),
-              none.length ? `-# Sans box : ${none.map((s) => `${d.byId[s.chatterId].name}${stOf(s) ? ` (${PRES[stOf(s)]?.l || stOf(s)})` : ""}`).join(", ")}` : "",
-              chosen.length > st.nbn ? `⚠️ ${st.nbn} box pour ${chosen.length} chatteurs : ${chosen.length - st.nbn} n'en ${chosen.length - st.nbn > 1 ? "ont" : "a"} pas.` : "",
-              "-# ✅ Répartir : écrit dans le planning de l'app, et les chatteurs sont prévenus dans le salon clocking pendant le shift.",
-            ].filter(Boolean).join("\n")
-          : "_Personne au planning sur ce shift._",
-      ]),
-      components: [
-        ...(mids.length > 1
-          ? [row(new StringSelectMenuBuilder().setCustomId("pe_ym").setPlaceholder("Modèle").addOptions(mids.slice(0, 25).map((m) => opt(d.mName(m), m, `${here.filter((s) => midsOf(s.accts).includes(m)).length} chatteur(s)`, null, m === mid))))]
-          : []),
-        ...(mid
-          ? [
-              row(new StringSelectMenuBuilder().setCustomId("pe_yn").setPlaceholder("Nombre de box").addOptions(Array.from({ length: 15 }, (_, k) => opt(`${k + 1} box`, String(k + 1), null, "📦", k + 1 === st.nbn)))),
-              row(
-                new StringSelectMenuBuilder()
-                  .setCustomId("pe_yw")
-                  .setPlaceholder("Qui prend des box ?")
-                  .setMinValues(0)
-                  .setMaxValues(Math.min(25, on.length))
-                  .addOptions(on.slice(0, 25).map((s) => opt(d.byId[s.chatterId].name, s.sid, [stOf(s) ? PRES[stOf(s)]?.l : "", was(s).length ? `a ${boxesS(was(s))}` : "sans box"].filter(Boolean).join(" · "), PRES[stOf(s)]?.e || "⚪", st.nbw.includes(s.sid))))
-              ),
-            ]
-          : []),
+        slotMenu("pe_slot", e.slot, "Changer de shift"),
         row(
-          button("pe_yok", "Répartir", "✅", ButtonStyle.Success, !got.length),
-          button("pe_ysl", `Shift : ${sl.l}${st.live ? ` · ${cap(dayLabel(st.date).split(" ")[0])}` : ""}`.slice(0, 80), sl.emoji || null, ButtonStyle.Secondary),
-          button("pe_x", "Fermer", null, ButtonStyle.Secondary)
+          new StringSelectMenuBuilder()
+            .setCustomId("pe_acc")
+            .setPlaceholder("Comptes (modèle et plateforme)")
+            .setMinValues(0)
+            .setMaxValues(Math.max(1, accts.length))
+            .addOptions(accts.length ? accts.map((a) => opt(`${withEmoji(a.model)} · ${a.platform}`, a.key, null, null, (e.accts || []).includes(a.key))) : [opt("Aucun compte dans l'app", "none")])
         ),
-      ],
-    };
-  },
-  // Ajouter quelqu'un
-  async add(st) {
-    const d = await load(st.date);
-    const c = st.cid && d.byId[st.cid];
-    return {
-      content: head(st, [
-        `➕ **Ajouter au planning du ${dayLabel(st.date)}**`,
-        "Choisis le chatteur et son shift : ses comptes habituels sont repris, tu pourras les changer juste après.",
-        c ? `Chatteur : ${whoMd(c)}${st.slot ? ` · ${slotOf(st.slot).emoji} ${slotOf(st.slot).l}` : ""}` : "",
-      ]),
-      components: [
-        ...selectMenus("pe_ac", chatterOpts(d), { placeholder: "Chatteur", max: 3, chosen: [st.cid] }),
-        slotMenu("pe_as", st.slot),
-        row(button("pe_addok", "Ajouter", "✅", ButtonStyle.Success, !(c && st.slot)), backBtn()),
+        row(backBtn(), closeBtn()),
       ],
     };
   },
   // Remplacer : qui part, qui le remplace (il reprend ses comptes et ses box), et ce que deviennent les box
   // du remplaçant s'il était déjà sur une autre modèle de ce shift
   async rep(st) {
-    const d = await load(st.date);
-    const slot = workSlot(st, d);
+    const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
+    const slot = (st.slot = workSlot(st, d));
     const sl = slotOf(slot);
     const here = d.plan.filter((s) => s.slot === slot);
     const e = st.out && here.find((s) => s.sid === st.out);
@@ -395,7 +376,6 @@ const VIEWS = {
     const cands = Object.values(d.byId)
       .filter((c) => c.active && !d.off.has(c.id) && c.id !== e?.chatterId)
       .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, "fr"))
-      .slice(0, 25)
       .map((c) => {
         const mine = here.find((s) => s.chatterId === c.id);
         const other = !mine && d.plan.find((s) => s.chatterId === c.id);
@@ -411,24 +391,26 @@ const VIEWS = {
         leaving.length ? `⚠️ Que deviennent ses box sur ${leaving.map(d.mName).join(", ")} ? (menu du bas)` : "",
       ]),
       components: [
+        shiftRow(st, counts),
         row(here.length ? new StringSelectMenuBuilder().setCustomId("pe_ro").setPlaceholder("Qui part ?").addOptions(entryOpts(d, here.slice(0, 25)).map((o) => ({ ...o, default: o.value === st.out }))) : emptyMenu("pe_ro", "Personne sur ce shift")),
-        row(cands.length ? new StringSelectMenuBuilder().setCustomId("pe_ri").setPlaceholder("Qui le remplace ?").addOptions(cands) : emptyMenu("pe_ri", "Personne de libre")),
+        pickRow("pe_ri", { alt: st.alt, opts: cands, chatters: Object.values(d.byId), cid: st.inn, placeholder: "Qui le remplace ?" }),
         ...(leaving.length
           ? [row(new StringSelectMenuBuilder().setCustomId("pe_rf").setPlaceholder("Ses autres box").addOptions(fateOpts(d, slot, target, leaving, [r.id, e.chatterId]).map((o) => ({ ...o, default: o.value === (st.fate || "keep") }))))]
           : []),
         row(
-          slotCycle(st, d),
-          button("pe_cut", st.cut ? "Coupure : oui" : "Coupure : non", "✂️", st.cut ? ButtonStyle.Primary : ButtonStyle.Secondary),
           button("pe_repok", "Remplacer", "🔁", ButtonStyle.Success, !(e && r)),
-          backBtn()
+          button("pe_cut", st.cut ? "Coupure : oui" : "Coupure : non", "✂️", st.cut ? ButtonStyle.Primary : ButtonStyle.Secondary),
+          ...altButton("pe_alt", { alt: st.alt, opts: cands, chatters: Object.values(d.byId) }),
+          backBtn(),
+          closeBtn()
         ),
       ],
     };
   },
   // Déplacer : un chatteur va sur une autre modèle (renfort, ou à la place de quelqu'un) avec ses box
   async mv(st) {
-    const d = await load(st.date);
-    const slot = workSlot(st, d);
+    const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
+    const slot = (st.slot = workSlot(st, d));
     const sl = slotOf(slot);
     const here = d.plan.filter((s) => s.slot === slot);
     const e = st.mvSid && here.find((s) => s.sid === st.mvSid);
@@ -446,31 +428,32 @@ const VIEWS = {
         tk ? `Vers : **${d.mName(tm).toLocaleUpperCase("fr")}** ${d.cat.platName(tk.split("|")[1])}${st.mvBoxes?.length ? ` · ${boxLabel(boxList(st.mvBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesE(boxList(s.boxes?.[tm]))}`.trim()).join(", ")}` : ""}` : "",
       ]),
       components: [
+        // 5 lignes au plus : le menu des shifts laisse sa place au choix de ses box actuelles
+        ...(others.length ? [] : [shiftRow(st, counts)]),
         row(here.length ? new StringSelectMenuBuilder().setCustomId("pe_mw").setPlaceholder("Qui ?").addOptions(entryOpts(d, here.slice(0, 25)).map((o) => ({ ...o, default: o.value === st.mvSid }))) : emptyMenu("pe_mw", "Personne sur ce shift")),
         row(new StringSelectMenuBuilder().setCustomId("pe_mt").setPlaceholder("Vers quelle modèle ?").addOptions(accts.map((a) => opt(`${withEmoji(a.model)} · ${a.platform}`, a.key, null, null, a.key === tk)))),
         row(tm ? boxMenu("pe_mb", d, tm, boxList(st.mvBoxes), `Ses box sur ${d.mName(tm)}`) : emptyMenu("pe_mb", "Ses box (choisis d'abord la modèle)")),
         ...(others.length
           ? [row(new StringSelectMenuBuilder().setCustomId("pe_mf").setPlaceholder("Ses box actuelles").addOptions(fateOpts(d, slot, e, others, [e.chatterId]).map((o) => ({ ...o, default: o.value === (st.fate || "keep") }))))]
           : []),
-        row(slotCycle(st, d), button("pe_mvok", "Déplacer", "🔀", ButtonStyle.Success, !(e && tk)), backBtn()),
+        row(button("pe_mvok", "Déplacer", "🔀", ButtonStyle.Success, !(e && tk)), backBtn(), closeBtn()),
       ],
     };
   },
   // Renfort : un chatteur sur un shift où il n'est pas prévu
   async ren(st) {
-    const choices = shiftChoices(st);
-    const keyOf = (x) => `${x.date}|${x.slot}`;
-    if (!choices.some((x) => keyOf(x) === st.rk)) st.rk = keyOf(choices[0]);
-    const [date, slot] = st.rk.split("|");
-    st.date = date;
-    const d = await load(date);
+    if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
+    // la nuit commence à 2 h : ceux du soir d'avant (la veille) peuvent rester en renfort
+    const evening = (k) => (k === "nuit" ? appSync.planOf(appSync.addDays(st.date, -1)).catch(() => []) : Promise.resolve([]));
+    const asked = st.slot, early = evening(st.slot);
+    const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
+    const date = st.date, slot = (st.slot = workSlot(st, d));
     const sl = slotOf(slot);
     const c = st.cid && d.byId[st.cid];
     const mid = st.acc && st.acc.split("|")[0];
     const holders = mid ? d.plan.filter((s) => s.slot === slot && s.chatterId !== st.cid && midsOf(s.accts).includes(mid)) : [];
     const here = c && d.plan.find((s) => s.chatterId === c.id && s.slot === slot);
-    // la nuit commence à 2 h : ceux du soir d'avant (la veille) peuvent rester en renfort
-    const eve = slot === "nuit" ? (await appSync.planOf(appSync.addDays(date, -1))).filter((s) => s.slot === "soir").map((s) => ({ ...s, slot: "soir", eve: true })) : [];
+    const eve = (await (asked === slot ? early : evening(slot))).filter((s) => s.slot === "soir").map((s) => ({ ...s, slot: "soir", eve: true }));
     const elsewhere = (id) => [...eve, ...d.plan].filter((s) => s.chatterId === id && (s.eve || s.slot !== slot));
     // d'abord ceux prévus sur un autre shift ce jour-là (ils restent ou arrivent plus tôt), puis les libres, puis ceux déjà dessus
     const rank = (x) => (d.plan.some((s) => s.chatterId === x.id && s.slot === slot) ? 2 : elsewhere(x.id).length ? 0 : 1);
@@ -483,24 +466,32 @@ const VIEWS = {
         const where = (l) => l.map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ");
         return opt(x.name, x.id, on ? `Déjà sur ce shift · ${acctsText(d, on.accts, on.boxes, false)}` : other.length ? `Prévu en ${where(other)} · ${acctsText(d, other[0].accts, other[0].boxes, false)}` : "Libre ce jour-là", on ? sl.emoji : other.length ? slotOf(other[0].slot).emoji : "🟢");
       });
+    const where = (l) => l.map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ");
+    const around = Object.values(d.byId).filter((x) => x.active && !d.off.has(x.id) && rank(x) === 0).sort((a, b) => a.name.localeCompare(b.name, "fr"));
     const now = Date.now() >= appSync.parisMs(date, appSync.START_OF[slot]);
     return {
       content: head(st, [
-        `➕ **Renfort** · ${sl.emoji} ${sl.l} (${sl.h}) · ${dayLabel(date)}${now ? " · en cours" : ""}`,
-        "Mets un chatteur sur un shift où il n'est pas prévu (ex. un gars du soir qui reste la nuit), avec sa modèle et ses box : elles sont retirées à celui qui les avait.",
+        `➕ **${st.live ? "Renfort" : "Ajouter"}** · ${sl.emoji} ${sl.l} (${sl.h}) · ${dayLabel(date)}${now ? " · en cours" : ""}`,
+        st.live
+          ? "Mets un chatteur sur un shift où il n'est pas prévu (ex. un gars du soir qui reste la nuit), avec sa modèle et ses box : elles sont retirées à celui qui les avait."
+          : "Choisis le chatteur, sa modèle (son compte habituel est proposé) et ses box : elles sont retirées à celui qui les avait.",
+        // qui peut rester ou venir plus tôt : ceux prévus sur un autre shift (le menu des membres ne le montre pas)
+        !c && around.length ? `-# Prévus sur un autre shift : ${around.slice(0, 15).map((x) => `${x.name} (${where(elsewhere(x.id))})`).join(", ")}${around.length > 15 ? "…" : ""}` : "",
         c ? `Chatteur : ${whoMd(c)}${elsewhere(c.id).length ? ` · prévu en ${elsewhere(c.id).map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ")}` : ""}${here ? `\n-# Déjà sur ce shift (${acctsText(d, here.accts, here.boxes, false)}) : la modèle s'ajoute à ses comptes.` : ""}` : "",
         st.acc ? `Sur : **${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${st.rBoxes?.length ? ` · ${boxLabel(boxList(st.rBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesE(boxList(s.boxes?.[mid]))}`.trim()).join(", ")}` : ""}` : "",
       ]),
       components: [
-        ...selectMenus("pe_nc", people.map((o) => ({ ...o, default: o.value === st.cid })), { placeholder: "Chatteur en renfort", max: 2, chosen: [st.cid] }),
+        shiftRow(st, counts),
+        pickRow("pe_nc", { alt: st.alt, opts: people, chatters: Object.values(d.byId), cid: st.cid, placeholder: st.live ? "Chatteur en renfort" : "Chatteur" }),
         row(new StringSelectMenuBuilder().setCustomId("pe_na").setPlaceholder("Sur quelle modèle ?").addOptions(d.cat.accounts.slice(0, 25).map((a) => opt(`${withEmoji(a.model)} · ${a.platform}`, a.key, null, null, a.key === st.acc)))),
         row(mid ? boxMenu("pe_nb", d, mid, boxList(st.rBoxes), `Ses box sur ${d.mName(mid)}`) : emptyMenu("pe_nb", "Ses box (choisis d'abord la modèle)")),
         row(
-          button("pe_nsl", `Shift : ${sl.l} · ${cap(dayLabel(date).split(" ")[0])}`.slice(0, 80), sl.emoji || null, ButtonStyle.Secondary, choices.length < 2),
-          button("pe_nok", "Mettre en renfort", "➕", ButtonStyle.Success, !(c && st.acc)),
-          st.live ? button("pe_x", "Fermer", null, ButtonStyle.Secondary) : backBtn()
+          button("pe_nok", st.live ? "Mettre en renfort" : "Ajouter", "➕", ButtonStyle.Success, !(c && st.acc)),
+          ...altButton("pe_alt", { alt: st.alt, opts: people, chatters: Object.values(d.byId) }),
+          backBtn(),
+          closeBtn()
         ),
-      ].slice(0, 5),
+      ],
     };
   },
   // Copier un autre jour sur ce jour (box comprises), puis on adapte
@@ -539,8 +530,10 @@ const render = async (i, st, fresh) => showView(i, await VIEWS[st.view](st), fre
 async function open(i, date, view, extra = {}) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+  if (view === "bx") return openBox(i, { date, ...extra });
   const st = { date, view, cut: false, fate: "keep", ...extra };
   states.set(i.user.id, st);
+  memo = new Map();
   await i.deferReply({ flags: EPHEMERAL });
   return render(i, st);
 }
@@ -565,101 +558,107 @@ async function openReplaceFor(i, uid) {
 async function save(st, patch) {
   if (!Object.keys(patch).length) return;
   await appSync.writePlan(st.date, patch);
+  memo = new Map();
   ctx.refresh?.(st.date);
 }
 async function handle(i) {
   const id = i.customId;
+  memo = new Map();
   // sous le planning du salon : pl_<vue>_<date>, ou sous le message de début de shift : pl_edit_<date>_<créneau>
   const pub = id.match(/^pl_(edit|rep|add|mv|next)_(\d{4}-\d{2}-\d{2})(?:_([a-z]+))?$/);
   if (pub) {
     const [, act, date, slot] = pub;
     if (act === "next") return open(i, appSync.addDays(date, 1), "copy", { src: date });
-    return open(i, date, { edit: "list", rep: "rep", add: "add", mv: "mv" }[act], slot ? { only: slot, slot } : {});
+    return open(i, date, { edit: "sh", rep: "rep", add: "ren", mv: "mv" }[act], slot ? { slot } : {});
   }
-  // menu « box » d'un shift sous le planning : pl_qb_<date>_<créneau>
+  // menu « box » d'un shift sous le planning : pl_qb_<date>_<créneau> -> l'écran du shift, ce chatteur choisi
   const qb = id.match(/^pl_qb_(\d{4}-\d{2}-\d{2})_([a-z]+)$/);
-  if (qb) return i.values?.[0] === "_nb" ? open(i, qb[1], "bx", { slot: qb[2] }) : open(i, qb[1], "qb", { sid: i.values?.[0], slot: qb[2] });
+  if (qb) return i.values?.[0] === "_nb" ? open(i, qb[1], "bx", { slot: qb[2] }) : open(i, qb[1], "sh", { slot: qb[2], sel: `${i.values?.[0]}|` });
+  if (id.startsWith("pb_")) return handleBox(i);
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const st = states.get(i.user.id);
   if (!st) return done(i, "Ce menu a expiré : reclique sur un bouton du planning.", 8000);
   st.note = "";
-  const [, act, arg] = id.split("_");
+  const [, act] = id.split("_");
   const v = i.values?.[0];
   if (act === "x") {
     states.delete(i.user.id);
     return done(i, "✅ C'est noté.", 4000);
   }
   await i.deferUpdate();
+  // 🗑️ Retirer demande un 2e clic ; n'importe quel autre clic annule
+  const armed = st.delArm;
+  st.delArm = null;
+  const selSid = () => String(st.sel || "").split("|")[0] || null;
+  // une action réussie (✅) ramène à l'écran du shift
+  const home = (note) => {
+    st.note = note;
+    if (String(note).startsWith("✅")) st.view = "sh";
+  };
 
-  if (act === "back") st.view = "list";
-  else if (act === "day") {
-    st.date = appSync.addDays(st.date, Number(arg) || 0);
-    st.view = "list";
-  } else if (act === "add") Object.assign(st, { view: "add", cid: null, slot: st.only || null });
-  else if (act === "rep") Object.assign(st, { view: "rep", out: null, inn: null, cut: false, fate: "keep" });
-  else if (act === "mv") Object.assign(st, { view: "mv", mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep" });
-  else if (act === "copy") Object.assign(st, { view: "copy", src: null, add: false });
-  else if (act === "pick") Object.assign(st, { view: "edit", sid: arg === "qb" ? st.sid : v, bm: null });
-  else if (act === "sl") {
+  if (act === "back") st.view = "sh";
+  else if (act === "ss") {
+    const [a, b] = String(v).split("|");
+    if (a === "d") st.date = b;
+    else Object.assign(st, { date: a, slot: b });
+    Object.assign(st, { sel: null, out: null, inn: null, mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep", nbm: null, nbn: null, nbw: null });
+  } else if (act === "sc") st.sel = v;
+  else if (act === "sb" || act === "sdl") {
     const d = await load(st.date);
-    const filled = SLOTS.filter((s) => d.plan.some((e) => e.slot === s.k)).map((s) => s.k);
-    st.slot = filled[(filled.indexOf(workSlot(st, d)) + 1) % filled.length];
-    Object.assign(st, { out: null, inn: null, mvSid: null, mvBoxes: [], fate: "keep" });
-  } else if (act === "send") {
+    const [sid, mid] = String(st.sel || "").split("|");
+    const e = d.plan.find((s) => s.sid === sid);
+    if (!e) Object.assign(st, { sel: null, note: "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?)." });
+    else if (act === "sb") st.note = mid ? await setBoxes(st, d, e, mid, i.values) : "";
+    else if (armed !== sid) st.delArm = sid;
+    else {
+      await save(st, { [sid]: null });
+      Object.assign(st, { sel: null, note: `🗑️ ${whoMd(d.byId[e.chatterId])} retiré du ${slotOf(e.slot).l}.` });
+    }
+  } else if (act === "srp") Object.assign(st, { view: "rep", out: selSid(), inn: null, cut: false, fate: "keep", alt: false });
+  else if (act === "smv") Object.assign(st, { view: "mv", mvSid: selSid(), mvAcc: null, mvBoxes: [], fate: "keep" });
+  else if (act === "sed") Object.assign(st, { view: "edit", sid: selSid() });
+  else if (act === "add") Object.assign(st, { view: "ren", cid: null, acc: null, rBoxes: [], alt: false });
+  else if (act === "bx") return openBox(i, { date: st.date, slot: st.slot, live: st.live }, true);
+  else if (act === "copy") Object.assign(st, { view: "copy", src: null, add: false });
+  else if (act === "send") {
     const r = await ctx.postPlanning(st.date).catch((e) => ({ error: e.message }));
     st.note = r?.error ? `⚠️ Pas envoyé : ${String(r.error).slice(0, 150)}` : `📣 Planning du ${dayLabel(st.date)} envoyé dans le salon planning (${r.count} chatteur${r.count > 1 ? "s" : ""}).`;
-  } else if (act === "bm") {
-    const d = await load(st.date);
-    const mids = midsOf(d.plan.find((s) => s.sid === st.sid)?.accts);
-    st.bm = mids[(mids.indexOf(st.bm) + 1) % mids.length];
-  } else if (["slot", "acc", "box", "del", "qbx"].includes(act)) {
+  } else if (act === "slot" || act === "acc") {
     const d = await load(st.date);
     const e = d.plan.find((s) => s.sid === st.sid);
-    if (!e) st.view = "list";
+    if (!e) st.view = "sh";
     else if (act === "slot") {
       if (v !== e.slot && d.plan.some((s) => s.chatterId === e.chatterId && s.slot === v))
         st.note = `⚠️ ${whoMd(d.byId[e.chatterId])} est déjà au planning sur ce shift.`;
       else if (v !== e.slot) {
         await save(st, { [e.sid]: { slot: v } });
-        st.note = `✅ Passé en ${slotOf(v).emoji} ${slotOf(v).l}.`;
+        // Retour : l'écran de son nouveau shift, lui choisi
+        Object.assign(st, { slot: v, sel: `${e.sid}|`, note: `✅ Passé en ${slotOf(v).emoji} ${slotOf(v).l}.` });
       }
-    } else if (act === "acc") {
+    } else {
       const accts = i.values.filter((x) => x !== "none");
       const gone = midsOf(e.accts).filter((m) => !midsOf(accts).includes(m));
       const boxes = Object.fromEntries(Object.keys(e.boxes || {}).filter((m) => gone.includes(m)).map((m) => [m, null]));
       await save(st, { [e.sid]: { accts, ...(Object.keys(boxes).length ? { boxes } : {}) } });
       st.note = "✅ Comptes enregistrés.";
-    } else if (act === "box") st.note = await setBoxes(st, d, e, st.bm, i.values);
-    else if (act === "qbx") {
-      const mid = midsOf(e.accts)[Number(arg) || 0];
-      if (mid) st.note = await setBoxes(st, d, e, mid, i.values);
-    } else {
-      await save(st, { [e.sid]: null });
-      st.view = "list";
-      st.note = `🗑️ ${whoMd(d.byId[e.chatterId])} retiré du ${slotOf(e.slot).l}.`;
-    }
-  } else if (act === "ac") {
-    st.cid = v;
-    const c = (await appSync.appChatters()).find((x) => x.id === v);
-    if (!st.slot) st.slot = appSync.habSlots(c?.shift)[0] || null; // son shift habituel par défaut
-  } else if (act === "as") st.slot = v;
-  else if (act === "addok") {
-    const d = await load(st.date);
-    const c = d.byId[st.cid];
-    const e = c && d.plan.find((s) => s.chatterId === c.id && s.slot === st.slot);
-    if (!c || !st.slot) st.note = "Choisis le chatteur et le shift.";
-    else if (d.off.has(c.id)) st.note = `⛔ ${whoMd(c)} est en day off ce jour-là.`;
-    else if (e) Object.assign(st, { view: "edit", sid: e.sid, bm: null, note: `ℹ️ ${whoMd(c)} est déjà sur ce shift : modifie-le ici.` });
-    else {
-      const sid = appSync.newId();
-      await save(st, { [sid]: { slot: st.slot, chatterId: c.id, accts: c.shift?.accts || [] } });
-      Object.assign(st, { view: "edit", sid, bm: null, note: `✅ ${whoMd(c)} ajouté en ${slotOf(st.slot).emoji} ${slotOf(st.slot).l}. Règle ses comptes et ses box :` });
     }
   } else if (act === "ro") Object.assign(st, { out: v, inn: null, fate: "keep" });
-  else if (act === "ri") Object.assign(st, { inn: v, fate: "keep" });
+  else if (act === "ri" || act === "nc") {
+    // remplaçant ou renfort : tapé dans le menu des membres, ou pris dans la liste de ceux pas sur Discord
+    const d = await load(st.date);
+    const out = act === "ri" && d.plan.find((s) => s.sid === st.out)?.chatterId;
+    const r = await picked(i, Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id) && c.id !== out), { why: `inactif ou en day off ce jour-là${out ? ", ou c'est lui qui part" : ""}` });
+    if (!r.c) st.note = r.error;
+    else if (act === "ri") Object.assign(st, { inn: r.c.id, fate: "keep" });
+    else {
+      st.cid = r.c.id;
+      // son compte habituel par défaut
+      if (!st.acc) st.acc = r.c.shift?.accts?.[0] || null;
+    }
+  } else if (act === "alt") st.alt = !st.alt;
   else if (act === "rf" || act === "mf") st.fate = v;
   else if (act === "cut") st.cut = !st.cut;
-  else if (act === "repok") st.note = await replace(st);
+  else if (act === "repok") home(await replace(st));
   else if (act === "mw") Object.assign(st, { mvSid: v, fate: "keep" });
   else if (act === "mt") {
     const d = await load(st.date);
@@ -667,35 +666,20 @@ async function handle(i) {
     st.mvAcc = v;
     st.mvBoxes = e ? boxList(e.boxes?.[v.split("|")[0]]) : [];
   } else if (act === "mb") st.mvBoxes = cleanBoxes(i.values, boxList(st.mvBoxes));
-  else if (act === "mvok") st.note = await move(st);
-  else if (act === "nsl") {
-    const choices = shiftChoices(st).map((x) => `${x.date}|${x.slot}`);
-    st.rk = choices[(choices.indexOf(st.rk) + 1) % choices.length];
-  } else if (act === "nc") st.cid = v;
+  else if (act === "mvok") home(await move(st));
   else if (act === "na") Object.assign(st, { acc: v, rBoxes: [] });
   else if (act === "nb") st.rBoxes = cleanBoxes(i.values, boxList(st.rBoxes));
-  else if (act === "nok") st.note = await renfort(st);
-  else if (act === "ym") Object.assign(st, { nbm: v, nbn: null, nbw: null });
-  else if (act === "yn") st.nbn = Number(v) || 1;
-  else if (act === "yw") st.nbw = i.values;
-  else if (act === "yok") st.note = await boxSplit(st);
-  else if (act === "ysl") {
-    if (st.live) {
-      const ch = shiftChoices(st);
-      Object.assign(st, ch[(ch.findIndex((x) => x.date === st.date && x.slot === st.slot) + 1) % ch.length] || {});
-    } else {
-      const d = await load(st.date);
-      const filled = SLOTS.filter((s) => d.plan.some((e) => e.slot === s.k)).map((s) => s.k);
-      st.slot = filled[(filled.indexOf(st.slot) + 1) % filled.length] || st.slot;
-    }
-    Object.assign(st, { nbm: null, nbn: null, nbw: null });
-  } else if (act === "cs") st.src = v;
+  else if (act === "nok") home(await renfort(st));
+  else if (act === "cs") st.src = v;
   else if (act === "cm") st.add = !st.add;
   else if (act === "cok") {
     const r = await appSync.copyPlan(st.src, st.date, { replace: !st.add });
+    memo = new Map();
     ctx.refresh?.(st.date);
     Object.assign(st, {
-      view: "list",
+      view: "sh",
+      slot: null,
+      sel: null,
       note: `✅ ${r.added} ligne${r.added > 1 ? "s" : ""} copiée${r.added > 1 ? "s" : ""} depuis le ${dayLabel(st.src)}${r.skipped ? ` (${r.skipped} pas reprise${r.skipped > 1 ? "s" : ""} : day off ou inactif)` : ""}. Adapte ici, puis 📣 **Envoyer**.`,
     });
   }
@@ -715,7 +699,7 @@ async function replace(st) {
   const boxes = Object.fromEntries(Object.entries(e.boxes || {}).map(([m, v]) => [m, boxList(v)]).filter(([m, v]) => v.length && mids.includes(m)));
   const target = d.plan.find((s) => s.chatterId === r.id && s.slot === e.slot);
   const patch = {};
-  let fate = "";
+  let fate = "", rsid = target?.sid;
   if (target) {
     const leaving = st.fate && st.fate !== "keep" ? midsOf(target.accts).filter((m) => !mids.includes(m)) : [];
     fate = applyFate(d, st.fate, target, leaving, patch);
@@ -723,7 +707,7 @@ async function replace(st) {
     for (const [m, v] of Object.entries(boxes)) merged[m] = boxList([...boxList(target.boxes?.[m]), ...v]);
     const accts = [...new Set([...(target.accts || []).filter((k) => !leaving.includes(k.split("|")[0])), ...(e.accts || [])])];
     addPatch(patch, target.sid, { accts, ...(Object.keys(merged).length ? { boxes: merged } : {}) });
-  } else addPatch(patch, appSync.newId(), { slot: e.slot, chatterId: r.id, accts: [...(e.accts || [])], ...(Object.keys(boxes).length ? { boxes } : {}) });
+  } else addPatch(patch, (rsid = appSync.newId()), { slot: e.slot, chatterId: r.id, accts: [...(e.accts || [])], ...(Object.keys(boxes).length ? { boxes } : {}) });
   if (Object.keys(e.boxes || {}).length)
     addPatch(patch, e.sid, {
       boxes: Object.fromEntries(Object.keys(e.boxes).map((m) => [m, null])),
@@ -744,7 +728,7 @@ async function replace(st) {
       content: `🔁 ${tag(r)} remplace ${tag(out)}${st.cut ? " (✂️ coupure)" : ""} · ${sl.emoji} ${sl.l} · ${what}${fate}`,
       allowedMentions: { users: [r.discordId, out.discordId].filter(Boolean) },
     }).catch((err) => console.error("Remplacement (salon clocking) :", err.message));
-  Object.assign(st, { out: null, inn: null, cut: false, fate: "keep" });
+  Object.assign(st, { out: null, inn: null, cut: false, fate: "keep", sel: `${rsid}|` });
   return `✅ ${whoMd(r)} reprend ${what} de ${whoMd(out)} sur ${sl.emoji} ${sl.l}${noPing(d, fate)}.${cut}`;
 }
 
@@ -773,13 +757,13 @@ async function move(st) {
       content: `🔀 ${tag(c)} passe sur ${dest} · ${sl.emoji} ${sl.l}${fate}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
     }).catch((err) => console.error("Déplacement (salon clocking) :", err.message));
-  Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep" });
+  Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep", sel: `${e.sid}|${tm}` });
   return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` · ${boxLabel(l)}` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
 
 // Renfort : un chatteur en plus sur un shift (ex. un gars du soir qui reste la nuit), sur la modèle et les box choisies
 async function renfort(st) {
-  const [date, slot] = st.rk.split("|");
+  const { date, slot } = st;
   const d = await load(date);
   const c = d.byId[st.cid];
   if (!c || !st.acc) return "Choisis le chatteur et la modèle.";
@@ -798,10 +782,10 @@ async function renfort(st) {
   if (running(date, slot))
     await ctx.notify?.({ content: `➕ ${tag(c)} en renfort · ${sl.emoji} ${sl.l} · ${dest}`, allowedMentions: { users: [c.discordId].filter(Boolean) } })
       .catch((err) => console.error("Renfort (salon clocking) :", err.message));
-  Object.assign(st, { cid: null, acc: null, rBoxes: [] });
-  return `✅ ${whoMd(c)} en renfort sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` · ${boxLabel(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+  Object.assign(st, { cid: null, acc: null, rBoxes: [], sel: `${sid}|${mid}` });
+  return `✅ ${whoMd(c)} ${st.live ? "en renfort" : "ajouté"} sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` · ${boxLabel(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
-// Shifts proposés pour un renfort : depuis le salon gestion, celui en cours et les trois suivants ; sinon ceux du jour
+// Depuis le salon gestion : le shift en cours d'abord, puis les suivants ; sinon ceux du jour
 function shiftChoices(st) {
   if (!st.live) return SLOTS.map((s) => ({ date: st.date, slot: s.k }));
   const now = Date.now();
@@ -840,6 +824,190 @@ async function giveBack(date, slot, cid) {
   addPatch(patch, e.sid, { held: null });
   await save({ date }, patch);
   return `reprend ses ${parts.map(({ h, b, from }) => `${boxLabel(b)} sur **${d.mName(h.m)}**${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
+}
+
+// ---------- Box du shift : une ligne par box, le chatteur en face ----------
+// Message à part, avec la nouvelle mise en page de Discord (plus de 5 lignes de menus) : pour une modèle sur
+// un shift, le nombre de box, puis une ligne par box où l'on choisit son chatteur. Chaque choix est enregistré
+// tout de suite (la box est retirée à celui qui l'avait) ; 🔎 met quelqu'un d'autre sur cette modèle.
+const boxStates = new Map(); // userId -> { date, slot, live, mid, alt }
+const keycap = (n) => (n <= 9 ? `${n}\uFE0F\u20E3` : n === 10 ? "🔟" : "📦");
+async function boxView(st) {
+  if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
+  const early = st.slot ? presenceOf(st.date, st.slot) : null;
+  const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
+  st.slot = workSlot(st, d);
+  const pres = await (early || presenceOf(st.date, st.slot));
+  const slot = st.slot, sl = slotOf(slot);
+  const here = d.plan.filter((s) => s.slot === slot);
+  const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
+  if (!mids.includes(st.mid)) st.mid = mids[0] || null;
+  const mid = st.mid;
+  const name = (s) => d.byId[s.chatterId].name;
+  const on = here.filter((s) => midsOf(s.accts).includes(mid)).sort((a, b) => name(a).localeCompare(name(b), "fr"));
+  const started = Date.now() >= startOf(st.date, slot);
+  const stOf = (s) => (d.off.has(s.chatterId) ? "off" : started ? pres[s.chatterId] || "todo" : "");
+  const bx = (s) => boxList(s.boxes?.[mid]);
+  const top = Math.max(0, ...on.flatMap((s) => bx(s).filter((b) => b !== "all").map(Number)));
+  const n = (st.n = Number(d.nbox?.[`${slot}|${mid}`]) || top || on.filter((s) => stOf(s) !== "off").length || 1);
+  const holder = (b) => on.find((s) => bx(s).includes(String(b)));
+  const allIn = on.filter((s) => bx(s).includes("all"));
+  const over = on.flatMap((s) => bx(s).filter((b) => b !== "all" && Number(b) > n).map((b) => `${name(s)} (${b})`));
+  const eligible = Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id) && !on.some((s) => s.chatterId === c.id));
+  const addOpts = eligible.map((c) => opt(c.name, c.id));
+  const live = running(st.date, slot);
+  const buttons = [
+    button("pb_auto", `Répartir sur ceux qui sont là`, "🔄", ButtonStyle.Secondary, !on.length),
+    ...(live ? [button("pb_tell", "Prévenir le clocking", "📣", ButtonStyle.Primary, !on.some((s) => bx(s).length))] : []),
+    ...altButton("pb_alt", { alt: st.alt, opts: addOpts, chatters: eligible }),
+    button("pb_x", "Fermer", null, ButtonStyle.Secondary),
+  ];
+  // 40 éléments au plus dans un message : chaque ligne de menu en compte 2
+  const fixed = 1 + 2 + (mids.length > 1 ? 2 : 0) + (mid ? 4 : 0) + 1 + buttons.length;
+  const shownN = Math.min(n, Math.floor((40 - fixed) / 2), 15);
+  const boxRow = (b) => {
+    const h = holder(b);
+    return row(
+      new StringSelectMenuBuilder()
+        .setCustomId(`pb_b_${b}`)
+        .setPlaceholder(`Box ${b}`)
+        .addOptions(
+          opt(`Box ${b} · libre`, "_free", "Personne sur cette box", keycap(b), !h),
+          ...on.slice(0, 24).map((s) => {
+            const k = stOf(s), l = bx(s);
+            return opt(`Box ${b} · ${name(s)}`, s.sid, [k ? PRES[k].l : "", l.length ? `a ${boxesT(l)}` : "sans box"].filter(Boolean).join(" · "), h?.sid === s.sid ? keycap(b) : (k && PRES[k].e) || "👤", h?.sid === s.sid);
+          })
+        )
+    );
+  };
+  const text = [
+    st.note,
+    `📦 **Box du shift** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}${isNow(st.date, slot) ? " · 🔴 en cours" : ""}`,
+    mid
+      ? [
+          `**${d.mName(mid).toLocaleUpperCase("fr")}** · ${on.length} chatteur${plS(on.length)} · **${n} box**`,
+          ...on.map((s) => {
+            const k = stOf(s), l = bx(s);
+            return [`${k ? `${PRES[k].e} ` : ""}${name(s)}`, l.length ? boxLabel(l) : "sans box", ["retard", "coupure", "absent", "off"].includes(k) ? PRES[k].l : ""].filter(Boolean).join(" · ");
+          }),
+          allIn.length ? `-# 📥 All Inbox : ${allIn.map(name).join(", ")}` : "",
+          over.length ? `-# En plus des ${n} box : ${over.join(", ")}` : "",
+          shownN < n ? `-# Box ${shownN + 1} à ${n} : sur l'écran du shift (✏️ Modifier).` : "",
+          "-# Une ligne par box : choisis son chatteur, c'est enregistré tout de suite.",
+        ].filter(Boolean).join("\n")
+      : "_Personne au planning sur ce shift._",
+  ].filter(Boolean).join("\n");
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [
+      new TextDisplayBuilder().setContent(fitMsg(text).slice(0, 3900)),
+      shiftRow(st, counts, { id: "pb_ss" }),
+      ...(mids.length > 1 ? [row(new StringSelectMenuBuilder().setCustomId("pb_m").setPlaceholder("Modèle").addOptions(mids.slice(0, 25).map((m) => opt(d.mName(m), m, `${here.filter((s) => midsOf(s.accts).includes(m)).length} chatteur(s)`, null, m === mid))))] : []),
+      ...(mid
+        ? [
+            row(new StringSelectMenuBuilder().setCustomId("pb_n").setPlaceholder("Nombre de box").addOptions(Array.from({ length: 15 }, (_, k) => opt(`${k + 1} box`, String(k + 1), null, "📦", k + 1 === n)))),
+            ...Array.from({ length: shownN }, (_, k) => boxRow(k + 1)),
+            pickRow("pb_add", { alt: st.alt, opts: addOpts, chatters: eligible, placeholder: `Quelqu'un d'autre sur ${d.mName(mid)}` }),
+          ]
+        : []),
+      row(...buttons),
+    ],
+  };
+}
+// Le message des box : nouveau (fresh) ou celui où l'on a cliqué
+async function showBox(i, st, fresh) {
+  const p = { allowedMentions: { parse: [] }, ...(await boxView(st)) };
+  if (!fresh) return i.editReply(p);
+  if (fresh === "follow") return i.followUp({ ...p, flags: p.flags | EPHEMERAL });
+  return i.editReply(p);
+}
+// fresh = true depuis l'écran du shift (nouveau message à côté), sinon depuis un bouton du serveur
+async function openBox(i, extra, fromHub = false) {
+  if (!fromHub) {
+    if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+    if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+    await i.deferReply({ flags: EPHEMERAL });
+  }
+  const st = { date: extra.date, slot: extra.slot || null, live: !!extra.live };
+  boxStates.set(i.user.id, st);
+  memo = new Map();
+  return showBox(i, st, fromHub ? "follow" : true);
+}
+async function handleBox(i) {
+  if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+  const st = boxStates.get(i.user.id);
+  if (!st) return reply(i, { content: "Ce menu a expiré : rouvre 📦 Box du shift." });
+  const [, act, arg] = i.customId.split("_");
+  const v = i.values?.[0];
+  await i.deferUpdate();
+  if (act === "x") {
+    boxStates.delete(i.user.id);
+    return i.deleteReply().catch(() => {});
+  }
+  st.note = "";
+  const d = await load(st.date);
+  const mid = st.mid, slot = st.slot;
+  const on = d.plan.filter((s) => s.slot === slot && midsOf(s.accts).includes(mid));
+  if (act === "ss") {
+    const [a, b] = String(v).split("|");
+    if (a === "d") st.date = b;
+    else Object.assign(st, { date: a, slot: b });
+  } else if (act === "m") st.mid = v;
+  else if (act === "alt") st.alt = !st.alt;
+  else if (act === "n") {
+    // nouveau nombre de box : celles au-delà sont libérées
+    const n = Number(v) || 1;
+    const patch = {}, freed = [];
+    for (const s of on) {
+      const l = boxList(s.boxes?.[mid]);
+      const keep = l.filter((b) => b === "all" || Number(b) <= n);
+      if (keep.length < l.length) {
+        addPatch(patch, s.sid, { boxes: { [mid]: keep.length ? keep : null } });
+        freed.push(`${d.byId[s.chatterId].name} (${l.filter((b) => !keep.includes(b)).join(", ")})`);
+      }
+    }
+    await save(st, patch);
+    await appSync.setBoxCount(st.date, slot, mid, n);
+    memo = new Map();
+    st.note = `✅ **${d.mName(mid)}** : ${n} box.${freed.length ? ` Libérées : ${freed.join(", ")}.` : ""}`;
+  } else if (act === "b") {
+    const b = String(Number(arg) || 0);
+    const was = on.find((s) => boxList(s.boxes?.[mid]).includes(b));
+    if (v === "_free") {
+      if (was) {
+        const left = boxList(was.boxes[mid]).filter((x) => x !== b);
+        await save(st, { [was.sid]: { boxes: { [mid]: left.length ? left : null } } });
+        st.note = `✅ Box ${b} libre (retirée à ${d.byId[was.chatterId].name}).`;
+      }
+    } else {
+      const e = on.find((s) => s.sid === v);
+      if (!e) st.note = "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?).";
+      else if (was?.sid !== e.sid) st.note = await setBoxes(st, d, e, mid, [...boxList(e.boxes?.[mid]).filter((x) => x !== "all"), b]);
+    }
+  } else if (act === "add") {
+    // quelqu'un d'autre sur cette modèle (renfort) : avec le compte de cette modèle sur ce shift
+    const r = await picked(i, Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id)), { why: "inactif ou en day off ce jour-là" });
+    if (!r.c) st.note = r.error;
+    else if (on.some((s) => s.chatterId === r.c.id)) st.note = `ℹ️ **${r.c.name}** est déjà sur ${d.mName(mid)} : choisis-le sur une ligne de box.`;
+    else {
+      const acc = (r.c.shift?.accts || []).find((k) => k.startsWith(mid + "|")) || on.flatMap((s) => s.accts || []).find((k) => k.startsWith(mid + "|")) || d.cat.accounts.find((a) => a.key.startsWith(mid + "|"))?.key;
+      st.note = acc ? await renfort({ date: st.date, slot, cid: r.c.id, acc, rBoxes: [], live: true }) : "⚠️ Aucun compte pour cette modèle dans l'app.";
+      st.alt = false;
+    }
+  } else if (act === "auto") {
+    const pres = await presenceOf(st.date, slot);
+    const started = Date.now() >= startOf(st.date, slot);
+    const ok = on.filter((s) => !d.off.has(s.chatterId) && (!started || ["present", "retard"].includes(pres[s.chatterId])));
+    st.note = ok.length ? await boxSplit({ date: st.date, slot, nbm: mid, nbn: st.n || ok.length, nbw: ok.map((s) => s.sid) }) : "⚠️ Personne n'est là sur ce shift pour l'instant.";
+  } else if (act === "tell") {
+    const got = on.filter((s) => boxList(s.boxes?.[mid]).length);
+    const sl = slotOf(slot);
+    await ctx.notify?.({
+      content: [`📦 **${d.mName(mid).toLocaleUpperCase("fr")}** · ${sl.emoji} ${sl.l} · ${st.n} box`, ...got.map((s) => `${tag(d.byId[s.chatterId])} · ${boxLabel(boxList(s.boxes[mid]))}`)].join("\n"),
+      allowedMentions: { users: got.map((s) => d.byId[s.chatterId].discordId).filter(Boolean) },
+    }).then(() => (st.note = "📣 Box envoyées dans le salon clocking."), (e) => (st.note = `⚠️ Pas envoyé : ${String(e.message).slice(0, 120)}`));
+  }
+  return showBox(i, st, false);
 }
 
 // Sous le planning du salon : les boutons, puis un menu par shift pour changer vite les box d'un chatteur

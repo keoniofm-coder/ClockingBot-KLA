@@ -7,6 +7,7 @@ const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
+const { pickRow, altButton, picked } = require("./pick");
 const { SLOTS, withEmoji } = planning;
 
 const DAYOFF_CHANNEL_ID = (process.env.DAYOFF_CHANNEL_ID ?? "1563679742711037992").trim();
@@ -164,11 +165,12 @@ async function addView(st) {
       st.date ? `Jour : **${planning.dayLabel(st.date)}**` : "",
     ].filter(Boolean).join("\n"),
     components: [
-      ...selectMenus("do_ac", chOpts, { placeholder: "Chatteur", max: 2, chosen: [st.cid] }),
+      pickRow("do_ac", { alt: st.alt, opts: chOpts, chatters, cid: st.cid }),
       row(new StringSelectMenuBuilder().setCustomId("do_ad").setPlaceholder("Jour").addOptions(days)),
       row(
         button("do_addok", "Poser le day off", "✅", ButtonStyle.Success, !(c && st.date)),
         button("do_rm", st.rm ? "Retirer ses shifts : oui" : "Retirer ses shifts : non", "🗓️", st.rm ? ButtonStyle.Primary : ButtonStyle.Secondary),
+        ...altButton("do_alt", { alt: st.alt, opts: chOpts, chatters }),
         button("do_cancel", "Annuler", null, ButtonStyle.Secondary)
       ),
     ],
@@ -276,7 +278,11 @@ async function handle(i) {
     return done(i, "Annulé.", 5000);
   }
   await i.deferUpdate();
-  if (id.startsWith("do_ac")) st.cid = i.values[0];
+  if (id.startsWith("do_ac")) {
+    const r = await picked(i, (await appSync.appChatters()).filter((x) => x.active), { why: "inactif" });
+    if (r.c) st.cid = r.c.id;
+    else st.note = r.error;
+  } else if (id === "do_alt") st.alt = !st.alt;
   else if (id === "do_ad") st.date = i.values[0];
   else if (id === "do_rm") st.rm = !st.rm;
   else if (id === "do_rs") st.pick = i.values;

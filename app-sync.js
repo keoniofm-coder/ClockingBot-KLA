@@ -222,11 +222,12 @@ function lateness(slot, t) {
 }
 
 // ---------- Planning et day off ----------
-async function planOf(date) {
-  const doc = await getDoc("plan", date);
-  return Object.entries(doc?.shifts || {})
+const planEntries = (doc) =>
+  Object.entries(doc?.shifts || {})
     .filter(([, s]) => s && typeof s === "object" && s.chatterId && s.slot)
     .map(([sid, s]) => ({ sid, ...s }));
+async function planOf(date) {
+  return planEntries(await getDoc("plan", date));
 }
 async function offsOn(date) {
   const rows = await rest("GET", `select=data&coll=eq.offs&data->>date=eq.${enc(date)}`);
@@ -314,8 +315,8 @@ async function openCoupures(t = Date.now()) {
 }
 // Tout ce qu'il faut pour afficher le planning d'un jour
 async function planningDay(date) {
-  const [plan, offs, chatters, cat, marks] = await Promise.all([planOf(date), offsOn(date), appChatters(), appCatalog(), readMarks(date)]);
-  return { date, plan, offs: [...offs], chatters, models: cat.models, platName: cat.platName, marks };
+  const [doc, offs, chatters, cat, marks] = await Promise.all([getDoc("plan", date), offsOn(date), appChatters(), appCatalog(), readMarks(date)]);
+  return { date, plan: planEntries(doc), nbox: doc?.nbox || {}, offs: [...offs], chatters, models: cat.models, platName: cat.platName, marks };
 }
 // Nombre de box réglé pour un shift et une modèle (depuis Discord) : plan/<date>.nbox { "soir|m-anna": 4 }
 async function boxCounts(date) {
@@ -427,6 +428,17 @@ async function applyHabit(cid, shift, from) {
 async function planCounts(from, to) {
   const rows = await rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`);
   return Object.fromEntries(rows.map((r) => [r.id, new Set(Object.values(r.data?.shifts || {}).filter((x) => x?.chatterId).map((x) => x.chatterId)).size]));
+}
+// Chatteurs au planning par jour et par shift : { date: { matin: 2, soir: 3, all: 5 } }
+async function slotCounts(from, to) {
+  const rows = await rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`);
+  return Object.fromEntries(
+    rows.map((r) => {
+      const l = planEntries(r.data);
+      const n = (f) => new Set(l.filter(f).map((x) => x.chatterId)).size;
+      return [r.id, { all: n(() => true), ...Object.fromEntries(Object.keys(START_OF).map((k) => [k, n((x) => x.slot === k)])) }];
+    })
+  );
 }
 // Copie le planning d'un jour sur un autre (box comprises), sans ceux qui sont en day off ce jour-là ni les
 // inactifs. replace : enlève d'abord le planning du jour ; sinon ajoute seulement les lignes qui manquent.
@@ -641,7 +653,7 @@ async function finishPost(req, patch) {
 
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
-  appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, plannedFor,
+  appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,

@@ -5,6 +5,7 @@ const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputB
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
+const { pickRow, altButton, picked } = require("./pick");
 
 const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "1563688546303217784").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
@@ -123,7 +124,8 @@ const VIEWS = {
         st.note,
         `📋 **Pointer** · ${sh.emoji} ${st.name} ${sh.label} · ${planning.dayLabel(st.date)}`,
         due.length ? `**${due.length - count("todo")}/${due.length}** pointés · ${sum}` : "_Personne au planning sur ce shift._",
-        p ? `\n**${p.name}** · ${SEMOJI[b.stOf(p)]} ${b.detail(p)}` : people.length ? "Choisis un chatteur, puis son statut." : "",
+        todo.length ? `-# À pointer : ${todo.map((x) => x.name).join(", ")}` : "",
+        p ? `\n**${p.name}** · ${SEMOJI[b.stOf(p)]} ${b.detail(p)}` : people.length ? "Tape le nom du chatteur, puis choisis son statut." : "",
       ].filter(Boolean).join("\n"),
       components: [
         row(
@@ -132,7 +134,7 @@ const VIEWS = {
             .setPlaceholder("Shift")
             .addOptions(Object.entries(ctx.SHIFTS).map(([k, v]) => opt(`${k} (${v.label})`, k, null, v.emoji, k === st.name)))
         ),
-        ...selectMenus("g_ac", people.map((x) => opt(x.name, x.id, b.detail(x), SEMOJI[b.stOf(x)])), { placeholder: "Chatteur", max: 1, chosen: [st.cid] }),
+        pickRow("g_ac", { alt: st.alt, opts: people.map((x) => opt(x.name, x.id, b.detail(x), SEMOJI[b.stOf(x)])), chatters: people, cid: st.cid }),
         row(
           ...Object.entries(STATUS).map(([k, [l, e, style]]) => button(`g_st_${k}`, l, e, style, !p || p.off)),
           button("g_st_clear", "Effacer", "↩️", ButtonStyle.Secondary, !p?.mark?.status)
@@ -141,6 +143,7 @@ const VIEWS = {
           button("g_allp", todo.length ? `Tous les autres présents (${todo.length})` : "Tous les autres présents", "✅", ButtonStyle.Success, !todo.length),
           button("g_ad_-1", "Jour d'avant", "◀️", ButtonStyle.Secondary),
           button("g_ad_1", "Jour d'après", "▶️", ButtonStyle.Secondary),
+          ...altButton("g_alt", { alt: st.alt, opts: people.map((x) => opt(x.name, x.id)), chatters: people }),
           cancelBtn("Fermer")
         ),
       ],
@@ -230,13 +233,18 @@ const VIEWS = {
   async fire(st) {
     const targets = await ctx.fireTargets();
     const t = st.target && targets.find((x) => x.value === st.target);
+    const pseudo = targets.map((x) => ({ id: x.value, discordId: x.uid }));
     const lines = [st.note, "🚫 **Virer un chatteur**", "Il sort de partout : clocking, shift habituel, planning à venir (box comprises), day off à venir. Il passe inactif dans l'app ; ses ventes, paies et pointages passés restent."].filter(Boolean);
     if (t) lines.push("", `**${t.label}** :`, ...(await ctx.firePreview(t)).map((x) => `• ${x}`));
     return {
       content: lines.join("\n"),
       components: [
-        ...selectMenus("g_fs", targets.map((x) => opt(x.label, x.value, x.desc, x.emoji)), { placeholder: "Le chatteur à virer", max: 2, chosen: [st.target] }),
-        row(button("g_fok", t ? `Oui, virer ${t.label}`.slice(0, 80) : "Virer", "🚫", ButtonStyle.Danger, !t), cancelBtn()),
+        pickRow("g_fs", { alt: st.alt, opts: targets.map((x) => opt(x.label, x.value, x.desc, x.emoji)), chatters: pseudo, cid: st.target, placeholder: "Le chatteur à virer" }),
+        row(
+          button("g_fok", t ? `Oui, virer ${t.label}`.slice(0, 80) : "Virer", "🚫", ButtonStyle.Danger, !t),
+          ...altButton("g_alt", { alt: st.alt, opts: targets.map((x) => opt(x.label, x.value)), chatters: pseudo }),
+          cancelBtn()
+        ),
       ],
     };
   },
@@ -260,7 +268,7 @@ async function handle(i) {
     case "g_chat": return ctx.openChatters(i);
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");
-    case "g_plan": return ctx.openPlanning(i, today(), "list");
+    case "g_plan": return ctx.openPlanning(i, today(), "sh", { live: true });
     // remplacer / déplacer : sur le shift en cours
     case "g_rep":
     case "g_mv": {
@@ -355,7 +363,11 @@ async function handle(i) {
     for (const x of todo) await ctx.setMark(st.date, slotOf(), x.id, { status: "present", min: "" });
     st.note = `✅ ${todo.length} chatteur${todo.length > 1 ? "s" : ""} pointé${todo.length > 1 ? "s" : ""} présent${todo.length > 1 ? "s" : ""}.`;
   } else if (id === "g_as") Object.assign(st, { name: i.values[0], cid: null });
-  else if (id.startsWith("g_ac")) st.cid = i.values[0];
+  else if (id.startsWith("g_ac")) {
+    const r = await picked(i, (await ctx.shiftBoard(st.name, st.date)).staff, { why: "pas au planning sur ce shift" });
+    if (r.c) st.cid = r.c.id;
+    else st.note = r.error;
+  } else if (id === "g_alt") st.alt = !st.alt;
   else if (id.startsWith("g_ad_")) Object.assign(st, { date: appSync.addDays(st.date, Number(id.slice(5)) || 0), cid: null });
   else if (id === "g_cu") {
     const u = i.users?.get(i.values[0]);
@@ -364,7 +376,12 @@ async function handle(i) {
   } else if (id === "g_cd") st.min = Number(i.values[0]) || null;
   else if (id.startsWith("g_bs")) Object.assign(st, { cid: i.values[0], give: true });
   else if (id === "g_bgv") st.give = st.give === false;
-  else if (id.startsWith("g_fs")) st.target = i.values[0];
+  else if (id.startsWith("g_fs")) {
+    // tapé dans le menu des membres : le chatteur relié à ce compte, ou ce compte du clocking
+    const t = i.isUserSelectMenu?.() ? (await ctx.fireTargets()).find((x) => x.uid === i.values[0]) : { value: i.values[0] };
+    if (t) st.target = t.value;
+    else st.note = "⚠️ Ce membre n'est ni un chatteur de l'app ni dans le clocking.";
+  }
   return showView(i, await VIEWS[st.view](st));
 }
 
