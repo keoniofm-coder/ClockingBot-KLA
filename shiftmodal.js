@@ -279,7 +279,7 @@ async function handle(i) {
     allowedMentions: { parse: [] },
   });
 }
-// Le bouton qui ouvre la fenêtre (panneau du shift, écran du shift, box du shift)
+// Le bouton qui ouvre la fenêtre (panneau du shift, écran du shift)
 const openButton = (date, slot, label = "Modifier le shift", style = ButtonStyle.Primary) => button(`pm_open~${date}~${slot}`, label, "✏️", style);
 
-module.exports = { ctx, handle, openButton, parseLine, findChatter, applyTexts };
+module.exports = { ctx, handle, open: openModal, openButton, parseLine, findChatter, applyTexts };
