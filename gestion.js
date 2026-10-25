@@ -1,9 +1,11 @@
 // ================== LES BOUTONS DES ADMINS (sous le panneau du shift, salon clocking) ==================
 // Un bouton par sujet, à la place des commandes « / », sous le pointage du shift dans le salon clocking.
-// Chaque bouton ouvre un menu visible seulement par l'admin qui a cliqué (un seul à la fois, voir menus.js), ou une
-// fenêtre : ✏️ Modifier le shift, 👤 la fiche d'un chatteur (menu du haut), 💪🏼 Renfort. Les commandes restent en secours.
+// Presque tout s'ouvre en petite fiche (une fenêtre Discord) : 🔎 la fiche d'un chatteur (barre de recherche du haut),
+// ➕ Ajouter un chatteur, ✏️ Modifier le shift, 💪🏼 Renfort, ⚡ Coupure, 🔙 Retour de coupure, ⚠️ Pénalités, 💃 Modèles,
+// 🛡️ Admins, 📣 Envoyer le planning, 🔔 Renvoyer le panneau, 🚫 Virer. 📋 Pointer reste un menu visible seulement par
+// l'admin qui a cliqué (un seul à la fois, voir menus.js). Les commandes restent en secours.
 // L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
-const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
@@ -12,14 +14,19 @@ const { pickRow, altButton, picked } = require("./pick");
 const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
 // setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra), openPenalties(i), heldText(date, slot, cid),
-// dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
-// dayChoices(), fireTargets(), firePreview(target), fire(target),
+// dayoffView(month), coupure(i, user, opts), retour(i, target, opts), retours(i, cids, giveBack), postPlanning(date), announceShift(name),
+// dayChoices(), fireTargets(), firePreview(target), fire(target), openModels(i), openAdmins(i), openPlanPick(i, date),
 // modals : { replace(i, { date, slot }), change(i, { date, slot, mode }) } (quickmodal.js), fiche(i, { date, slot, cid }),
-// fresh(i, { date, slot }) (fiche.js), refreshPanels(date) : remet les panneaux de ce jour à jour
+// fresh(i, { date, slot }), find(i, { date, slot, uid }) (fiche.js), refreshPanels(date) : remet les panneaux de ce jour à jour
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
 const DURATIONS = [5, 10, 15, 20, 30, 45, 60, 90, 120];
+// Raison d'une coupure (fiche ⚡ Coupure) : écrite dans la ligne du salon clocking et au pointage
+const CUT_WHY = [
+  ["", "Je ne sais pas", "❔"], ["courant", "Coupure de courant", "🔌"], ["internet", "Internet / connexion", "🌐"],
+  ["appareil", "Ordinateur ou téléphone", "💻"], ["pause", "Pause", "☕"], ["urgence", "Urgence perso", "🚨"],
+];
 const today = () => appSync.parisParts(Date.now()).date;
 
 // ---------- Le panneau ----------
@@ -59,22 +66,19 @@ function panelView(live) {
     allowedMentions: { parse: [] },
   };
 }
-// Sous le panneau d'un shift (salon clocking) : d'abord le menu 👤 Chatteur (sa fiche, ou ➕ en ajouter un), puis
-// les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement ; ✏️ ouvre la fenêtre pour modifier
-// tout le shift d'un coup (shiftmodal.js). who : ceux du shift [{ value, label, description, emoji }] (index.js)
-let whoN = 0; // change l'id du menu 👤 après chaque choix : Discord le remet à zéro (sinon le même nom ne se rechoisit pas)
-function panelRows(date, slot, who = []) {
+// Sous le panneau d'un shift (salon clocking) : d'abord la barre 🔎 Modifs chatteurs (on tape un nom, sa fiche
+// s'ouvre), puis les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement ; ✏️ ouvre la fenêtre pour
+// modifier tout le shift d'un coup (shiftmodal.js). unlinked : nombre de chatteurs de l'app pas reliés à Discord.
+let whoN = 0; // change l'id de la barre après chaque choix : Discord la remet à zéro (sinon le même nom ne se rechoisit pas)
+function panelRows(date, slot, { unlinked = 0 } = {}) {
   const c = (id) => `${id}~${date}~${slot}`;
   return [
     row(
-      new StringSelectMenuBuilder()
-        .setCustomId(`g_who~${date}~${slot}~${whoN}`)
-        .setPlaceholder("👤 Chatteur : sa fiche (modèle, box, shift) ou ➕ en ajouter un")
-        .addOptions(
-          opt("Ajouter un chatteur", "_new", "Un nouveau : nom, compte Discord, modèle, shift", "➕"),
-          ...who.slice(0, 23).map((o) => opt(o.label, o.value, o.description, o.emoji)),
-          opt("Un autre chatteur…", "_other", "Pas sur ce shift : tape son nom", "🔎")
-        )
+      new UserSelectMenuBuilder()
+        .setCustomId(`g_find~${date}~${slot}~${whoN}`)
+        .setPlaceholder("🔎 Modifs chatteurs : tape un nom, sa fiche s'ouvre")
+        .setMinValues(1)
+        .setMaxValues(1)
     ),
     row(
       button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary),
@@ -84,14 +88,15 @@ function panelRows(date, slot, who = []) {
       button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary)
     ),
     row(
-      button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
       button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary),
       button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary),
       button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
-      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary)
+      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
+      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary)
     ),
     row(
-      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary),
+      button(c("g_new"), "Ajouter un chatteur", "➕", ButtonStyle.Success),
+      ...(unlinked ? [button(c("g_nd"), `Pas sur Discord (${unlinked})`, "👤", ButtonStyle.Secondary)] : []),
       button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary),
       button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)
     ),
@@ -292,6 +297,90 @@ const VIEWS = {
   },
 };
 const fmt = (t) => new Date(t).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Paris" });
+
+// ---------- Les petites fiches (fenêtres Discord) ----------
+const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
+const pick = (id, opts, { min = 1, max = 1, required = min > 0, placeholder } = {}) => {
+  const m = new StringSelectMenuBuilder().setCustomId(id).setRequired(required).setMinValues(min).setMaxValues(Math.max(1, Math.min(max, opts.length)))
+    .addOptions(opts.map((o) => ({ ...o, label: String(o.label).slice(0, 100), ...(o.description ? { description: String(o.description).slice(0, 100) } : {}) })));
+  return placeholder ? m.setPlaceholder(placeholder) : m;
+};
+const users = (id, { required = true, max = 1, def = [], placeholder = "🔎 Tape son nom" } = {}) => {
+  const m = new UserSelectMenuBuilder().setCustomId(id).setRequired(required).setMinValues(required ? 1 : 0).setMaxValues(max).setPlaceholder(placeholder);
+  return def.length ? m.setDefaultUsers(...def) : m;
+};
+const textIn = (id, { placeholder, required = false, max = 200, value } = {}) => {
+  const t = new TextInputBuilder().setCustomId(id).setStyle(TextInputStyle.Short).setRequired(required).setMaxLength(max);
+  if (placeholder) t.setPlaceholder(placeholder);
+  return value ? t.setValue(value) : t;
+};
+const field = (i, fn, id) => {
+  try {
+    return i.fields[fn](id);
+  } catch {
+    return null;
+  }
+};
+const vals = (i, id) => field(i, "getStringSelectValues", id) || [];
+// lu à temps pour ouvrir la fenêtre (Discord laisse 3 s), sinon null
+const quick = (p, ms = 2000) => Promise.race([Promise.resolve(p).catch(() => null), new Promise((r) => setTimeout(() => r(null), ms))]);
+
+const FICHES = {
+  // ⚡ Coupure : le chatteur (recherche), la durée prévue, la raison
+  cut() {
+    return new ModalBuilder().setCustomId("g_cutm").setTitle("⚡ Noter une coupure").addLabelComponents(
+      label("Chatteur", "Notifié dans le salon clocking, « Coupure » au pointage").setUserSelectMenuComponent(users("who")),
+      label("Durée prévue").setStringSelectMenuComponent(pick("min", [{ label: "Je ne sais pas", value: "0", emoji: "❔", default: true }, ...DURATIONS.map((m) => ({ label: `${m} min`, value: String(m), emoji: "⏱️" }))])),
+      label("Raison").setStringSelectMenuComponent(pick("why", CUT_WHY.map(([value, l, emoji]) => ({ label: l, value: value || "_", emoji, default: !value })))),
+      label("Détail (optionnel)", "Le chatteur le verra").setTextInputComponent(textIn("note", { placeholder: "ex : orage, box internet en panne" }))
+    );
+  },
+  // 🔙 Retour de coupure : seulement ceux en coupure en ce moment
+  back(list) {
+    const sl = (k) => planning.SLOTS.find((s) => s.k === k);
+    return new ModalBuilder().setCustomId("g_backm").setTitle("🔙 Retour de coupure").addLabelComponents(
+      label("Qui revient ?", "Le temps de coupure est compté au pointage, comme un retard").setStringSelectMenuComponent(
+        pick("who", list.slice(0, 25).map((c) => ({ label: c.name, value: c.id, emoji: "⚡", description: `En coupure depuis ${fmt(c.since)}${sl(c.slot) ? ` · ${sl(c.slot).l}` : ""}`, default: list.length === 1 })), { max: 25 })
+      ),
+      label("Il reprend ses box ?", "S'il a été remplacé pendant sa coupure").setStringSelectMenuComponent(
+        pick("give", [{ label: "Oui, il reprend ses box", value: "yes", emoji: "📦", default: true }, { label: "Non, elles restent à son remplaçant", value: "no", emoji: "🔁" }])
+      )
+    );
+  },
+  // 📣 Envoyer le planning d'un jour dans le salon planning
+  send() {
+    return new ModalBuilder().setCustomId("g_sendm").setTitle("📣 Envoyer le planning").addLabelComponents(
+      label("Quel jour ?", "Il remplace celui du même jour et se met à jour tout seul").setStringSelectMenuComponent(
+        pick("day", ctx.dayChoices().slice(0, 25).map((c, k) => ({ label: c.name, value: c.value, default: k === 0 })))
+      )
+    );
+  },
+  // 🔔 Renvoyer le panneau d'un shift en bas du salon clocking
+  shift(cur) {
+    return new ModalBuilder().setCustomId("g_shiftm").setTitle("🔔 Renvoyer le panneau").addLabelComponents(
+      label("Quel shift ?", "Il remplace le panneau précédent du même shift").setStringSelectMenuComponent(
+        pick("shift", Object.entries(ctx.SHIFTS).map(([k, v]) => ({ label: `${k} (${v.label})`, value: k, emoji: v.emoji, default: k === cur })))
+      )
+    );
+  },
+  // 🚫 Virer : le chatteur (recherche, ou ceux pas sur Discord), puis confirmer
+  fire(targets) {
+    const nd = targets.filter((t) => t.cid && !t.uid).slice(0, 25);
+    const m = new ModalBuilder().setCustomId("g_firem").setTitle("🚫 Virer un chatteur").addLabelComponents(
+      label("Chatteur", "Il sort de partout : clocking, planning à venir, day off à venir").setUserSelectMenuComponent(users("who", { required: !nd.length }))
+    );
+    if (nd.length)
+      m.addLabelComponents(label("Ou pas sur Discord").setStringSelectMenuComponent(pick("nd", nd.map((t) => ({ label: t.label, value: t.value, emoji: t.emoji, description: t.desc })), { min: 0, placeholder: "Pas relié à Discord" })));
+    return m.addLabelComponents(
+      label("Tu confirmes ?", "Inactif dans l'app ; ses ventes, paies et pointages passés restent").setStringSelectMenuComponent(
+        pick("ok", [{ label: "Oui, il sort de partout", value: "yes", emoji: "🚫" }], { placeholder: "Choisis pour confirmer" })
+      )
+    );
+  },
+};
+// Le chatteur choisi dans la barre de recherche ou une fiche : { id, username, globalName } (null : rien, ou un bot)
+const chosenUser = (u) => (u && !u.bot ? { id: u.id, username: u.username, globalName: u.globalName, bot: false } : null);
+
 const open = async (i, view, st = {}) => {
   states.set(i.user.id, { view, ...st });
   await i.deferReply({ flags: EPHEMERAL });
@@ -305,12 +394,34 @@ async function handle(i) {
   const [id, pDate, pSlot] = i.customId.split("~");
   const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
   const cur = pinned || ctx.currentShift();
-  const needApp = ["g_who", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
+  const needApp = ["g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
   switch (id) {
-    // 👤 Chatteur : sa fiche, ➕ un nouveau, 🔎 un autre (pas sur ce shift) ; puis le menu est remis à zéro
+    // 🔎 Modifs chatteurs : on tape un nom, sa fiche s'ouvre (pas encore dans l'app : ➕ sa fiche de nouveau chatteur) ;
+    // puis la barre est remise à zéro
+    case "g_find": {
+      const at = { date: cur.date, slot: appSync.SLOT_OF[cur.name] };
+      const uid = i.values?.[0];
+      const u = i.users?.get(uid);
+      whoN = (whoN + 1) % 1000;
+      setTimeout(() => ctx.refreshPanels?.(cur.date), 1500);
+      if (u?.bot) return reply(i, { content: "❌ Choisis un chatteur, pas un bot." });
+      return ctx.modals.find(i, { ...at, uid, user: u, member: i.members?.get(uid) });
+    }
+    case "g_new": return ctx.modals.fresh(i, { date: cur.date, slot: appSync.SLOT_OF[cur.name] });
+    // 👤 Pas sur Discord : la liste de ceux qui ne sont pas reliés, choisir ouvre sa fiche
+    case "g_nd": {
+      const list = (await appSync.appChatters()).filter((c) => c.active && !c.discordId).sort((a, b) => a.name.localeCompare(b.name, "fr"));
+      if (!list.length) return reply(i, { content: "Tous les chatteurs de l'app sont reliés à Discord : cherche-les dans 🔎 Modifs chatteurs." });
+      return reply(i, {
+        content: "👤 **Pas sur Discord** : choisis le chatteur, sa fiche s'ouvre (relie son compte Discord dedans).",
+        components: [row(new StringSelectMenuBuilder().setCustomId(`g_ndp~${cur.date}~${appSync.SLOT_OF[cur.name]}`).setPlaceholder("Le chatteur").addOptions(list.slice(0, 25).map((c) => opt(c.name, c.id, null, "👤"))))],
+      }, false);
+    }
+    case "g_ndp": return ctx.modals.fiche(i, { date: cur.date, slot: appSync.SLOT_OF[cur.name], cid: i.values?.[0] });
+    // 👤 Chatteur (anciens panneaux) : sa fiche, ➕ un nouveau, 🔎 un autre (pas sur ce shift)
     case "g_who": {
       if (!ctx.modals) return ctx.openChatters(i);
       const v = i.values?.[0];
@@ -321,9 +432,10 @@ async function handle(i) {
       return r;
     }
     case "g_chat": return ctx.openChatters(i);
-    case "g_mod": return ctx.openMenu(i, "mhome");
-    case "g_adm": return ctx.openMenu(i, "ahome");
-    case "g_plan": return ctx.openPlanning(i, cur.date, "sh", { live: true, slot: appSync.SLOT_OF[cur.name] });
+    case "g_mod": return ctx.openModels ? ctx.openModels(i) : ctx.openMenu(i, "mhome");
+    case "g_adm": return ctx.openAdmins ? ctx.openAdmins(i) : ctx.openMenu(i, "ahome");
+    // 📅 Planning : la barre « ✏️ Modif par shift » du jour du panneau et du lendemain
+    case "g_plan": return ctx.openPlanPick ? ctx.openPlanPick(i, cur.date) : ctx.openPlanning(i, cur.date, "sh", { live: true, slot: appSync.SLOT_OF[cur.name] });
     // remplacer / déplacer / renfort : une fenêtre sur le shift du panneau (ou celui en cours, dès 15 min avant son début)
     case "g_rep":
       if (ctx.modals) return ctx.modals.replace(i, { date: cur.date, slot: appSync.SLOT_OF[cur.name] });
@@ -338,11 +450,56 @@ async function handle(i) {
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
     case "g_att": return open(i, "att", { name: cur.name, date: cur.date });
-    case "g_cut": return open(i, "cut");
-    case "g_back": return open(i, "back");
-    case "g_send": return open(i, "send");
-    case "g_shift": return open(i, "shift");
-    case "g_fire": return open(i, "fire");
+    case "g_cut": return i.showModal(FICHES.cut());
+    case "g_back": {
+      const list = await quick(appSync.openCoupures());
+      if (!list) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
+      if (!list.length) return reply(i, { content: "🔙 Personne n'est en coupure en ce moment." });
+      return i.showModal(FICHES.back(list));
+    }
+    case "g_send": return i.showModal(FICHES.send());
+    case "g_shift": return i.showModal(FICHES.shift(ctx.currentShift().name));
+    case "g_fire": {
+      const targets = await quick(ctx.fireTargets());
+      if (!targets) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
+      return i.showModal(FICHES.fire(targets));
+    }
+    // ---- fiches envoyées ----
+    case "g_cutm": {
+      const u = chosenUser(field(i, "getSelectedUsers", "who")?.first?.());
+      if (!u) return reply(i, { content: "❌ Choisis le chatteur (pas un bot)." });
+      const why = CUT_WHY.find(([k]) => k === (vals(i, "why")[0] || "_").replace("_", ""));
+      const note = String(field(i, "getTextInputValue", "note") || "").trim();
+      const raison = [why?.[0] ? why[1] : "", note].filter(Boolean).join(" · ");
+      return ctx.coupure(i, u, { min: Number(vals(i, "min")[0]) || null, raison });
+    }
+    case "g_backm": return ctx.retours(i, vals(i, "who"), (vals(i, "give")[0] || "yes") === "yes");
+    case "g_sendm": {
+      const date = vals(i, "day")[0];
+      if (!date) return reply(i, { content: "Choisis le jour." });
+      await i.deferReply({ flags: EPHEMERAL });
+      const r = await ctx.postPlanning(date);
+      return done(i, `✅ Planning du ${planning.dayLabel(date)} envoyé (${r.count} chatteur${r.count > 1 ? "s" : ""}) : ${r.url}`, 60000);
+    }
+    case "g_shiftm": {
+      const name = vals(i, "shift")[0];
+      if (!ctx.SHIFTS[name]) return reply(i, { content: "Choisis le shift." });
+      await i.deferReply({ flags: EPHEMERAL });
+      await ctx.announceShift(name);
+      return done(i, `✅ Panneau du shift **${name}** envoyé dans le salon clocking.`);
+    }
+    case "g_firem": {
+      if (vals(i, "ok")[0] !== "yes") return reply(i, { content: "Rien n'est fait : confirme dans la dernière case." });
+      await i.deferReply({ flags: EPHEMERAL });
+      const targets = await ctx.fireTargets();
+      const u = field(i, "getSelectedUsers", "who")?.first?.();
+      const nd = vals(i, "nd")[0];
+      const t = u ? targets.find((x) => x.uid === u.id) : nd ? targets.find((x) => x.value === nd) : null;
+      if (u?.bot) return done(i, "❌ Choisis un chatteur, pas un bot.", 30000);
+      if (u && nd) return done(i, "⚠️ Rien n'est fait : choisis un seul chatteur (la recherche ou la liste pas sur Discord).", 30000);
+      if (!t) return done(i, u ? `⚠️ <@${u.id}> n'est ni un chatteur de l'app ni dans le clocking : rien à faire.` : "⚠️ Choisis le chatteur à virer.", 30000);
+      return done(i, await ctx.fire(t), 60000);
+    }
   }
   const st = states.get(i.user.id);
   if (!st) return done(i, "Ce menu a expiré : reclique sur le panneau.", 8000);
