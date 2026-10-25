@@ -260,7 +260,7 @@ async function handle(i) {
     case "g_chat": return ctx.openChatters(i);
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");
-    case "g_plan": return ctx.openPlanning(i, today(), "list");
+    case "g_plan": return ctx.openPlanning(i, today(), "sh", { live: true });
     // remplacer / déplacer : sur le shift en cours
     case "g_rep":
     case "g_mv": {
