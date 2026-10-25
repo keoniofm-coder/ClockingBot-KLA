@@ -6,7 +6,7 @@
 // Les paies se font par quinzaine : le 16 et le 1er à 2 h, le récap de la quinzaine qui finit part dans le salon
 // (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
 // ⚠️ Pénalités (sous le panneau du shift) ouvre une petite fiche : le chatteur (recherche), la faute, et pour une pénalité
-// ✏️ Personnalisée le montant et la raison ; 📋 le récap de la quinzaine reste un menu (annuler une erreur, l'envoyer).
+// ✏️ Pénalité perso (hors barème) : le montant et la raison écrits à la main ; 📋 le récap de la quinzaine reste un menu (annuler une erreur, l'envoyer).
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const { reply, done, showView, row, button, opt, plS, EPHEMERAL } = require("./ui");
@@ -30,7 +30,7 @@ const FAULTS = [
   { k: "vip_paye", l: "Faire payer un VIP sans autorisation", e: "💲", cat: "VIP", amount: 30, free: 0 },
 ];
 // Pénalité personnalisée : montant et raison écrits à la main (numéro compté parmi ses personnalisées du mois)
-const PERSO = { k: "perso", l: "Personnalisée", e: "✏️", cat: "Autre" };
+const PERSO = { k: "perso", l: "Pénalité perso", e: "✏️", cat: "Autre" };
 const faultOf = (k) => FAULTS.find((f) => f.k === k) || (k === PERSO.k ? PERSO : null);
 // montant de la n-ième faute du mois (0 = avertissement seul)
 function amountFor(f, n) {
@@ -231,7 +231,7 @@ const text = (id, placeholder, max = 200) => new TextInputBuilder().setCustomId(
 function modal() {
   const faults = [
     ...FAULTS.map((x) => ({ label: x.l, value: x.k, emoji: x.e, description: `${x.cat} · ${ruleTxt(x)}`.slice(0, 100) })),
-    { label: "Personnalisée", value: PERSO.k, emoji: PERSO.e, description: "Tu écris le montant et la raison" },
+    { label: PERSO.l, value: PERSO.k, emoji: PERSO.e, description: "Hors barème : tu écris le montant et la raison" },
     { label: "Juste voir le récap de la quinzaine", value: "_sum", emoji: "📋", description: "Rien n'est envoyé ; annuler une erreur, envoyer le récap" },
   ];
   return new ModalBuilder().setCustomId("pn_new").setTitle(`⚠️ Pénalité · ${monthLabel(monthOf(today()))}`.slice(0, 45)).addLabelComponents(
@@ -239,8 +239,8 @@ function modal() {
     label("La faute", "Le numéro d'avertissement et la pénalité suivent le barème du mois").setStringSelectMenuComponent(
       new StringSelectMenuBuilder().setCustomId("fault").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(faults)
     ),
-    label("Montant (Personnalisée)", "En euros, ex : 15 · 0 = avertissement seul").setTextInputComponent(text("amount", "ex : 15", 6)),
-    label("Raison ou détail", "Le chatteur le verra ; obligatoire pour une Personnalisée").setTextInputComponent(text("note", "ex : retard de 2 h sans prévenir"))
+    label("Montant (seulement pour Pénalité perso)", "En euros, ex : 15. Vide pour les autres fautes : le barème calcule tout seul").setTextInputComponent(text("amount", "ex : 15", 6)),
+    label("Raison ou détail", "Le chatteur le verra ; obligatoire pour une Pénalité perso").setTextInputComponent(text("note", "ex : retard de 2 h sans prévenir"))
   );
 }
 async function open(i) {
