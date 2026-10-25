@@ -129,7 +129,8 @@ async function setBoxes(st, d, e, mid, values) {
   const l = cleanBoxes(values, boxList(e.boxes?.[mid]));
   const patch = {};
   const taken = takeBoxes(d, e.slot, mid, l, [e.sid], patch);
-  addPatch(patch, e.sid, { boxes: { [mid]: l.length ? l : null } });
+  // ses box réglées à la main : plus rien à lui rendre au retour de coupure
+  addPatch(patch, e.sid, { boxes: { [mid]: l.length ? l : null }, ...(e.held ? { held: null } : {}) });
   await save(st, patch);
   return `✅ Box de ${whoMd(d.byId[e.chatterId])} sur ${d.mName(mid)} : **${l.length ? boxesS(l) : "aucune"}**.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
@@ -351,6 +352,53 @@ const VIEWS = {
       ],
     };
   },
+  // Renfort : un chatteur sur un shift où il n'est pas prévu
+  async ren(st) {
+    const choices = shiftChoices(st);
+    const keyOf = (x) => `${x.date}|${x.slot}`;
+    if (!choices.some((x) => keyOf(x) === st.rk)) st.rk = keyOf(choices[0]);
+    const [date, slot] = st.rk.split("|");
+    st.date = date;
+    const d = await load(date);
+    const sl = slotOf(slot);
+    const c = st.cid && d.byId[st.cid];
+    const mid = st.acc && st.acc.split("|")[0];
+    const holders = mid ? d.plan.filter((s) => s.slot === slot && s.chatterId !== st.cid && midsOf(s.accts).includes(mid)) : [];
+    const here = c && d.plan.find((s) => s.chatterId === c.id && s.slot === slot);
+    // la nuit commence à 2 h : ceux du soir d'avant (la veille) peuvent rester en renfort
+    const eve = slot === "nuit" ? (await appSync.planOf(appSync.addDays(date, -1))).filter((s) => s.slot === "soir").map((s) => ({ ...s, slot: "soir", eve: true })) : [];
+    const elsewhere = (id) => [...eve, ...d.plan].filter((s) => s.chatterId === id && (s.eve || s.slot !== slot));
+    // d'abord ceux prévus sur un autre shift ce jour-là (ils restent ou arrivent plus tôt), puis les libres, puis ceux déjà dessus
+    const rank = (x) => (d.plan.some((s) => s.chatterId === x.id && s.slot === slot) ? 2 : elsewhere(x.id).length ? 0 : 1);
+    const people = Object.values(d.byId)
+      .filter((x) => x.active && !d.off.has(x.id))
+      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, "fr"))
+      .map((x) => {
+        const on = d.plan.find((s) => s.chatterId === x.id && s.slot === slot);
+        const other = elsewhere(x.id);
+        const where = (l) => l.map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ");
+        return opt(x.name, x.id, on ? `Déjà sur ce shift · ${acctsText(d, on.accts, on.boxes, false)}` : other.length ? `Prévu en ${where(other)} · ${acctsText(d, other[0].accts, other[0].boxes, false)}` : "Libre ce jour-là", on ? sl.emoji : other.length ? slotOf(other[0].slot).emoji : "🟢");
+      });
+    const now = Date.now() >= appSync.parisMs(date, appSync.START_OF[slot]);
+    return {
+      content: head(st, [
+        `➕ **Renfort** · ${sl.emoji} ${sl.l} (${sl.h}) · ${dayLabel(date)}${now ? " · en cours" : ""}`,
+        "Mets un chatteur sur un shift où il n'est pas prévu (ex. un gars du soir qui reste la nuit), avec sa modèle et ses box : elles sont retirées à celui qui les avait.",
+        c ? `Chatteur : ${whoMd(c)}${elsewhere(c.id).length ? ` · prévu en ${elsewhere(c.id).map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ")}` : ""}${here ? `\n-# Déjà sur ce shift (${acctsText(d, here.accts, here.boxes, false)}) : la modèle s'ajoute à ses comptes.` : ""}` : "",
+        st.acc ? `Sur : **${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${st.rBoxes?.length ? ` ${boxesE(boxList(st.rBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesS(boxList(s.boxes?.[mid]))}`.trim()).join(", ")}` : ""}` : "",
+      ]),
+      components: [
+        ...selectMenus("pe_nc", people.map((o) => ({ ...o, default: o.value === st.cid })), { placeholder: "Chatteur en renfort", max: 2, chosen: [st.cid] }),
+        row(new StringSelectMenuBuilder().setCustomId("pe_na").setPlaceholder("Sur quelle modèle ?").addOptions(d.cat.accounts.slice(0, 25).map((a) => opt(`${withEmoji(a.model)} · ${a.platform}`, a.key, null, null, a.key === st.acc)))),
+        row(mid ? boxMenu("pe_nb", d, mid, boxList(st.rBoxes), `Ses box sur ${d.mName(mid)}`) : emptyMenu("pe_nb", "Ses box (choisis d'abord la modèle)")),
+        row(
+          button("pe_nsl", `Shift : ${sl.l} · ${cap(dayLabel(date).split(" ")[0])}`.slice(0, 80), sl.emoji || null, ButtonStyle.Secondary, choices.length < 2),
+          button("pe_nok", "Mettre en renfort", "➕", ButtonStyle.Success, !(c && st.acc)),
+          st.live ? button("pe_x", "Fermer", null, ButtonStyle.Secondary) : backBtn()
+        ),
+      ].slice(0, 5),
+    };
+  },
   // Copier un autre jour sur ce jour (box comprises), puis on adapte
   async copy(st) {
     const from = appSync.addDays(st.date, -7), to = appSync.addDays(st.date, 7);
@@ -516,6 +564,13 @@ async function handle(i) {
     st.mvBoxes = e ? boxList(e.boxes?.[v.split("|")[0]]) : [];
   } else if (act === "mb") st.mvBoxes = cleanBoxes(i.values, boxList(st.mvBoxes));
   else if (act === "mvok") st.note = await move(st);
+  else if (act === "nsl") {
+    const choices = shiftChoices(st).map((x) => `${x.date}|${x.slot}`);
+    st.rk = choices[(choices.indexOf(st.rk) + 1) % choices.length];
+  } else if (act === "nc") st.cid = v;
+  else if (act === "na") Object.assign(st, { acc: v, rBoxes: [] });
+  else if (act === "nb") st.rBoxes = cleanBoxes(i.values, boxList(st.rBoxes));
+  else if (act === "nok") st.note = await renfort(st);
   else if (act === "cs") st.src = v;
   else if (act === "cm") st.add = !st.add;
   else if (act === "cok") {
@@ -551,7 +606,12 @@ async function replace(st) {
     const accts = [...new Set([...(target.accts || []).filter((k) => !leaving.includes(k.split("|")[0])), ...(e.accts || [])])];
     addPatch(patch, target.sid, { accts, ...(Object.keys(merged).length ? { boxes: merged } : {}) });
   } else addPatch(patch, appSync.newId(), { slot: e.slot, chatterId: r.id, accts: [...(e.accts || [])], ...(Object.keys(boxes).length ? { boxes } : {}) });
-  if (Object.keys(e.boxes || {}).length) addPatch(patch, e.sid, { boxes: Object.fromEntries(Object.keys(e.boxes).map((m) => [m, null])) });
+  if (Object.keys(e.boxes || {}).length)
+    addPatch(patch, e.sid, {
+      boxes: Object.fromEntries(Object.keys(e.boxes).map((m) => [m, null])),
+      // gardées pour les lui rendre à son retour de coupure (giveBack)
+      ...(Object.keys(boxes).length ? { held: Object.entries(boxes).map(([m, b]) => ({ m, b, to: r.id })) } : {}),
+    });
   await save(st, patch);
   const sl = slotOf(e.slot);
   const what = acctsText(d, e.accts, e.boxes);
@@ -585,7 +645,7 @@ async function move(st) {
   const fate = applyFate(d, st.fate, e, leaving, patch);
   const taken = takeBoxes(d, e.slot, tm, l, [e.sid], patch);
   const accts = [...new Set([...(e.accts || []).filter((k) => !leaving.includes(k.split("|")[0])), tk])];
-  addPatch(patch, e.sid, { accts, boxes: { [tm]: l.length ? l : null } });
+  addPatch(patch, e.sid, { accts, boxes: { [tm]: l.length ? l : null }, ...(e.held ? { held: null } : {}) });
   await save(st, patch);
   const c = d.byId[e.chatterId];
   const sl = slotOf(e.slot);
@@ -597,6 +657,71 @@ async function move(st) {
     }).catch((err) => console.error("Déplacement (salon clocking) :", err.message));
   Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep" });
   return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` (${boxesS(l)})` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+}
+
+// Renfort : un chatteur en plus sur un shift (ex. un gars du soir qui reste la nuit), sur la modèle et les box choisies
+async function renfort(st) {
+  const [date, slot] = st.rk.split("|");
+  const d = await load(date);
+  const c = d.byId[st.cid];
+  if (!c || !st.acc) return "Choisis le chatteur et la modèle.";
+  if (d.off.has(c.id)) return `⛔ ${whoMd(c)} est en day off ce jour-là.`;
+  const mid = st.acc.split("|")[0];
+  const l = boxList(st.rBoxes);
+  const e = d.plan.find((s) => s.chatterId === c.id && s.slot === slot);
+  const sid = e?.sid || appSync.newId();
+  const patch = {};
+  const taken = takeBoxes(d, slot, mid, l, [sid], patch);
+  if (e) addPatch(patch, sid, { accts: [...new Set([...(e.accts || []), st.acc])], ...(l.length ? { boxes: { [mid]: l } } : {}) });
+  else addPatch(patch, sid, { slot, chatterId: c.id, accts: [st.acc], ...(l.length ? { boxes: { [mid]: l } } : {}) });
+  await save(st, patch);
+  const sl = slotOf(slot);
+  const dest = `**${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${l.length ? ` ${boxesE(l)}` : ""}`;
+  if (running(date, slot))
+    await ctx.notify?.({ content: `➕ ${tag(c)} en renfort · ${sl.emoji} ${sl.l} · ${dest}`, allowedMentions: { users: [c.discordId].filter(Boolean) } })
+      .catch((err) => console.error("Renfort (salon clocking) :", err.message));
+  Object.assign(st, { cid: null, acc: null, rBoxes: [] });
+  return `✅ ${whoMd(c)} en renfort sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` ${boxesS(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+}
+// Shifts proposés pour un renfort : depuis le salon gestion, celui en cours et les trois suivants ; sinon ceux du jour
+function shiftChoices(st) {
+  if (!st.live) return SLOTS.map((s) => ({ date: st.date, slot: s.k }));
+  const now = Date.now();
+  const td = appSync.parisParts(now).date;
+  return [-1, 0, 1]
+    .flatMap((k) => SLOTS.map((s) => ({ date: appSync.addDays(td, k), slot: s.k })))
+    .map((x) => ({ ...x, start: appSync.parisMs(x.date, appSync.START_OF[x.slot]) }))
+    .filter((x) => x.start + 6 * 3600e3 > now)
+    .sort((a, b) => a.start - b.start)
+    .slice(0, 4);
+}
+
+// Retour de coupure : les box qu'il avait avant d'être remplacé, et qui les a maintenant
+async function heldOf(date, slot, cid) {
+  const d = await load(date);
+  const e = d.plan.find((s) => s.chatterId === cid && s.slot === slot);
+  const held = (Array.isArray(e?.held) ? e.held : []).filter((h) => h && h.m && boxList(h.b).length);
+  const parts = held.map((h) => {
+    const b = boxList(h.b);
+    const from = d.plan.filter((s) => s.slot === slot && s.sid !== e.sid && boxList(s.boxes?.[h.m]).some((x) => b.includes(x)));
+    return { h, b, from, txt: `${d.mName(h.m)} ${boxesS(b)}${from.length ? ` (chez ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}` };
+  });
+  return { d, e, parts };
+}
+const heldText = async (date, slot, cid) => (await heldOf(date, slot, cid)).parts.map((p) => p.txt).join(" · ");
+// Il les reprend : retirées à celui qui les a ; renvoie « reprend Anna 🍑 [2] (rendue par Rep) »
+async function giveBack(date, slot, cid) {
+  const { d, e, parts } = await heldOf(date, slot, cid);
+  if (!e || !parts.length) return "";
+  const patch = {};
+  for (const { h, b } of parts) {
+    takeBoxes(d, slot, h.m, b, [e.sid], patch);
+    const cur = boxList(e.boxes?.[h.m]).filter((x) => x !== "all");
+    addPatch(patch, e.sid, { boxes: { [h.m]: b.includes("all") ? ["all"] : boxList([...cur, ...b]) } });
+  }
+  addPatch(patch, e.sid, { held: null });
+  await save({ date }, patch);
+  return `reprend ${parts.map(({ h, b, from }) => `**${d.mName(h.m)}** ${boxesE(b)}${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
 }
 
 // Sous le planning du salon : les boutons, puis un menu par shift pour changer vite les box d'un chatteur
@@ -632,4 +757,4 @@ function planComponents(date, day) {
   return rows.slice(0, 5);
 }
 
-module.exports = { ctx, handle, open, openReplaceFor, planComponents, states, takeBoxes, addPatch };
+module.exports = { ctx, handle, open, openReplaceFor, planComponents, states, takeBoxes, addPatch, giveBack, heldText };

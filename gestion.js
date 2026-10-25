@@ -8,7 +8,7 @@ const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = requ
 
 const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "1563688546303217784").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
-// setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra),
+// setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra), openPenalties(i), heldText(date, slot, cid),
 // dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
 // dayChoices(), fireTargets(), firePreview(target), fire(target)
 const ctx = {};
@@ -39,16 +39,17 @@ function panelView(live) {
         button("g_plan", "Planning", "📅", ButtonStyle.Primary),
         button("g_rep", "Remplacer", "🔁", ButtonStyle.Secondary),
         button("g_mv", "Déplacer", "🔀", ButtonStyle.Secondary),
-        button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
-        button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
+        button("g_ren", "Renfort", "➕", ButtonStyle.Secondary),
+        button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary)
       ),
       row(
         button("g_att", "Pointer", "📋", ButtonStyle.Primary),
         button("g_cut", "Coupure", "✂️", ButtonStyle.Secondary),
         button("g_back", "Retour de coupure", "🟢", ButtonStyle.Secondary),
-        button("g_off", "Day off", "🏖️", ButtonStyle.Secondary)
+        button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
+        button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
-      row(button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
+      row(button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
     ],
     allowedMentions: { parse: [] },
   };
@@ -170,15 +171,19 @@ const VIEWS = {
       ],
     };
   },
-  // Retour : parmi ceux en coupure en ce moment
+  // Retour : parmi ceux en coupure en ce moment ; s'il a été remplacé, il peut reprendre ses box
   async back(st) {
     const list = await appSync.openCoupures();
     const sl = (k) => planning.SLOTS.find((s) => s.k === k);
+    const c = st.cid && list.find((x) => x.id === st.cid);
+    const held = c ? await ctx.heldText(c.date, c.slot, c.id).catch(() => "") : "";
+    st.held = !!held;
     return {
       content: [
         st.note,
         "🟢 **Retour de coupure**",
         list.length ? "Choisis qui revient : le temps de coupure est compté au pointage, comme un retard." : "_Personne n'est en coupure en ce moment._",
+        held ? `📦 Ses box pendant la coupure : ${held}${st.give === false ? " · il ne les reprend pas" : " · il les reprend à son retour"}` : "",
       ].filter(Boolean).join("\n"),
       components: [
         ...(list.length
@@ -188,7 +193,11 @@ const VIEWS = {
               { placeholder: "Qui revient ?", max: 1, chosen: [st.cid] }
             )
           : []),
-        row(button("g_bok", "Retour", "🟢", ButtonStyle.Success, !st.cid), cancelBtn()),
+        row(
+          button("g_bok", "Retour", "🟢", ButtonStyle.Success, !st.cid),
+          ...(held ? [button("g_bgv", st.give === false ? "Reprend ses box : non" : "Reprend ses box : oui", "📦", st.give === false ? ButtonStyle.Secondary : ButtonStyle.Primary)] : []),
+          cancelBtn()
+        ),
       ],
     };
   },
@@ -243,7 +252,7 @@ const open = async (i, view, st = {}) => {
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
-  const needApp = ["g_plan", "g_rep", "g_mv", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat"];
+  const needApp = ["g_plan", "g_rep", "g_mv", "g_ren", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
@@ -258,6 +267,9 @@ async function handle(i) {
       const cur = ctx.currentShift();
       return ctx.openPlanning(i, cur.date, id === "g_rep" ? "rep" : "mv", { slot: appSync.SLOT_OF[cur.name] });
     }
+    // renfort : sur le shift en cours ou un des suivants
+    case "g_ren": return ctx.openPlanning(i, today(), "ren", { live: true });
+    case "g_pen": return ctx.openPenalties(i);
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
@@ -306,7 +318,7 @@ async function handle(i) {
   }
   if (id === "g_bok") {
     states.delete(i.user.id);
-    return ctx.retour(i, { cid: st.cid }, { update: true });
+    return ctx.retour(i, { cid: st.cid }, { update: true, giveBack: !st.held || st.give !== false });
   }
   if (id === "g_sd" || id === "g_ss") {
     states.delete(i.user.id);
@@ -349,7 +361,8 @@ async function handle(i) {
     if (u?.bot) st.note = "❌ Choisis un chatteur, pas un bot.";
     else st.user = u ? { id: u.id, username: u.username, globalName: u.globalName, bot: false } : { id: i.values[0] };
   } else if (id === "g_cd") st.min = Number(i.values[0]) || null;
-  else if (id.startsWith("g_bs")) st.cid = i.values[0];
+  else if (id.startsWith("g_bs")) Object.assign(st, { cid: i.values[0], give: true });
+  else if (id === "g_bgv") st.give = st.give === false;
   else if (id.startsWith("g_fs")) st.target = i.values[0];
   return showView(i, await VIEWS[st.view](st));
 }

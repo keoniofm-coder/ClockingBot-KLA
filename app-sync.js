@@ -307,9 +307,9 @@ async function openCoupures(t = Date.now()) {
   const [chatters, ...days] = await Promise.all([appChatters(), readMarks(addDays(today, -1)), readMarks(today)]);
   const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
   return days
-    .flatMap((m) => Object.values(m))
+    .flatMap((m, k) => Object.values(m).map((x) => ({ ...x, date: addDays(today, k - 1) })))
     .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId])
-    .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot }))
+    .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot, date: m.date }))
     .sort((a, b) => a.since - b.since);
 }
 // Tout ce qu'il faut pour afficher le planning d'un jour
@@ -444,6 +444,14 @@ async function copyPlan(from, to, { replace = true } = {}) {
   if (Object.keys(patch).length) await writePlan(to, patch);
   return { added, skipped, removed: replace ? dst.length : 0 };
 }
+
+// ---------- Pénalités (saisies à la main depuis Discord, montants en euros) ----------
+async function penaltiesIn(month) {
+  const rows = await rest("GET", `select=id,data&coll=eq.penalties&data->>month=eq.${enc(month)}`);
+  return rows.map((r) => ({ ...(r.data || {}), id: r.id })).filter((p) => p.uid && p.fault);
+}
+const addPenalty = ({ id, ...p }) => putDoc("penalties", id, p);
+const delPenalty = (id) => delDoc("penalties", id);
 
 // ---------- Pointage ----------
 const markKey = (slot, cid) => `${slot}_${cid}`;
@@ -629,6 +637,6 @@ module.exports = {
   appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
-  offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures,
+  offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
   norm, parisParts, parisMs, addDays,
 };
