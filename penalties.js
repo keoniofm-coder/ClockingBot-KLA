@@ -3,12 +3,14 @@
 // Chaque pénalité est gardée dans l'app (penalties/<id>) et annoncée dans le salon pénalités :
 //   « @chatteur AVERTISSEMENT N°3 | Ne chatte pas pendant son shift » puis « Pénalité de -10 € »
 // Le numéro compte les fautes du même type ce mois-ci (il repart à 1 chaque mois). Montants en euros.
+// Les paies se font par quinzaine : le 16 et le 1er à 2 h, le récap de la quinzaine qui finit part dans le salon
+// (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const { reply, done, showView, row, button, opt, plS, EPHEMERAL } = require("./ui");
 
 const PENALTY_CHANNEL_ID = (process.env.PENALTY_CHANNEL_ID ?? "1553910044204994601").trim();
-// Fourni par index.js : isAdmin(i), client, nameOf(uid)
+// Fourni par index.js : isAdmin(i), client, nameOf(uid), getData(), saveData()
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
@@ -40,8 +42,29 @@ const ruleTxt = (f) =>
     : f.free ? `${f.free} avertissements, puis -${f.amount} €` : `-${f.amount} € dès la 1re fois`;
 const euros = (n) => `${Number(n).toLocaleString("fr-FR")} €`;
 
-const today = () => appSync.parisParts(Date.now()).date;
+// Jour de paie d'un instant : jusqu'à 2 h du matin, c'est encore la veille (les quinzaines se coupent le 1er
+// et le 16 à 2 h, comme le shift du soir). Le compteur du mois repart donc le 1er à 2 h.
+const workDay = (t = Date.now()) => appSync.parisParts(t - 121 * 60e3).date;
+const today = () => workDay();
 const monthOf = (date) => date.slice(0, 7);
+// Quinzaine : « 2026-10-A » (du 1er au 15) ou « 2026-10-B » (du 16 à la fin du mois), comme l'onglet Paies
+const periodOf = (date) => `${date.slice(0, 7)}-${Number(date.slice(8, 10)) <= 15 ? "A" : "B"}`;
+const monthEnd = (m) => new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).getUTCDate();
+function periodStep(k, n) {
+  let [m, h] = [k.slice(0, 7), k.slice(8)];
+  for (let x = 0; x < Math.abs(n); x++)
+    if (n > 0) [m, h] = h === "A" ? [m, "B"] : [addMonths(m, 1), "A"];
+    else [m, h] = h === "B" ? [m, "A"] : [addMonths(m, -1), "B"];
+  return `${m}-${h}`;
+}
+const inPeriod = (p, k) => periodOf(p.date) === k;
+function periodLabel(k) {
+  const m = k.slice(0, 7);
+  const ml = monthLabel(m);
+  return k.endsWith("A") ? `du 1er au 15 ${ml}` : `du 16 au ${monthEnd(m)} ${ml}`;
+}
+// jour où on verse la paie de cette quinzaine : le 16, ou le 1er du mois suivant
+const payDayLabel = (k) => (k.endsWith("A") ? `16 ${monthLabel(k.slice(0, 7)).split(" ")[0]}` : `1er ${monthLabel(addMonths(k.slice(0, 7), 1)).split(" ")[0]}`);
 const addMonths = (m, n) => {
   const d = new Date(`${m}-01T12:00:00Z`);
   d.setUTCMonth(d.getUTCMonth() + n);
@@ -87,35 +110,28 @@ const VIEWS = {
         row(
           button("pn_ok", "Envoyer", "⚠️", ButtonStyle.Danger, !(st.uid && f)),
           button("pn_why", "Avec un détail…", "✍️", ButtonStyle.Secondary, !(st.uid && f)),
-          button("pn_sum", "Récap du mois", "📋", ButtonStyle.Secondary),
+          button("pn_sum", "Récap de la quinzaine", "📋", ButtonStyle.Secondary),
           button("pn_x", "Fermer", null, ButtonStyle.Secondary)
         ),
       ],
     };
   },
-  // Récap d'un mois : par chatteur, ses avertissements et le total à retirer ; annuler une erreur de saisie
+  // Récap d'une quinzaine de paie : par chatteur, ses avertissements et le total à retirer ; annuler une erreur de saisie
   async sum(st) {
-    const m = st.month || monthOf(today());
-    const list = (await appSync.penaltiesIn(m)).sort((a, b) => b.at - a.at);
-    const by = new Map();
-    for (const p of list) by.set(p.uid, [...(by.get(p.uid) || []), p]);
-    const rows = [...by.entries()]
-      .map(([uid, l]) => ({ uid, l, total: l.reduce((a, p) => a + (Number(p.amount) || 0), 0) }))
-      .sort((a, b) => b.total - a.total || b.l.length - a.l.length);
-    const detail = (l) => {
-      const c = new Map();
-      for (const p of l) c.set(p.fault, [...(c.get(p.fault) || []), p]);
-      return [...c.entries()].map(([k, x]) => `${faultOf(k)?.l || x[0].label} ×${x.length}`).join(", ");
-    };
+    const k = (st.period ||= periodOf(today()));
+    const list = (await periodList(k)).sort((a, b) => b.at - a.at);
+    const rows = recapRows(list);
     const del = st.del && list.find((p) => p.id === st.del);
     const total = rows.reduce((a, r) => a + r.total, 0);
+    const sent = ctx.getData?.().penRecaps?.[k];
     return {
       content: [
         st.note,
-        `📋 **Pénalités · ${monthLabel(m)}**${total ? ` · -${euros(total)} au total` : ""}`,
+        `📋 **Pénalités ${periodLabel(k)}**${total ? ` · -${euros(total)} au total` : ""} · paie du ${payDayLabel(k)}`,
         rows.length
           ? rows.map((r) => `<@${r.uid}> · ${r.l.length} avertissement${plS(r.l.length)} · **${r.total ? `-${euros(r.total)}` : "0 €"}**\n-# ${detail(r.l)}`).join("\n").slice(0, 1800)
-          : "_Aucune pénalité ce mois-ci._",
+          : "_Aucune pénalité sur cette quinzaine._",
+        sent ? `-# Récap envoyé dans le salon pénalités le ${dayShort(workDay(sent.at + 121 * 60e3))}.` : "",
         del ? `\n🗑️ Annuler : <@${del.uid}> N°${del.n} ${del.label}${del.amount ? ` (-${euros(del.amount)})` : ""} du ${dayShort(del.date)} ?` : "",
       ].filter(Boolean).join("\n"),
       components: [
@@ -135,8 +151,9 @@ const VIEWS = {
           : []),
         row(
           ...(del ? [button("pn_dok", "Oui, annuler", "🗑️", ButtonStyle.Danger)] : []),
-          button("pn_mo_-1", "Mois d'avant", "◀️", ButtonStyle.Secondary),
-          button("pn_mo_1", "Mois d'après", "▶️", ButtonStyle.Secondary, m >= monthOf(today())),
+          button("pn_pe_-1", "Quinzaine d'avant", "◀️", ButtonStyle.Secondary),
+          button("pn_pe_1", "Quinzaine d'après", "▶️", ButtonStyle.Secondary, k >= periodOf(today())),
+          ...(del ? [] : [button("pn_post", "Envoyer le récap", "📣", ButtonStyle.Secondary, !rows.length)]),
           button("pn_add", "Nouvelle pénalité", "⚠️", ButtonStyle.Primary),
           button("pn_x", "Fermer", null, ButtonStyle.Secondary)
         ),
@@ -144,6 +161,65 @@ const VIEWS = {
     };
   },
 };
+
+// ---------- Récap d'une quinzaine ----------
+async function periodList(k) {
+  return (await appSync.penaltiesIn(k.slice(0, 7))).filter((p) => inPeriod(p, k));
+}
+// une ligne par chatteur : ses fautes et son total, les plus grosses pénalités d'abord
+function recapRows(list) {
+  const by = new Map();
+  for (const p of list) by.set(p.uid, [...(by.get(p.uid) || []), p]);
+  return [...by.entries()]
+    .map(([uid, l]) => ({ uid, l, total: l.reduce((a, p) => a + (Number(p.amount) || 0), 0) }))
+    .sort((a, b) => b.total - a.total || b.l.length - a.l.length);
+}
+function detail(l) {
+  const c = new Map();
+  for (const p of l) c.set(p.fault, [...(c.get(p.fault) || []), p]);
+  return [...c.entries()].map(([k, x]) => `${faultOf(k)?.l || x[0].label} ×${x.length}`).join(", ");
+}
+// « 📋 Récap des pénalités du 1er au 15 octobre 2026 » : une ligne par @chatteur avec son total, puis le total
+function recapText(k, list) {
+  const rows = recapRows(list);
+  const total = rows.reduce((a, r) => a + r.total, 0);
+  const lines = rows.map((r) => `<@${r.uid}> · **${r.total ? `-${euros(r.total)}` : "0 €"}** · ${r.l.length} avertissement${plS(r.l.length)}`);
+  let body = lines.join("\n");
+  if (body.length > 1700) body = body.slice(0, body.lastIndexOf("\n", 1700)) + "\n…";
+  return [
+    `📋 **Récap des pénalités ${periodLabel(k)}**`,
+    `-# À retirer de la paie du ${payDayLabel(k)}.`,
+    "",
+    rows.length ? body : "_Aucune pénalité sur cette quinzaine._ 🎉",
+    ...(rows.length ? ["", `**Total : -${euros(total)}**`] : []),
+  ].join("\n");
+}
+// Envoie le récap d'une quinzaine dans le salon pénalités
+async function postRecap(k, t = Date.now()) {
+  const list = await periodList(k);
+  const ch = await ctx.client.channels.fetch(PENALTY_CHANNEL_ID);
+  // chaque chatteur cité est notifié, comme pour ses pénalités
+  const msg = await ch.send({ content: recapText(k, list), allowedMentions: { users: [...new Set(list.map((p) => p.uid))].slice(0, 100) } });
+  const data = ctx.getData();
+  data.penRecaps ||= {};
+  data.penRecaps[k] = { channelId: ch.id, id: msg.id, at: t };
+  for (const x of Object.keys(data.penRecaps)) if (x < periodStep(k, -6)) delete data.penRecaps[x];
+  ctx.saveData();
+  return list.length;
+}
+// Le 1er et le 16 à 2 h (et au démarrage, si le bot était éteint à ce moment-là) : récap de la quinzaine qui vient de finir
+async function autoRecap(t = Date.now()) {
+  if (!appSync.enabled() || !PENALTY_CHANNEL_ID) return null;
+  const d = workDay(t);
+  const cur = periodOf(d);
+  const prev = periodStep(cur, -1);
+  const since = Number(d.slice(8, 10)) - (cur.endsWith("A") ? 1 : 16); // jours depuis la coupure
+  // déjà envoyé après la fin de la quinzaine (un envoi à la main avant la fin ne compte pas : il en manquait peut-être)
+  const sent = ctx.getData().penRecaps?.[prev];
+  if ((sent && periodOf(workDay(sent.at)) > prev) || since > 2) return null;
+  await postRecap(prev, t);
+  return prev;
+}
 
 async function open(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
@@ -157,7 +233,7 @@ async function open(i) {
 // Enregistre la pénalité et l'annonce dans le salon pénalités
 async function send(i, st, note) {
   const f = faultOf(st.fault);
-  const date = today();
+  const date = today(); // jour de paie (avant 2 h : la veille)
   const m = monthOf(date);
   // recalculé au moment d'envoyer (un autre admin a pu en mettre une entre-temps)
   const n = (await appSync.penaltiesIn(m)).filter((p) => p.uid === st.uid && p.fault === f.k).length + 1;
@@ -207,12 +283,15 @@ async function handle(i) {
   else if (id === "pn_ok" || id === "pn_m") {
     if (!st.uid || !faultOf(st.fault)) st.note = "Choisis le chatteur et la faute.";
     else await send(i, st, id === "pn_m" ? (i.fields.getTextInputValue("note") || "").trim() : "");
-  } else if (id === "pn_sum") Object.assign(st, { view: "sum", month: null, del: null });
+  } else if (id === "pn_sum") Object.assign(st, { view: "sum", period: null, del: null });
   else if (id === "pn_add") st.view = "add";
-  else if (id.startsWith("pn_mo_")) Object.assign(st, { month: addMonths(st.month || monthOf(today()), Number(id.slice(6)) || 0), del: null });
-  else if (id === "pn_ds") st.del = i.values[0];
+  else if (id.startsWith("pn_pe_")) Object.assign(st, { period: periodStep(st.period || periodOf(today()), Number(id.slice(6)) || 0), del: null });
+  else if (id === "pn_post") {
+    const n = await postRecap(st.period).catch((e) => ({ error: e.message }));
+    st.note = n?.error ? `⚠️ Récap pas envoyé : ${String(n.error).slice(0, 150)}` : `📣 Récap ${periodLabel(st.period)} envoyé dans <#${PENALTY_CHANNEL_ID}>.`;
+  } else if (id === "pn_ds") st.del = i.values[0];
   else if (id === "pn_dok") {
-    const p = (await appSync.penaltiesIn(st.month || monthOf(today()))).find((x) => x.id === st.del);
+    const p = (await periodList(st.period)).find((x) => x.id === st.del);
     if (p) {
       await appSync.delPenalty(p.id);
       // le message du salon reste, barré
@@ -228,4 +307,4 @@ async function handle(i) {
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, open, handle, FAULTS, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states };
+module.exports = { ctx, open, handle, FAULTS, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };

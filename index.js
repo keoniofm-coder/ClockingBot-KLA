@@ -60,6 +60,7 @@ const DEFAULT_DATA = {
   planningMsgs: {}, // date -> { channelId, ids, hash } : dernier planning envoyé (mis à jour en direct)
   shiftMsgs: {}, // « date|créneau » -> { channelId, id, hash } : message de début de shift (mis à jour en direct)
   effMsgs: {}, // « date|shift » -> { channelId, id, hash } : récap de l'effectif (mis à jour en direct)
+  penRecaps: {}, // quinzaine « 2026-10-A » -> { channelId, id, at } : récap des pénalités envoyé
   dayoffBoard: null, // { channelId, messageId, hash } : tableau du salon day off
   gestionPanel: null, // { channelId, messageId, hash } : panneau des admins du salon gestion
   appLinks: {}, // ancien lien /lien_app, recopié dans la fiche du chatteur de l'app au démarrage
@@ -742,6 +743,10 @@ client.once(Events.ClientReady, async () => {
   setInterval(pollPost, 15000);
   // changements faits dans l'app -> planning, messages de shift et tableau des day off sur Discord
   setInterval(refreshLive, 60000);
+  // récap des pénalités de la quinzaine : le 16 et le 1er à 02h02 (rattrapé au démarrage s'il a été manqué)
+  const recap = () => penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
+  cron.schedule("2 2 * * *", recap, { timezone: TZ });
+  setTimeout(recap, 20000);
   const board = () => dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
   setTimeout(board, 10000);
   setInterval(board, 120000);
@@ -1158,7 +1163,7 @@ Object.assign(gestion.ctx, {
 Object.assign(chatters.ctx, {
   isAdmin, getData: () => data, saveData, publishMembers, remember, refresh: refreshSoon, SHIFT_OF_SLOT,
 });
-Object.assign(penalties.ctx, { isAdmin, client, nameOf });
+Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
   client,
