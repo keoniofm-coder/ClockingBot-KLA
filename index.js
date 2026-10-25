@@ -18,6 +18,7 @@ const penalties = require("./penalties");
 const shiftModal = require("./shiftmodal");
 const planWatch = require("./planwatch");
 const quickModal = require("./quickmodal");
+const fiche = require("./fiche");
 const menus = require("./menus");
 const { EPHEMERAL, reply, done, row, button, opt, chunk, fit, plS } = require("./ui");
 const { withEmoji } = planning;
@@ -263,10 +264,11 @@ const hashOf = (payloads) =>
 // (ceux de l'ancien salon gestion). Le panneau d'avant garde son pointage et Clock In / Clock Out.
 async function panelView(name, date, full = true) {
   const sh = SHIFTS[name];
-  let embed = null;
+  let embed = null, who = [];
   if (appSync.enabled() && date)
     try {
       const b = await shiftBoard(name, date);
+      who = whoChoices(b);
       const { head, lines, extra } = boardLines(b);
       embed = {
         title: `${sh.emoji} Shift ${name} · ${sh.label} · ${planning.dayLabel(date)}`,
@@ -281,9 +283,23 @@ async function panelView(name, date, full = true) {
   return {
     content: `🔔 **Shift ${name} (${sh.label})** · pensez à **clock in** ✅`,
     embeds: [embed],
-    components: [clockInRow(name), ...(full && appSync.enabled() ? gestion.panelRows(date, appSync.SLOT_OF[name]) : [])],
+    components: [clockInRow(name), ...(full && appSync.enabled() ? gestion.panelRows(date, appSync.SLOT_OF[name], who) : [])],
     allowedMentions: { parse: [] },
   };
+}
+// Menu 👤 Chatteur sous le panneau : ceux du shift (rangés comme le pointage), avec leurs modèles et leurs box
+function whoChoices(b) {
+  const byId = Object.fromEntries(b.staff.map((p) => [p.id, p]));
+  const out = new Map();
+  for (const g of planning.slotGroups(b.day, b.slot).groups)
+    for (const x of g.people) {
+      const p = byId[x.id] || { ...x.c, off: x.off };
+      const k = b.stOf(p);
+      const o = out.get(x.id) || { value: x.id, label: x.c.name, emoji: k === "off" ? "🏖️" : ST[k].e, parts: [] };
+      o.parts.push(`${g.name}${x.boxes.length ? ` · ${x.boxes.includes("all") ? "All Inbox" : `Box ${x.boxes.join(" & ")}`}` : ""}`);
+      out.set(x.id, o);
+    }
+  return [...out.values()].map(({ parts, ...o }) => ({ ...o, description: parts.join(" · ") }));
 }
 // Envoie le panneau d'un shift en bas du salon clocking ; le précédent perd les boutons des admins
 async function announceShift(name, t = Date.now()) {
@@ -1067,6 +1083,7 @@ async function handleInteraction(i) {
     if (cid.startsWith("pn_")) return penalties.handle(i);
     if (cid.startsWith("pm_")) return shiftModal.handle(i);
     if (cid.startsWith("qm_")) return quickModal.handle(i);
+    if (cid.startsWith("cf_")) return fiche.handle(i);
     if (/^p[leb]_/.test(cid)) return planEdit.handle(i);
     if (cid.startsWith("do_")) return dayoff.handle(i);
     if (cid.startsWith("vc_")) return voice.handle(i);
@@ -1201,6 +1218,7 @@ Object.assign(gestion.ctx, {
   openChatters: (i) => chatters.open(i),
   openPlanning: (i, date, view, extra) => planEdit.open(i, date, view, extra),
   openPenalties: (i) => penalties.open(i),
+  refreshPanels: (date) => refreshAnnounces(date).catch((e) => console.error("Panneau du shift :", e.message)),
   heldText: (date, slot, cid) => planEdit.heldText(date, slot, cid),
   dayoffView: (month) => dayoff.boardView(month),
   coupure: runCoupure,
@@ -1213,7 +1231,9 @@ Object.assign(gestion.ctx, {
 Object.assign(shiftModal.ctx, { isAdmin, refresh: refreshSoon });
 // 🔁 Remplacer, 🔀 Déplacer, 💪🏼 Renfort : des fenêtres où l'on tape le nom (au lieu des menus éphémères)
 Object.assign(quickModal.ctx, { isAdmin, refresh: refreshSoon });
-const modals = { replace: quickModal.openReplace, change: quickModal.openChange };
+// 👤 la fiche d'un chatteur (menu sous le panneau du shift) : modèles, box, shifts, compte ; ➕ un nouveau
+Object.assign(fiche.ctx, { isAdmin, refresh: refreshSoon });
+const modals = { replace: quickModal.openReplace, change: quickModal.openChange, fiche: fiche.openFiche, fresh: fiche.openNew };
 planEdit.ctx.modals = modals;
 gestion.ctx.modals = modals;
 // box, modèle, chatteur ajouté ou retiré dans l'app sur un shift en cours -> une ligne dans le salon clocking

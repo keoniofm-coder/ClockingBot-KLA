@@ -57,7 +57,7 @@ function openReplace(i, { date, slot, out, outName, noted = false }) {
     );
   return i.showModal(m);
 }
-// mode : mv (déplacer, box) ou ren (renfort) ; uid : le compte Discord du chatteur (pré-rempli)
+// mode : mv (déplacer, box), ren (renfort) ou any (👤 un autre chatteur, depuis le menu du panneau) ; uid : son compte Discord (pré-rempli)
 async function openChange(i, { date, slot, mode = "mv", uid, name }) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
@@ -67,7 +67,7 @@ async function openChange(i, { date, slot, mode = "mv", uid, name }) {
   const cur = slot || liveSlot(date) || "soir";
   const m = new ModalBuilder()
     .setCustomId(`qm_chg~${date}~${cur}~${mode}`)
-    .setTitle(`${mode === "ren" ? "💪🏼 Renfort" : "🔀 Déplacer / box"} · ${shortDay(date)}`.slice(0, 45))
+    .setTitle(`${mode === "ren" ? "💪🏼 Renfort" : mode === "any" ? "👤 Un autre chatteur" : "🔀 Déplacer / box"} · ${shortDay(date)}`.slice(0, 45))
     .addLabelComponents(
       label("Chatteur").setUserSelectMenuComponent(userPick("who", uid)),
       label("Modèle").setStringSelectMenuComponent(choice("acc", [["keep", mode === "ren" ? "Sa modèle habituelle" : "Garder sa modèle", true], ...accts])),
