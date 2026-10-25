@@ -409,6 +409,11 @@ if (EFFECTIF_APRES > 0)
 
 // ================== POINTAGE EN DIRECT (salon gestion) ==================
 // Le shift en cours comme Pointage dans l'app : qui est là, en retard, en coupure, absent, pas encore là
+// durée : « 42 min », « 2h10 », « 2h »
+const dur = (min) => {
+  const n = Math.max(0, Math.round(Number(min) || 0));
+  return n < 60 ? `${n} min` : `${Math.floor(n / 60)}h${n % 60 ? String(n % 60).padStart(2, "0") : ""}`;
+};
 const ST = {
   present: { e: "🟢", sq: "🟩", l: "présent" }, retard: { e: "🟠", sq: "🟧", l: "retard" }, coupure: { e: "🔵", sq: "🟦", l: "coupure" },
   absent: { e: "🔴", sq: "🟥", l: "absent" }, todo: { e: "⚪", sq: "⬜", l: "à pointer" },
@@ -419,8 +424,10 @@ async function shiftBoard(name, date) {
   const [day, staff] = await Promise.all([appSync.planningDay(date), appSync.slotStaff(date, slot)]);
   const { seen, covering } = clockInsOf(name, date);
   const here = (p) => seen.has(p.discordId) || covering.has(p.discordId);
+  // revenu de sa coupure : de nouveau 🟢, la coupure reste écrite à droite de son nom
+  const backFromCut = (m) => m?.status === "coupure" && m.cutAt && m.cutEnd;
   const stOf = (p) =>
-    p.off ? "off" : ST[p.mark?.status] && !(p.mark.status === "absent" && here(p)) ? p.mark.status : here(p) ? "present" : "todo";
+    p.off ? "off" : backFromCut(p.mark) ? "present" : ST[p.mark?.status] && !(p.mark.status === "absent" && here(p)) ? p.mark.status : here(p) ? "present" : "todo";
   const detail = (p) => {
     const m = p.mark || {}, s = p.discordId && data.sessions[p.discordId];
     const k = stOf(p);
@@ -430,7 +437,11 @@ async function shiftBoard(name, date) {
     else if (k === "todo") bits.push("pas encore là");
     else if (k === "present") bits.push(covering.has(p.discordId) && !seen.has(p.discordId) ? `double shift, là depuis ${inT ? fmtTime(inT) : "le shift d'avant"}` : inT ? `arrivé ${fmtTime(inT)}` : "présent");
     else if (k === "retard") bits.push(`retard ${m.min || "?"} min`);
-    else if (k === "coupure") bits.push(m.cutAt && !m.cutEnd ? `en coupure depuis ${fmtTime(m.cutAt)}` : `coupure ${m.min ? m.min + " min" : ""}`.trim());
+    else if (k === "coupure") bits.push(m.cutAt && !m.cutEnd ? `en coupure depuis ${fmtTime(m.cutAt)}${Date.now() - m.cutAt >= 60e3 ? ` · ${dur((Date.now() - m.cutAt) / 60e3)}` : ""}` : `coupure ${m.min ? dur(m.min) : ""}`.trim());
+    if (backFromCut(m)) {
+      const last = Math.round((m.cutEnd - m.cutAt) / 60e3);
+      bits.push(`coupure ${fmtTime(m.cutAt)} → ${fmtTime(m.cutEnd)} : ${dur(last)}${Number(m.min) > last ? ` (${dur(m.min)} au total)` : ""}`);
+    }
     else if (k === "absent") bits.push("absent");
     if (m.out && k !== "off") bits.push(`parti ${fmtTime(m.out)}`);
     if (m.note) bits.push(`« ${m.note} »`);
@@ -760,7 +771,7 @@ client.once(Events.ClientReady, async () => {
 
 // Emojis des box (pastilles vertes 1 à 15 et ALL, dans assets/box) : ajoutés une fois aux emojis de
 // l'application du bot, utilisables partout. Sans eux (BOX_EMOJIS=off, ou erreur), chiffres emoji 1️⃣ 2️⃣.
-const BOX_EMOJI_V = "1"; // à changer si les images changent : les anciennes sont supprimées
+const BOX_EMOJI_V = "2"; // à changer si les images changent : les anciennes sont supprimées
 async function loadBoxEmojis() {
   if (/^(off|non|0|false)$/i.test(process.env.BOX_EMOJIS || "") || !client.application?.emojis) return;
   const have = await client.application.emojis.fetch();
@@ -1541,5 +1552,5 @@ if (require.main === module) client.login(TOKEN);
 // pour les tests
 module.exports = {
   client, handleInteraction, postPlanning, refreshPlanning, refreshLive, announceShift, postEffectif, pollPost, sweep,
-  parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion,
+  parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };
