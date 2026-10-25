@@ -352,7 +352,7 @@ async function effectifView(name, date) {
       })
       .sort((a, b) => (!a.mid) - (!b.mid) || mName(a.mid).localeCompare(mName(b.mid), "fr") ||
         boxRank(a.l) - boxRank(b.l) || a.p.name.localeCompare(b.p.name, "fr"))
-      .map(({ p, mid, l }) => `${planning.boxesE(l) || "▫️"} ${tag(p)}${mid ? ` · ${planning.modelMark(mName(mid))}` : ""}`);
+      .map(({ p, mid, l }) => `${tag(p)}${mid ? ` · ${planning.modelMark(mName(mid))}` : ""}${l.length ? ` ${planning.boxLabel(l)}` : ""}`);
   // présent : clock in sur Discord (ou encore là depuis le shift d'avant), ou pointé présent / retard / coupure
   const isHere = (p) => seen.has(p.discordId) || covering.has(p.discordId) || ["present", "retard", "coupure"].includes(p.mark?.status);
   const here = linesOf(due.filter(isHere));
@@ -473,7 +473,7 @@ function boardLines(b) {
     for (const x of g.people) {
       const p = byId[x.id] || { ...x.c, off: x.off };
       const k = stOf(p);
-      lines.push(`${k === "off" ? "🏖️" : ST[k].e} ${planning.boxesE(x.boxes) || "▫️"} ${x.c.discordId ? `<@${x.c.discordId}>` : `**${x.c.name}**`} · ${detail(p)}`);
+      lines.push(`${k === "off" ? "🏖️" : ST[k].e} ${x.c.discordId ? `<@${x.c.discordId}>` : `**${x.c.name}**`}${x.boxes.length ? ` · ${planning.boxLabel(x.boxes)}` : ""} · ${detail(p)}`);
     }
   }
   const due = staff.filter((p) => !p.off);
@@ -1450,7 +1450,7 @@ async function startClockIn(i) {
       i,
       [
         `✅ Clock in à **${fmtTime(t)}** · ${shiftTxt(shift)}`,
-        modeles.length ? `${modelesTxt(modeles)}${tag ? ` · tes box : ${tag}` : ""}` : "",
+        modeles.length ? `${modelesTxt(modeles)}${tag ? ` · ${tag}` : ""}` : "",
         isLate ? `⏰ ${late} min de retard.` : "",
         note,
       ].filter(Boolean).join("\n"),

@@ -87,32 +87,34 @@ function slotLines(day, slot) {
   return { lines, count };
 }
 
-// Box en gros : les emojis de box du bot (pastilles vertes, chargées au démarrage par index.js),
-// sinon des chiffres emoji : 1️⃣·2️⃣, 🔟, 1️⃣2️⃣ (box 12), 📥 All
+// Box en gros : les emojis de box du bot (pastilles orange, chargées au démarrage par index.js),
+// sinon des chiffres emoji ; séparées par « & » : 1️⃣ & 2️⃣, 🔟, 📥 All
 const BOX_EMOJIS = {}; // "1".."15", "all" -> « <:klbox1_3:id> »
 const setBoxEmojis = (map) => Object.assign(BOX_EMOJIS, map);
 const keycap = (b) => (b === "10" ? "🔟" : [...String(b)].map((ch) => `${ch}\uFE0F\u20E3`).join(""));
 function boxesE(l) {
   if (!l.length) return "";
   if (l.includes("all")) return BOX_EMOJIS.all || "📥 **All**";
-  return l.every((b) => BOX_EMOJIS[b]) ? l.map((b) => BOX_EMOJIS[b]).join("") : l.map(keycap).join("·");
+  return l.map((b) => BOX_EMOJIS[b] || keycap(b)).join(" & ");
 }
-// Box d'un chatteur à côté de son nom : « [2][3] », ou modèle par modèle s'il en a plusieurs : « 🍑 [1] · 🍒 [4] »
+// « Box : 2️⃣ & 3️⃣ »
+const boxLabel = (l) => (l.length ? `Box : ${boxesE(l)}` : "");
+// Box d'un chatteur à côté de son nom : « Box : 2️⃣ & 3️⃣ », ou modèle par modèle s'il en a plusieurs : « Box : 🍑 1️⃣ · 🍒 4️⃣ »
 function boxTag(boxes, mName) {
   const l = Object.entries(boxes || {}).map(([mid, v]) => [mid, boxList(v)]).filter(([, v]) => v.length);
-  if (l.length < 2) return l.length ? boxesE(l[0][1]) : "";
-  return l.map(([mid, v]) => `${modelMark(mName(mid))} ${boxesE(v)}`).join(" · ");
+  if (l.length < 2) return l.length ? boxLabel(l[0][1]) : "";
+  return `Box : ${l.map(([mid, v]) => `${modelMark(mName(mid))} ${boxesE(v)}`).join(" · ")}`;
 }
 // En-tête d'un modèle : « **ANNA 🍑** · Telegram »
 const modelHead = (g) => `**${g.name.toLocaleUpperCase("fr")}**${g.samePlat && g.plats.length ? ` · ${g.plats.join(" + ")}` : ""}`;
-// Message de début de shift et planning : un chatteur par ligne, ses box en gros devant le nom, regroupés par modèle
+// Message de début de shift et planning : un chatteur par ligne, « @Atuf · Box : 2️⃣ & 3️⃣ », regroupés par modèle
 function rosterLines(day, slot) {
   const { groups, count } = slotGroups(day, slot);
   const lines = [];
   for (const g of groups) {
     lines.push(modelHead(g));
     for (const p of g.people)
-      lines.push(`${boxesE(p.boxes) || "▫️"} ${whoOf(p.c)}${!g.samePlat && p.plats.length ? ` (${p.plats.join(" + ")})` : ""}${tagOf(p)}`);
+      lines.push(`${whoOf(p.c)}${!g.samePlat && p.plats.length ? ` (${p.plats.join(" + ")})` : ""}${p.boxes.length ? ` · ${boxLabel(p.boxes)}` : ""}${tagOf(p)}`);
   }
   return { lines, count };
 }
@@ -161,6 +163,6 @@ function chunkEmbeds(embeds) {
 }
 
 module.exports = {
-  SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, boxTag, modelHead, modelMark,
+  SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, boxLabel, boxTag, modelHead, modelMark,
   setBoxEmojis, BOX_ORDER, cap, withEmoji,
 };

@@ -21,10 +21,10 @@ const lastLeft = new Map(); // uid -> heure du dernier départ posté
 
 const watched = (ch) => !!ch && VOICE_IDS.has(ch.id);
 const chName = (ch) => `🔊 ${ch?.name || "vocal"}`;
-// « <@id> [2][3] » : ses box sur son shift, à droite du nom
+// « <@id> (Box : 2️⃣ & 3️⃣) » : ses box sur son shift, à droite du nom
 async function who(uid) {
   const tag = await Promise.resolve(ctx.boxTag?.(uid)).catch(() => "");
-  return `<@${uid}>${tag ? ` ${tag}` : ""}`;
+  return `<@${uid}>${tag ? ` (${tag})` : ""}`;
 }
 
 async function post(voiceCh, payload) {

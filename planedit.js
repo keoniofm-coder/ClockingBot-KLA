@@ -8,7 +8,7 @@ const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
-const { SLOTS, withEmoji, boxList, boxesS, boxesE, dayLabel } = planning;
+const { SLOTS, withEmoji, boxList, boxesS, boxesE, boxLabel, dayLabel } = planning;
 
 // Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date)
 const ctx = {};
@@ -29,14 +29,14 @@ async function load(date) {
 }
 const midsOf = (accts) => [...new Set((accts || []).map((k) => k.split("|")[0]).filter(Boolean))];
 const platsOf = (d, accts, mid) => (accts || []).filter((k) => k.startsWith(mid + "|")).map((k) => d.cat.platName(k.split("|")[1]));
-// md : « **ANNA 🍑** Telegram [1][2] · **AXELLE 🍒** Telegram [4] » ; sinon (menus) « Anna 🍑 Telegram B1·2 · … »
+// md : « **ANNA 🍑** Telegram · Box : 1️⃣ & 2️⃣ · **AXELLE 🍒** Telegram · Box : 4️⃣ » ; sinon (menus) « Anna 🍑 Telegram B1·2 · … »
 function acctsText(d, accts, boxes, md = true, only) {
   const parts = midsOf(accts)
     .filter((mid) => !only || only.includes(mid))
     .map((mid) => {
       const bx = boxList(boxes?.[mid]);
       return md
-        ? [`**${d.mName(mid).toLocaleUpperCase("fr")}**`, platsOf(d, accts, mid).join(" + "), boxesE(bx)].filter(Boolean).join(" ")
+        ? [`**${d.mName(mid).toLocaleUpperCase("fr")}**`, platsOf(d, accts, mid).join(" + ")].filter(Boolean).join(" ") + (bx.length ? ` · ${boxLabel(bx)}` : "")
         : [d.mName(mid), platsOf(d, accts, mid).join(" + "), boxesS(bx)].filter(Boolean).join(" ");
     });
   return parts.join(" · ") || "aucun compte";
@@ -121,7 +121,7 @@ function takeBoxes(d, slot, mid, l, except, patch) {
     if (!lost.length) continue;
     const left = cur.filter((b) => !nums.includes(b));
     addPatch(patch, s.sid, { boxes: { [mid]: left.length ? left : null } });
-    taken.push(`${boxesS(lost).replace(/^B/, "box ")} retirée${lost.length > 1 ? "s" : ""} à ${d.byId[s.chatterId].name}`);
+    taken.push(`${boxLabel(lost)} retirée${lost.length > 1 ? "s" : ""} à ${d.byId[s.chatterId].name}`);
   }
   return taken;
 }
@@ -132,7 +132,7 @@ async function setBoxes(st, d, e, mid, values) {
   // ses box réglées à la main : plus rien à lui rendre au retour de coupure
   addPatch(patch, e.sid, { boxes: { [mid]: l.length ? l : null }, ...(e.held ? { held: null } : {}) });
   await save(st, patch);
-  return `✅ Box de ${whoMd(d.byId[e.chatterId])} sur ${d.mName(mid)} : **${l.length ? boxesS(l) : "aucune"}**.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+  return `✅ Box de ${whoMd(d.byId[e.chatterId])} sur ${d.mName(mid)} : ${l.length ? boxesE(l) : "**aucune**"}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
@@ -159,8 +159,8 @@ function applyFate(d, fate, who, mids, patch) {
     if (given && midsOf(given.accts).includes(mid) && l.length) {
       const cur = boxList(patch[given.sid]?.boxes?.[mid] !== undefined ? patch[given.sid].boxes[mid] : given.boxes?.[mid]);
       addPatch(patch, given.sid, { boxes: { [mid]: boxList([...cur.filter((b) => b !== "all"), ...l]) } });
-      lines.push(`ses box **${d.mName(mid)}** ${boxesE(l)} → ${tag(d.byId[given.chatterId])}`);
-    } else lines.push(`quitte **${d.mName(mid)}**${l.length ? ` (${boxesE(l)} libres)` : ""}`);
+      lines.push(`ses ${boxLabel(l)} sur **${d.mName(mid)}** → ${tag(d.byId[given.chatterId])}`);
+    } else lines.push(`quitte **${d.mName(mid)}**${l.length ? ` (${boxLabel(l)} libre${l.length > 1 ? "s" : ""})` : ""}`);
   }
   return ` · ${lines.join(" · ")}`;
 }
@@ -339,7 +339,7 @@ const VIEWS = {
         `🔀 **Déplacer un chatteur** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}`,
         "Envoie un chatteur sur une autre modèle (renfort, ou à la place de quelqu'un) et choisis ses box : elles sont retirées à celui qui les avait.",
         e ? `Chatteur : ${whoMd(d.byId[e.chatterId])} · ${acctsText(d, e.accts, e.boxes)}` : "",
-        tk ? `Vers : **${d.mName(tm).toLocaleUpperCase("fr")}** ${d.cat.platName(tk.split("|")[1])}${st.mvBoxes?.length ? ` · ${boxesE(boxList(st.mvBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesS(boxList(s.boxes?.[tm]))}`.trim()).join(", ")}` : ""}` : "",
+        tk ? `Vers : **${d.mName(tm).toLocaleUpperCase("fr")}** ${d.cat.platName(tk.split("|")[1])}${st.mvBoxes?.length ? ` · ${boxLabel(boxList(st.mvBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesE(boxList(s.boxes?.[tm]))}`.trim()).join(", ")}` : ""}` : "",
       ]),
       components: [
         row(here.length ? new StringSelectMenuBuilder().setCustomId("pe_mw").setPlaceholder("Qui ?").addOptions(entryOpts(d, here.slice(0, 25)).map((o) => ({ ...o, default: o.value === st.mvSid }))) : emptyMenu("pe_mw", "Personne sur ce shift")),
@@ -385,7 +385,7 @@ const VIEWS = {
         `➕ **Renfort** · ${sl.emoji} ${sl.l} (${sl.h}) · ${dayLabel(date)}${now ? " · en cours" : ""}`,
         "Mets un chatteur sur un shift où il n'est pas prévu (ex. un gars du soir qui reste la nuit), avec sa modèle et ses box : elles sont retirées à celui qui les avait.",
         c ? `Chatteur : ${whoMd(c)}${elsewhere(c.id).length ? ` · prévu en ${elsewhere(c.id).map((s) => `${slotOf(s.slot).l}${s.eve ? " d'avant" : ""}`).join(" + ")}` : ""}${here ? `\n-# Déjà sur ce shift (${acctsText(d, here.accts, here.boxes, false)}) : la modèle s'ajoute à ses comptes.` : ""}` : "",
-        st.acc ? `Sur : **${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${st.rBoxes?.length ? ` ${boxesE(boxList(st.rBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesS(boxList(s.boxes?.[mid]))}`.trim()).join(", ")}` : ""}` : "",
+        st.acc ? `Sur : **${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${st.rBoxes?.length ? ` · ${boxLabel(boxList(st.rBoxes))}` : ""}${holders.length ? `\n-# Déjà dessus : ${holders.map((s) => `${d.byId[s.chatterId].name} ${boxesE(boxList(s.boxes?.[mid]))}`.trim()).join(", ")}` : ""}` : "",
       ]),
       components: [
         ...selectMenus("pe_nc", people.map((o) => ({ ...o, default: o.value === st.cid })), { placeholder: "Chatteur en renfort", max: 2, chosen: [st.cid] }),
@@ -649,14 +649,14 @@ async function move(st) {
   await save(st, patch);
   const c = d.byId[e.chatterId];
   const sl = slotOf(e.slot);
-  const dest = `**${d.mName(tm).toLocaleUpperCase("fr")}** ${d.cat.platName(tk.split("|")[1])}${l.length ? ` ${boxesE(l)}` : ""}`;
+  const dest = `**${d.mName(tm).toLocaleUpperCase("fr")}** ${d.cat.platName(tk.split("|")[1])}${l.length ? ` · ${boxLabel(l)}` : ""}`;
   if (running(st.date, e.slot))
     await ctx.notify?.({
       content: `🔀 ${tag(c)} passe sur ${dest} · ${sl.emoji} ${sl.l}${fate}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
     }).catch((err) => console.error("Déplacement (salon clocking) :", err.message));
   Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep" });
-  return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` (${boxesS(l)})` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+  return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` · ${boxLabel(l)}` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
 
 // Renfort : un chatteur en plus sur un shift (ex. un gars du soir qui reste la nuit), sur la modèle et les box choisies
@@ -676,12 +676,12 @@ async function renfort(st) {
   else addPatch(patch, sid, { slot, chatterId: c.id, accts: [st.acc], ...(l.length ? { boxes: { [mid]: l } } : {}) });
   await save(st, patch);
   const sl = slotOf(slot);
-  const dest = `**${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${l.length ? ` ${boxesE(l)}` : ""}`;
+  const dest = `**${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${l.length ? ` · ${boxLabel(l)}` : ""}`;
   if (running(date, slot))
     await ctx.notify?.({ content: `➕ ${tag(c)} en renfort · ${sl.emoji} ${sl.l} · ${dest}`, allowedMentions: { users: [c.discordId].filter(Boolean) } })
       .catch((err) => console.error("Renfort (salon clocking) :", err.message));
   Object.assign(st, { cid: null, acc: null, rBoxes: [] });
-  return `✅ ${whoMd(c)} en renfort sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` ${boxesS(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
+  return `✅ ${whoMd(c)} en renfort sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` · ${boxLabel(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
 // Shifts proposés pour un renfort : depuis le salon gestion, celui en cours et les trois suivants ; sinon ceux du jour
 function shiftChoices(st) {
@@ -704,12 +704,12 @@ async function heldOf(date, slot, cid) {
   const parts = held.map((h) => {
     const b = boxList(h.b);
     const from = d.plan.filter((s) => s.slot === slot && s.sid !== e.sid && boxList(s.boxes?.[h.m]).some((x) => b.includes(x)));
-    return { h, b, from, txt: `${d.mName(h.m)} ${boxesS(b)}${from.length ? ` (chez ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}` };
+    return { h, b, from, txt: `${boxLabel(b)} sur ${d.mName(h.m)}${from.length ? ` (chez ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}` };
   });
   return { d, e, parts };
 }
 const heldText = async (date, slot, cid) => (await heldOf(date, slot, cid)).parts.map((p) => p.txt).join(" · ");
-// Il les reprend : retirées à celui qui les a ; renvoie « reprend Anna 🍑 [2] (rendue par Rep) »
+// Il les reprend : retirées à celui qui les a ; renvoie « reprend ses Box : 2️⃣ & 3️⃣ sur Axelle 🍒 (rendues par Moise) »
 async function giveBack(date, slot, cid) {
   const { d, e, parts } = await heldOf(date, slot, cid);
   if (!e || !parts.length) return "";
@@ -721,7 +721,7 @@ async function giveBack(date, slot, cid) {
   }
   addPatch(patch, e.sid, { held: null });
   await save({ date }, patch);
-  return `reprend ${parts.map(({ h, b, from }) => `**${d.mName(h.m)}** ${boxesE(b)}${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
+  return `reprend ses ${parts.map(({ h, b, from }) => `${boxLabel(b)} sur **${d.mName(h.m)}**${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
 }
 
 // Sous le planning du salon : les boutons, puis un menu par shift pour changer vite les box d'un chatteur

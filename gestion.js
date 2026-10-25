@@ -183,7 +183,7 @@ const VIEWS = {
         st.note,
         "🟢 **Retour de coupure**",
         list.length ? "Choisis qui revient : le temps de coupure est compté au pointage, comme un retard." : "_Personne n'est en coupure en ce moment._",
-        held ? `📦 Ses box pendant la coupure : ${held}${st.give === false ? " · il ne les reprend pas" : " · il les reprend à son retour"}` : "",
+        held ? `📦 Pendant sa coupure, ses ${held}${st.give === false ? " · il ne les reprend pas" : " · il les reprend à son retour"}` : "",
       ].filter(Boolean).join("\n"),
       components: [
         ...(list.length
