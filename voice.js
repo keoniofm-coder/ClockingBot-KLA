@@ -1,9 +1,11 @@
 // ================== VOCAUX : ARRIVÉES ET DÉPARTS ==================
 // Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le salon clocking
 // (VOICE_LOG_CHANNEL_ID pour un autre salon), sans notifier personne, avec ses box à droite de son nom.
-// S'il part pendant son shift, les admins ont deux boutons : ✂️ Coupure et 🔁 Remplacer.
+// S'il part pendant son shift (clock in, ou au planning d'un shift commencé), les admins ont deux boutons :
+// ⚡ Coupure (notée tout de suite) et 🔁 Remplacer ; les deux proposent ensuite quoi faire de ses box (quelqu'un le
+// remplace, elles sont redonnées à d'autres, ou retirées). À son retour, s'il est en coupure : 🔙 Retour de coupure.
 // Une micro-coupure (retour en moins de 30 s) n'affiche rien.
-const { ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+const { ButtonStyle } = require("discord.js");
 const { reply, row, button } = require("./ui");
 
 const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -14,7 +16,7 @@ const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? process.env.CLOCKING_C
 const GRACE = Math.max(0, Number(process.env.VOICE_GRACE_S ?? 30) || 0) * 1000; // micro-coupure ignorée
 const BACK_WITHIN = 4 * 3600e3; // « est revenu » si parti depuis moins de 4 h
 
-// Fourni par index.js : client, isAdmin(i), fmtTime(t), sessionText(uid), boxTag(uid), openReplace(i, uid), coupure(i, uid, { min, raison })
+// Fourni par index.js : client, isAdmin(i), fmtTime(t), shiftText(uid), boxTag(uid), inCoupure(uid), depart(i, uid, { cut }), retour(i, uid)
 const ctx = {};
 const pending = new Map(); // uid -> { timer, channelId, t } : départ pas encore posté
 const lastLeft = new Map(); // uid -> heure du dernier départ posté
@@ -63,11 +65,12 @@ async function onVoice(oldS, newS) {
     const left = lastLeft.get(uid);
     lastLeft.delete(uid);
     const back = left && t - left < BACK_WITHIN;
-    const w = await who(uid);
+    const [w, cut] = await Promise.all([who(uid), Promise.resolve(ctx.inCoupure?.(uid)).catch(() => false)]);
     return post(to, {
       content: back
         ? `🟢 ${w} est revenu sur **${chName(to)}** · ${time} · parti ${Math.max(1, Math.round((t - left) / 60000))} min`
         : `🟢 ${w} a rejoint **${chName(to)}** · ${time}`,
+      ...(cut ? { components: [row(button(`vc_back_${uid}`, "Retour de coupure", "🔙", ButtonStyle.Success))] } : {}),
     });
   }
   // départ : posté après GRACE secondes s'il n'est pas revenu
@@ -75,11 +78,11 @@ async function onVoice(oldS, newS) {
   const send = async () => {
     pending.delete(uid);
     lastLeft.set(uid, t);
-    const shift = ctx.sessionText?.(uid);
+    const shift = await Promise.resolve(ctx.shiftText?.(uid)).catch(() => "");
     return post(from, {
       content: `🔴 ${await who(uid)} a quitté **${chName(from)}** · ${time}${shift ? ` · en shift ${shift}` : ""}`,
       ...(shift
-        ? { components: [row(button(`vc_cut_${uid}`, "Coupure", "✂️", ButtonStyle.Secondary), button(`vc_rep_${uid}`, "Remplacer", "🔁", ButtonStyle.Secondary))] }
+        ? { components: [row(button(`vc_cut_${uid}`, "Coupure", "⚡", ButtonStyle.Secondary), button(`vc_rep_${uid}`, "Remplacer", "🔁", ButtonStyle.Secondary))] }
         : {}),
     });
   };
@@ -91,18 +94,9 @@ async function onVoice(oldS, newS) {
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const [, act, uid] = i.customId.split("_");
-  if (act === "cut")
-    return i.showModal(
-      new ModalBuilder().setCustomId(`vc_cutm_${uid}`).setTitle("Coupure").addComponents(
-        row(new TextInputBuilder().setCustomId("min").setLabel("Durée en minutes (optionnel)").setPlaceholder("ex : 15").setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(4)),
-        row(new TextInputBuilder().setCustomId("raison").setLabel("Raison (le chatteur la verra, optionnel)").setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200))
-      )
-    );
-  if (act === "cutm") {
-    const min = Math.round(Number(String(i.fields.getTextInputValue("min") || "").replace(",", "."))) || null;
-    return ctx.coupure(i, uid, { min: min && min > 0 && min <= 720 ? min : null, raison: (i.fields.getTextInputValue("raison") || "").trim() });
-  }
-  if (act === "rep") return ctx.openReplace(i, uid);
+  if (act === "cut") return ctx.depart(i, uid, { cut: true });
+  if (act === "rep") return ctx.depart(i, uid, { cut: false });
+  if (act === "back") return ctx.retour(i, uid);
   return reply(i, { content: "Ce bouton a expiré." });
 }
 

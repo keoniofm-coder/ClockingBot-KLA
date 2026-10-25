@@ -1,13 +1,14 @@
-// ================== SALON GESTION : LE PANNEAU DES ADMINS ==================
-// Un message fixe dans le salon gestion avec un bouton par sujet, à la place des commandes « / ».
+// ================== LES BOUTONS DES ADMINS (sous le panneau du shift, salon clocking) ==================
+// Un bouton par sujet, à la place des commandes « / », sous le pointage du shift dans le salon clocking.
 // Chaque bouton ouvre un menu visible seulement par l'admin qui a cliqué. Les commandes restent en secours.
+// L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
 const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
 const { pickRow, altButton, picked } = require("./pick");
 
-const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "1563688546303217784").trim();
+const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
 // setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra), openPenalties(i), heldText(date, slot, cid),
 // dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
@@ -40,13 +41,13 @@ function panelView(live) {
         button("g_plan", "Planning", "📅", ButtonStyle.Primary),
         button("g_rep", "Remplacer", "🔁", ButtonStyle.Secondary),
         button("g_mv", "Déplacer", "🔀", ButtonStyle.Secondary),
-        button("g_ren", "Renfort", "➕", ButtonStyle.Secondary),
+        button("g_ren", "Renfort", "💪🏼", ButtonStyle.Secondary),
         button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary)
       ),
       row(
         button("g_att", "Pointer", "📋", ButtonStyle.Primary),
-        button("g_cut", "Coupure", "✂️", ButtonStyle.Secondary),
-        button("g_back", "Retour de coupure", "🟢", ButtonStyle.Secondary),
+        button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
+        button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
         button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
         button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
@@ -54,6 +55,35 @@ function panelView(live) {
     ],
     allowedMentions: { parse: [] },
   };
+}
+// Sous le panneau d'un shift (salon clocking) : les boutons qui portent ce shift (~date~créneau) le visent
+// directement ; ✏️ ouvre la fenêtre pour modifier tout le shift d'un coup (shiftmodal.js)
+function panelRows(date, slot) {
+  const c = (id) => `${id}~${date}~${slot}`;
+  return [
+    row(
+      button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary),
+      button(c("g_box"), "Box du shift", "📦", ButtonStyle.Secondary),
+      button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
+      button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
+      button(c("g_rep"), "Remplacer", "🔁", ButtonStyle.Secondary)
+    ),
+    row(
+      button(c("g_mv"), "Déplacer", "🔀", ButtonStyle.Secondary),
+      button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
+      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
+      button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
+      button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary)
+    ),
+    row(
+      button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary),
+      button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
+      button("g_chat", "Chatteurs", "👥", ButtonStyle.Secondary),
+      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
+      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary)
+    ),
+    row(button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
+  ];
 }
 const hashOf = (v) => require("crypto").createHash("md5").update(JSON.stringify({ e: v.embeds, c: v.components.map((r) => r.toJSON()) })).digest("hex");
 
@@ -104,8 +134,8 @@ async function updatePanel({ resend = false }) {
 
 // ---------- Menus ----------
 const cancelBtn = (l = "Annuler") => button("g_x", l, null, ButtonStyle.Secondary);
-const STATUS = { present: ["Présent", "🟢", ButtonStyle.Success], retard: ["Retard", "🟠", ButtonStyle.Secondary], coupure: ["Coupure", "🔵", ButtonStyle.Secondary], absent: ["Absent", "🔴", ButtonStyle.Danger] };
-const SEMOJI = { present: "🟢", retard: "🟠", coupure: "🔵", absent: "🔴", todo: "⚪", off: "🏖️" };
+const STATUS = { present: ["Présent", "✅", ButtonStyle.Success], retard: ["Retard", "🟠", ButtonStyle.Secondary], coupure: ["Coupure", "⚡", ButtonStyle.Secondary], absent: ["Absent", "❌", ButtonStyle.Danger] };
+const SEMOJI = { present: "✅", retard: "🟠", coupure: "⚡", absent: "❌", todo: "⭕", off: "🏖️" };
 const VIEWS = {
   // Pointer à la main, comme Pointage dans l'app : statut, minutes, note, « tous les autres présents »
   async att(st) {
@@ -154,8 +184,8 @@ const VIEWS = {
     return {
       content: [
         st.note,
-        "✂️ **Noter une coupure**",
-        "Le chatteur est notifié dans le salon clocking et passe en « Coupure » au pointage. À son retour : 🟢 **Retour de coupure**.",
+        "⚡ **Noter une coupure**",
+        "Le chatteur est notifié dans le salon clocking et passe en « Coupure » au pointage. À son retour : 🔙 **Retour de coupure**.",
         st.user ? `Chatteur : <@${st.user.id}>${st.min ? ` · ${st.min} min` : ""}` : "",
       ].filter(Boolean).join("\n"),
       components: [
@@ -167,7 +197,7 @@ const VIEWS = {
             .addOptions([opt("Je ne sais pas", "0", null, "❔", !st.min), ...DURATIONS.map((m) => opt(`${m} min`, String(m), null, "⏱️", st.min === m))])
         ),
         row(
-          button("g_cok", "Noter la coupure", "✂️", ButtonStyle.Primary, !st.user),
+          button("g_cok", "Noter la coupure", "⚡", ButtonStyle.Primary, !st.user),
           button("g_cwhy", "Avec une raison…", "✍️", ButtonStyle.Secondary, !st.user),
           cancelBtn()
         ),
@@ -184,7 +214,7 @@ const VIEWS = {
     return {
       content: [
         st.note,
-        "🟢 **Retour de coupure**",
+        "🔙 **Retour de coupure**",
         list.length ? "Choisis qui revient : le temps de coupure est compté au pointage, comme un retard." : "_Personne n'est en coupure en ce moment._",
         held ? `📦 Pendant sa coupure, ses ${held}${st.give === false ? " · il ne les reprend pas" : " · il les reprend à son retour"}` : "",
       ].filter(Boolean).join("\n"),
@@ -192,12 +222,12 @@ const VIEWS = {
         ...(list.length
           ? selectMenus(
               "g_bs",
-              list.map((c) => opt(c.name, c.id, `En coupure depuis ${fmt(c.since)}${sl(c.slot) ? ` · ${sl(c.slot).l}` : ""}`, "✂️")),
+              list.map((c) => opt(c.name, c.id, `En coupure depuis ${fmt(c.since)}${sl(c.slot) ? ` · ${sl(c.slot).l}` : ""}`, "⚡")),
               { placeholder: "Qui revient ?", max: 1, chosen: [st.cid] }
             )
           : []),
         row(
-          button("g_bok", "Retour", "🟢", ButtonStyle.Success, !st.cid),
+          button("g_bok", "Retour", "🔙", ButtonStyle.Success, !st.cid),
           ...(held ? [button("g_bgv", st.give === false ? "Reprend ses box : non" : "Reprend ses box : oui", "📦", st.give === false ? ButtonStyle.Secondary : ButtonStyle.Primary)] : []),
           cancelBtn()
         ),
@@ -214,10 +244,10 @@ const VIEWS = {
       ],
     };
   },
-  // Renvoyer le message de début de shift (boutons Clock In / Clock Out)
+  // Renvoyer le panneau d'un shift (pointage, Clock In / Clock Out et ces boutons) en bas du salon clocking
   shift() {
     return {
-      content: "🔔 **Renvoyer le message de début de shift** dans le salon clocking.",
+      content: "🔔 **Renvoyer le panneau d'un shift** en bas du salon clocking (il remplace le précédent du même shift).",
       components: [
         row(
           new StringSelectMenuBuilder()
@@ -259,7 +289,10 @@ const open = async (i, view, st = {}) => {
 // ---------- Interactions g_… ----------
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
-  const id = i.customId;
+  // bouton sous le panneau d'un shift : g_xxx~date~créneau vise ce shift-là
+  const [id, pDate, pSlot] = i.customId.split("~");
+  const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
+  const cur = pinned || ctx.currentShift();
   const needApp = ["g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
@@ -268,21 +301,19 @@ async function handle(i) {
     case "g_chat": return ctx.openChatters(i);
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");
-    case "g_plan": return ctx.openPlanning(i, today(), "sh", { live: true });
-    // remplacer / déplacer : sur le shift en cours
+    case "g_plan": return ctx.openPlanning(i, cur.date, "sh", { live: true, slot: appSync.SLOT_OF[cur.name] });
+    // remplacer / déplacer : sur le shift du panneau (ou celui en cours, dès 15 min avant son début)
     case "g_rep":
-    case "g_mv": {
-      const cur = ctx.currentShift();
+    case "g_mv":
       return ctx.openPlanning(i, cur.date, id === "g_rep" ? "rep" : "mv", { slot: appSync.SLOT_OF[cur.name] });
-    }
-    // renfort : sur le shift en cours ou un des suivants
-    case "g_ren": return ctx.openPlanning(i, today(), "ren", { live: true });
-    case "g_box": return ctx.openPlanning(i, today(), "bx", { live: true });
+    // renfort : sur ce shift, ou un des suivants dans le menu
+    case "g_ren": return ctx.openPlanning(i, cur.date, "ren", { live: true, slot: appSync.SLOT_OF[cur.name] });
+    case "g_box": return ctx.openPlanning(i, cur.date, "bx", { live: true, slot: appSync.SLOT_OF[cur.name] });
     case "g_pen": return ctx.openPenalties(i);
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
-    case "g_att": return open(i, "att", ctx.currentShift());
+    case "g_att": return open(i, "att", { name: cur.name, date: cur.date });
     case "g_cut": return open(i, "cut");
     case "g_back": return open(i, "back");
     case "g_send": return open(i, "send");
@@ -334,7 +365,7 @@ async function handle(i) {
     await i.deferUpdate();
     if (id === "g_ss") {
       await ctx.announceShift(i.values[0]);
-      return done(i, `✅ Message du shift **${i.values[0]}** envoyé dans le salon clocking.`);
+      return done(i, `✅ Panneau du shift **${i.values[0]}** envoyé dans le salon clocking.`);
     }
     const r = await ctx.postPlanning(i.values[0]);
     return done(i, `✅ Planning du ${planning.dayLabel(i.values[0])} envoyé (${r.count} chatteur${r.count > 1 ? "s" : ""}) : ${r.url}`, 60000);
@@ -385,4 +416,4 @@ async function handle(i) {
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, handle, ensurePanel, panelSoon, panelView, GESTION_CHANNEL_ID, states };
+module.exports = { ctx, handle, ensurePanel, panelSoon, panelView, panelRows, GESTION_CHANNEL_ID, states };
