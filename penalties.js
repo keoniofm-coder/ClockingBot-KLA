@@ -12,7 +12,8 @@ const PENALTY_CHANNEL_ID = (process.env.PENALTY_CHANNEL_ID ?? "15539100442049946
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
-// free : avertissements sans pénalité avant la première ; tiers (retards) : [n-ième retard du mois, montant]
+// free : avertissements sans pénalité avant la première ; tiers (retards) : [n-ième retard du mois, montant],
+// pénalité seulement à ces retards-là (3e, 5e, 8e…), les autres sont des avertissements ; au-delà du dernier palier, chaque retard au dernier montant
 const FAULTS = [
   { k: "retard", l: "Retard de +5 min", e: "⏰", cat: "Présence", tiers: [[3, 2], [5, 5], [8, 10], [10, 15], [12, 17], [15, 20]] },
   { k: "absence", l: "Absence non prévenue ou injustifiée", e: "📅", cat: "Présence", amount: 10, free: 0 },
@@ -27,12 +28,15 @@ const FAULTS = [
 const faultOf = (k) => FAULTS.find((f) => f.k === k);
 // montant de la n-ième faute du mois (0 = avertissement seul)
 function amountFor(f, n) {
-  if (f.tiers) return f.tiers.reduce((a, [th, amt]) => (n >= th ? amt : a), 0);
+  if (f.tiers) {
+    const last = f.tiers[f.tiers.length - 1];
+    return n > last[0] ? last[1] : f.tiers.find(([th]) => th === n)?.[1] || 0;
+  }
   return n > f.free ? f.amount : 0;
 }
 const ruleTxt = (f) =>
   f.tiers
-    ? f.tiers.map(([th, amt]) => `${th}e -${amt} €`).join(", ")
+    ? `${f.tiers.map(([th, amt]) => `${th}e -${amt} €`).join(", ")}, les autres en avertissement`
     : f.free ? `${f.free} avertissements, puis -${f.amount} €` : `-${f.amount} € dès la 1re fois`;
 const euros = (n) => `${Number(n).toLocaleString("fr-FR")} €`;
 
