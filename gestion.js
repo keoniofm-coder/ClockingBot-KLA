@@ -49,7 +49,7 @@ function panelView(live) {
         button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
         button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
-      row(button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
+      row(button("g_box", "Box du shift", "📦", ButtonStyle.Secondary), button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
     ],
     allowedMentions: { parse: [] },
   };
@@ -252,7 +252,7 @@ const open = async (i, view, st = {}) => {
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
-  const needApp = ["g_plan", "g_rep", "g_mv", "g_ren", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
+  const needApp = ["g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
@@ -269,6 +269,7 @@ async function handle(i) {
     }
     // renfort : sur le shift en cours ou un des suivants
     case "g_ren": return ctx.openPlanning(i, today(), "ren", { live: true });
+    case "g_box": return ctx.openPlanning(i, today(), "bx", { live: true });
     case "g_pen": return ctx.openPenalties(i);
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });

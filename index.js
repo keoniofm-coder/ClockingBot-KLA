@@ -1146,6 +1146,12 @@ Object.assign(planEdit.ctx, {
   notify: async (payload) => (await client.channels.fetch(CLOCKING_CHANNEL_ID)).send(payload),
   coupure: ({ cid, slot, date }) => appSync.markCoupure({ cid, slot, date }),
   postPlanning: (date) => postPlanning(date),
+  presence: async (date, slot) => {
+    const name = SHIFT_OF_SLOT[slot];
+    if (!SHIFTS[name]) return {};
+    const b = await shiftBoard(name, date);
+    return Object.fromEntries(b.staff.map((p) => [p.id, b.stOf(p)]));
+  },
 });
 Object.assign(gestion.ctx, {
   isAdmin, client, SHIFTS, getData: () => data, saveData, liveEmbed: () => pointageEmbed(),

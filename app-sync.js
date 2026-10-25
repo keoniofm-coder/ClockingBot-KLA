@@ -317,6 +317,13 @@ async function planningDay(date) {
   const [plan, offs, chatters, cat, marks] = await Promise.all([planOf(date), offsOn(date), appChatters(), appCatalog(), readMarks(date)]);
   return { date, plan, offs: [...offs], chatters, models: cat.models, platName: cat.platName, marks };
 }
+// Nombre de box réglé pour un shift et une modèle (depuis Discord) : plan/<date>.nbox { "soir|m-anna": 4 }
+async function boxCounts(date) {
+  return (await getDoc("plan", date))?.nbox || {};
+}
+async function setBoxCount(date, slot, mid, n) {
+  await mergeDoc("plan", date, { date, nbox: { [`${slot}|${mid}`]: n } }, { date, shifts: {} });
+}
 // Identifiant d'une entrée du planning ou d'un day off (même format que l'app)
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 // Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app
@@ -634,7 +641,7 @@ async function finishPost(req, patch) {
 
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
-  appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, plannedFor,
+  appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,

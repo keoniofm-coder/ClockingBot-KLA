@@ -10,7 +10,8 @@ const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
 const { SLOTS, withEmoji, boxList, boxesS, boxesE, boxLabel, dayLabel } = planning;
 
-// Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date)
+// Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date),
+// presence(date, slot) : { chatterId: present | retard | coupure | absent | todo | off } d'après le pointage
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours (voir open)
 
@@ -103,6 +104,48 @@ const running = (date, slot) => {
   const start = appSync.parisMs(date, appSync.START_OF[slot]);
   return Date.now() >= start - 2 * 3600e3 && Date.now() < start + 6 * 3600e3;
 };
+
+// Statut au pointage, pour choisir qui prend des box
+const PRES = {
+  present: { e: "🟢", l: "là" }, retard: { e: "🟠", l: "en retard" }, coupure: { e: "🔵", l: "en coupure" },
+  absent: { e: "🔴", l: "absent" }, todo: { e: "⚪", l: "pas encore là" }, off: { e: "🏖️", l: "day off" },
+};
+// Box 1 à n réparties sur les chatteurs choisis, dans l'ordre de leurs box actuelles : une chacun, celles en plus
+// aux premiers ; s'il y a moins de box que de chatteurs, les derniers n'en ont pas
+function splitBoxes(list, n, mid) {
+  const rank = (s) => {
+    const l = boxList(s.boxes?.[mid]).filter((b) => b !== "all").map(Number);
+    return l.length ? Math.min(...l) : 99;
+  };
+  const order = [...list].sort((a, b) => rank(a) - rank(b));
+  let next = 1;
+  return order.map((s, i) => ({ s, l: Array.from({ length: Math.floor(n / order.length) + (i < n % order.length ? 1 : 0) }, () => String(next++)) }));
+}
+// Applique la répartition : les autres chatteurs de cette modèle sur ce shift n'ont plus de box
+async function boxSplit(st) {
+  const d = await load(st.date);
+  const slot = st.slot, mid = st.nbm, sl = slotOf(slot);
+  const on = d.plan.filter((s) => s.slot === slot && midsOf(s.accts).includes(mid));
+  const chosen = on.filter((s) => (st.nbw || []).includes(s.sid));
+  if (!mid || !chosen.length) return "Choisis la modèle et qui prend des box.";
+  const got = splitBoxes(chosen, st.nbn, mid).filter((p) => p.l.length);
+  const patch = {};
+  for (const s of on) {
+    const p = got.find((x) => x.s.sid === s.sid);
+    // box gardées pour un retour de coupure sur cette modèle : la nouvelle répartition les remplace
+    const held = Array.isArray(s.held) ? s.held.filter((h) => h && h.m !== mid) : null;
+    addPatch(patch, s.sid, { boxes: { [mid]: p ? p.l : null }, ...(held && held.length !== s.held.length ? { held: held.length ? held : null } : {}) });
+  }
+  await save(st, patch);
+  await appSync.setBoxCount(st.date, slot, mid, st.nbn).catch((e) => console.error("Nombre de box :", e.message));
+  const live = running(st.date, slot);
+  if (live)
+    await ctx.notify?.({
+      content: [`📦 **${d.mName(mid).toLocaleUpperCase("fr")}** passe à ${st.nbn} box · ${sl.emoji} ${sl.l}`, ...got.map((p) => `${tag(d.byId[p.s.chatterId])} · ${boxLabel(p.l)}`)].join("\n"),
+      allowedMentions: { users: got.map((p) => d.byId[p.s.chatterId].discordId).filter(Boolean) },
+    }).catch((e) => console.error("Box du shift (salon clocking) :", e.message));
+  return `✅ **${d.mName(mid)}** : ${st.nbn} box sur ${got.length} chatteur${got.length > 1 ? "s" : ""}.${live ? " Prévenus dans le salon clocking." : ""}`;
+}
 
 // ---------- Box : celui qui reçoit une box la prend à celui qui l'avait (même shift, même modèle) ----------
 function addPatch(patch, sid, v) {
@@ -255,6 +298,67 @@ const VIEWS = {
       components: [
         ...mids.map((mid, k) => row(boxMenu(`pe_qbx_${k}`, d, mid, boxList(e.boxes?.[mid])))),
         row(button("pe_pick_qb", "Tout modifier", "✏️", ButtonStyle.Secondary), button("pe_x", "Fermer", null, ButtonStyle.Secondary)),
+      ],
+    };
+  },
+  // Box d'un shift : combien de box pour une modèle et qui les prend (ex. 6 chatteurs dont 2 absents : 4 box)
+  async bx(st) {
+    if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
+    const d = await load(st.date);
+    st.slot = workSlot(st, d);
+    const slot = st.slot, sl = slotOf(slot);
+    const here = d.plan.filter((s) => s.slot === slot);
+    const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
+    if (!mids.includes(st.nbm)) Object.assign(st, { nbm: mids[0] || null, nbn: null, nbw: null });
+    const mid = st.nbm;
+    const on = here.filter((s) => midsOf(s.accts).includes(mid));
+    const pres = (await Promise.resolve(ctx.presence?.(st.date, slot)).catch(() => null)) || {};
+    const started = Date.now() >= appSync.parisMs(st.date, appSync.START_OF[slot]);
+    const stOf = (s) => (d.off.has(s.chatterId) ? "off" : started ? pres[s.chatterId] || "todo" : "");
+    // par défaut : ceux qui sont là (shift commencé) ; sinon ceux qui ont déjà des box, ou tous ceux prévus
+    const boxed = on.filter((s) => boxList(s.boxes?.[mid]).length && stOf(s) !== "off");
+    if (!st.nbw) st.nbw = (started ? on.filter((s) => ["present", "retard"].includes(stOf(s))) : boxed.length ? boxed : on.filter((s) => stOf(s) !== "off")).map((s) => s.sid);
+    const chosen = on.filter((s) => st.nbw.includes(s.sid));
+    if (!st.nbn) st.nbn = Number((await appSync.boxCounts(st.date).catch(() => ({})))[`${slot}|${mid}`]) || Math.max(chosen.length, 1);
+    const split = splitBoxes(chosen, st.nbn, mid);
+    const got = split.filter((p) => p.l.length);
+    const none = on.filter((s) => !got.some((p) => p.s.sid === s.sid));
+    const was = (s) => boxList(s.boxes?.[mid]);
+    return {
+      content: head(st, [
+        `📦 **Box du shift** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}`,
+        mid
+          ? [
+              `**${d.mName(mid).toLocaleUpperCase("fr")}** · ${on.length} chatteur${on.length > 1 ? "s" : ""} · **${st.nbn} box** pour ${chosen.length} chatteur${chosen.length > 1 ? "s" : ""}`,
+              ...got.map((p) => `${whoMd(d.byId[p.s.chatterId])} · ${boxLabel(p.l)}${was(p.s).join() !== p.l.join() ? ` _(avant : ${was(p.s).length ? boxesS(was(p.s)) : "aucune"})_` : ""}`),
+              none.length ? `-# Sans box : ${none.map((s) => `${d.byId[s.chatterId].name}${stOf(s) ? ` (${PRES[stOf(s)]?.l || stOf(s)})` : ""}`).join(", ")}` : "",
+              chosen.length > st.nbn ? `⚠️ ${st.nbn} box pour ${chosen.length} chatteurs : ${chosen.length - st.nbn} n'en ${chosen.length - st.nbn > 1 ? "ont" : "a"} pas.` : "",
+              "-# ✅ Répartir : écrit dans le planning de l'app, et les chatteurs sont prévenus dans le salon clocking pendant le shift.",
+            ].filter(Boolean).join("\n")
+          : "_Personne au planning sur ce shift._",
+      ]),
+      components: [
+        ...(mids.length > 1
+          ? [row(new StringSelectMenuBuilder().setCustomId("pe_ym").setPlaceholder("Modèle").addOptions(mids.slice(0, 25).map((m) => opt(d.mName(m), m, `${here.filter((s) => midsOf(s.accts).includes(m)).length} chatteur(s)`, null, m === mid))))]
+          : []),
+        ...(mid
+          ? [
+              row(new StringSelectMenuBuilder().setCustomId("pe_yn").setPlaceholder("Nombre de box").addOptions(Array.from({ length: 15 }, (_, k) => opt(`${k + 1} box`, String(k + 1), null, "📦", k + 1 === st.nbn)))),
+              row(
+                new StringSelectMenuBuilder()
+                  .setCustomId("pe_yw")
+                  .setPlaceholder("Qui prend des box ?")
+                  .setMinValues(0)
+                  .setMaxValues(Math.min(25, on.length))
+                  .addOptions(on.slice(0, 25).map((s) => opt(d.byId[s.chatterId].name, s.sid, [stOf(s) ? PRES[stOf(s)]?.l : "", was(s).length ? `a ${boxesS(was(s))}` : "sans box"].filter(Boolean).join(" · "), PRES[stOf(s)]?.e || "⚪", st.nbw.includes(s.sid))))
+              ),
+            ]
+          : []),
+        row(
+          button("pe_yok", "Répartir", "✅", ButtonStyle.Success, !got.length),
+          button("pe_ysl", `Shift : ${sl.l}${st.live ? ` · ${cap(dayLabel(st.date).split(" ")[0])}` : ""}`.slice(0, 80), sl.emoji || null, ButtonStyle.Secondary),
+          button("pe_x", "Fermer", null, ButtonStyle.Secondary)
+        ),
       ],
     };
   },
@@ -474,7 +578,7 @@ async function handle(i) {
   }
   // menu « box » d'un shift sous le planning : pl_qb_<date>_<créneau>
   const qb = id.match(/^pl_qb_(\d{4}-\d{2}-\d{2})_([a-z]+)$/);
-  if (qb) return open(i, qb[1], "qb", { sid: i.values?.[0], slot: qb[2] });
+  if (qb) return i.values?.[0] === "_nb" ? open(i, qb[1], "bx", { slot: qb[2] }) : open(i, qb[1], "qb", { sid: i.values?.[0], slot: qb[2] });
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const st = states.get(i.user.id);
   if (!st) return done(i, "Ce menu a expiré : reclique sur un bouton du planning.", 8000);
@@ -571,7 +675,21 @@ async function handle(i) {
   else if (act === "na") Object.assign(st, { acc: v, rBoxes: [] });
   else if (act === "nb") st.rBoxes = cleanBoxes(i.values, boxList(st.rBoxes));
   else if (act === "nok") st.note = await renfort(st);
-  else if (act === "cs") st.src = v;
+  else if (act === "ym") Object.assign(st, { nbm: v, nbn: null, nbw: null });
+  else if (act === "yn") st.nbn = Number(v) || 1;
+  else if (act === "yw") st.nbw = i.values;
+  else if (act === "yok") st.note = await boxSplit(st);
+  else if (act === "ysl") {
+    if (st.live) {
+      const ch = shiftChoices(st);
+      Object.assign(st, ch[(ch.findIndex((x) => x.date === st.date && x.slot === st.slot) + 1) % ch.length] || {});
+    } else {
+      const d = await load(st.date);
+      const filled = SLOTS.filter((s) => d.plan.some((e) => e.slot === s.k)).map((s) => s.k);
+      st.slot = filled[(filled.indexOf(st.slot) + 1) % filled.length] || st.slot;
+    }
+    Object.assign(st, { nbm: null, nbn: null, nbw: null });
+  } else if (act === "cs") st.src = v;
   else if (act === "cm") st.add = !st.add;
   else if (act === "cok") {
     const r = await appSync.copyPlan(st.src, st.date, { replace: !st.add });
@@ -747,7 +865,8 @@ function planComponents(date, day) {
           .setCustomId(`pl_qb_${date}_${sl.k}`)
           .setPlaceholder(`📦 Box ${sl.l} : choisis un chatteur (admins)`)
           .addOptions(
-            list.slice(0, 25).map((s) =>
+            opt(`Nombre de box du ${sl.l.toLowerCase()} et répartition`, "_nb", "Ex. 2 absents : passer de 6 à 4 box", "🔢"),
+            ...list.slice(0, 24).map((s) =>
               opt(byId[s.chatterId].name, s.sid, midsOf(s.accts).map((m) => [mName(m), boxesS(boxList(s.boxes?.[m]))].filter(Boolean).join(" ")).join(" · ") || "Aucun compte", sl.emoji)
             )
           )
