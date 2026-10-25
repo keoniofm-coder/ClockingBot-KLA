@@ -829,7 +829,8 @@ async function giveBack(date, slot, cid) {
 // ---------- Box du shift : une ligne par box, le chatteur en face ----------
 // Message à part, avec la nouvelle mise en page de Discord (plus de 5 lignes de menus) : pour une modèle sur
 // un shift, le nombre de box, puis une ligne par box où l'on choisit son chatteur. Chaque choix est enregistré
-// tout de suite (la box est retirée à celui qui l'avait) ; 🔎 met quelqu'un d'autre sur cette modèle.
+// tout de suite (la box est retirée à celui qui l'avait) ; 🔎 donne une box libre à qui l'on tape (s'il n'est pas sur
+// cette modèle, il y est mis en renfort ; s'il n'y a plus de box libre, on en ajoute une).
 const boxStates = new Map(); // userId -> { date, slot, live, mid, alt }
 const keycap = (n) => (n <= 9 ? `${n}\uFE0F\u20E3` : n === 10 ? "🔟" : "📦");
 async function boxView(st) {
@@ -853,8 +854,12 @@ async function boxView(st) {
   const holder = (b) => on.find((s) => bx(s).includes(String(b)));
   const allIn = on.filter((s) => bx(s).includes("all"));
   const over = on.flatMap((s) => bx(s).filter((b) => b !== "all" && Number(b) > n).map((b) => `${name(s)} (${b})`));
-  const eligible = Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id) && !on.some((s) => s.chatterId === c.id));
-  const addOpts = eligible.map((c) => opt(c.name, c.id));
+  // 🔎 : ceux du shift sur cette modèle d'abord (pour la liste « Pas sur Discord »)
+  const eligible = Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id))
+    .sort((a, b) => on.some((s) => s.chatterId === b.id) - on.some((s) => s.chatterId === a.id) || a.name.localeCompare(b.name, "fr"));
+  const addOpts = eligible.map((c) => opt(c.name, c.id, on.some((s) => s.chatterId === c.id) ? `Déjà sur ${d.mName(mid)}` : null));
+  // un nouvel id à chaque affichage : sinon Discord laisse le nom choisi dans le menu 🔎
+  st.k = ((st.k || 0) % 999) + 1;
   const live = running(st.date, slot);
   const buttons = [
     button("pb_auto", `Répartir sur ceux qui sont là`, "🔄", ButtonStyle.Secondary, !on.length),
@@ -893,7 +898,7 @@ async function boxView(st) {
           allIn.length ? `-# 📥 All Inbox : ${allIn.map(name).join(", ")}` : "",
           over.length ? `-# En plus des ${n} box : ${over.join(", ")}` : "",
           shownN < n ? `-# Box ${shownN + 1} à ${n} : sur l'écran du shift (✏️ Modifier).` : "",
-          "-# Une ligne par box : choisis son chatteur, c'est enregistré tout de suite.",
+          "-# Une ligne par box : choisis son chatteur, c'est enregistré tout de suite. Ou tape un nom dans 🔎 : il reçoit une box libre.",
         ].filter(Boolean).join("\n")
       : "_Personne au planning sur ce shift._",
   ].filter(Boolean).join("\n");
@@ -907,7 +912,7 @@ async function boxView(st) {
         ? [
             row(new StringSelectMenuBuilder().setCustomId("pb_n").setPlaceholder("Nombre de box").addOptions(Array.from({ length: 15 }, (_, k) => opt(`${k + 1} box`, String(k + 1), null, "📦", k + 1 === n)))),
             ...Array.from({ length: shownN }, (_, k) => boxRow(k + 1)),
-            pickRow("pb_add", { alt: st.alt, opts: addOpts, chatters: eligible, placeholder: `Quelqu'un d'autre sur ${d.mName(mid)}` }),
+            pickRow(`pb_add_${st.k}`, { alt: st.alt, opts: addOpts, chatters: eligible, placeholder: "Donner une box" }),
           ]
         : []),
       row(...buttons),
@@ -985,13 +990,26 @@ async function handleBox(i) {
       else if (was?.sid !== e.sid) st.note = await setBoxes(st, d, e, mid, [...boxList(e.boxes?.[mid]).filter((x) => x !== "all"), b]);
     }
   } else if (act === "add") {
-    // quelqu'un d'autre sur cette modèle (renfort) : avec le compte de cette modèle sur ce shift
+    // 🔎 : il reçoit la première box libre (une de plus s'il n'y en a plus) ; pas encore sur cette modèle : renfort
     const r = await picked(i, Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id)), { why: "inactif ou en day off ce jour-là" });
     if (!r.c) st.note = r.error;
-    else if (on.some((s) => s.chatterId === r.c.id)) st.note = `ℹ️ **${r.c.name}** est déjà sur ${d.mName(mid)} : choisis-le sur une ligne de box.`;
     else {
-      const acc = (r.c.shift?.accts || []).find((k) => k.startsWith(mid + "|")) || on.flatMap((s) => s.accts || []).find((k) => k.startsWith(mid + "|")) || d.cat.accounts.find((a) => a.key.startsWith(mid + "|"))?.key;
-      st.note = acc ? await renfort({ date: st.date, slot, cid: r.c.id, acc, rBoxes: [], live: true }) : "⚠️ Aucun compte pour cette modèle dans l'app.";
+      const e = on.find((s) => s.chatterId === r.c.id);
+      const acc = e ? null : (r.c.shift?.accts || []).find((k) => k.startsWith(mid + "|")) || on.flatMap((s) => s.accts || []).find((k) => k.startsWith(mid + "|")) || d.cat.accounts.find((a) => a.key.startsWith(mid + "|"))?.key;
+      const n = st.n || 1;
+      const used = new Set(on.flatMap((s) => boxList(s.boxes?.[mid])));
+      const free = Array.from({ length: n }, (_, k) => String(k + 1)).find((b) => !used.has(b));
+      const b = free || (n < 15 ? String(n + 1) : null);
+      if (!e && !acc) st.note = "⚠️ Aucun compte pour cette modèle dans l'app.";
+      else if (!b) st.note = "⚠️ Les 15 box sont prises : libère-en une sur sa ligne.";
+      else {
+        if (!free) await appSync.setBoxCount(st.date, slot, mid, n + 1);
+        st.note = e
+          ? await setBoxes(st, d, e, mid, [...boxList(e.boxes?.[mid]).filter((x) => x !== "all"), b])
+          : await renfort({ date: st.date, slot, cid: r.c.id, acc, rBoxes: [b], live: true });
+        if (!free) st.note += ` 📦 ${d.mName(mid)} passe à ${n + 1} box.`;
+        memo = new Map();
+      }
       st.alt = false;
     }
   } else if (act === "auto") {
