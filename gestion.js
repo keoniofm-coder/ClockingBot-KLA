@@ -1,7 +1,7 @@
 // ================== LES BOUTONS DES ADMINS (sous le panneau du shift, salon clocking) ==================
 // Un bouton par sujet, à la place des commandes « / », sous le pointage du shift dans le salon clocking.
 // Chaque bouton ouvre un menu visible seulement par l'admin qui a cliqué (un seul à la fois, voir menus.js), ou une
-// fenêtre : ✏️ Modifier le shift, 🔁 Remplacer, 🔀 Déplacer, 💪🏼 Renfort. Les commandes restent en secours.
+// fenêtre : ✏️ Modifier le shift, 👤 la fiche d'un chatteur (menu du haut), 💪🏼 Renfort. Les commandes restent en secours.
 // L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
 const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
@@ -14,7 +14,8 @@ const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "").trim();
 // setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra), openPenalties(i), heldText(date, slot, cid),
 // dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
 // dayChoices(), fireTargets(), firePreview(target), fire(target),
-// modals : { replace(i, { date, slot }), change(i, { date, slot, mode }) } (quickmodal.js)
+// modals : { replace(i, { date, slot }), change(i, { date, slot, mode }) } (quickmodal.js), fiche(i, { date, slot, cid }),
+// fresh(i, { date, slot }) (fiche.js), refreshPanels(date) : remet les panneaux de ce jour à jour
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
@@ -58,32 +59,42 @@ function panelView(live) {
     allowedMentions: { parse: [] },
   };
 }
-// Sous le panneau d'un shift (salon clocking) : les boutons qui portent ce shift (~date~créneau) le visent
-// directement ; ✏️ ouvre la fenêtre pour modifier tout le shift d'un coup (shiftmodal.js)
-function panelRows(date, slot) {
+// Sous le panneau d'un shift (salon clocking) : d'abord le menu 👤 Chatteur (sa fiche, ou ➕ en ajouter un), puis
+// les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement ; ✏️ ouvre la fenêtre pour modifier
+// tout le shift d'un coup (shiftmodal.js). who : ceux du shift [{ value, label, description, emoji }] (index.js)
+let whoN = 0; // change l'id du menu 👤 après chaque choix : Discord le remet à zéro (sinon le même nom ne se rechoisit pas)
+function panelRows(date, slot, who = []) {
   const c = (id) => `${id}~${date}~${slot}`;
   return [
+    row(
+      new StringSelectMenuBuilder()
+        .setCustomId(`g_who~${date}~${slot}~${whoN}`)
+        .setPlaceholder("👤 Chatteur : sa fiche (modèle, box, shift) ou ➕ en ajouter un")
+        .addOptions(
+          opt("Ajouter un chatteur", "_new", "Un nouveau : nom, compte Discord, modèle, shift", "➕"),
+          ...who.slice(0, 23).map((o) => opt(o.label, o.value, o.description, o.emoji)),
+          opt("Un autre chatteur…", "_other", "Pas sur ce shift : tape son nom", "🔎")
+        )
+    ),
     row(
       button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary),
       button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
       button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
-      button(c("g_rep"), "Remplacer", "🔁", ButtonStyle.Secondary),
-      button(c("g_mv"), "Déplacer", "🔀", ButtonStyle.Secondary)
-    ),
-    row(
       button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
-      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
-      button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
-      button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary)
+      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary)
     ),
     row(
+      button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
+      button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary),
       button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary),
       button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
-      button("g_chat", "Chatteurs", "👥", ButtonStyle.Secondary),
-      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
-      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary)
+      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary)
     ),
-    row(button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
+    row(
+      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary),
+      button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary),
+      button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)
+    ),
   ];
 }
 const hashOf = (v) => require("crypto").createHash("md5").update(JSON.stringify({ e: v.embeds, c: v.components.map((r) => r.toJSON()) })).digest("hex");
@@ -294,11 +305,21 @@ async function handle(i) {
   const [id, pDate, pSlot] = i.customId.split("~");
   const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
   const cur = pinned || ctx.currentShift();
-  const needApp = ["g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
+  const needApp = ["g_who", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
   switch (id) {
+    // 👤 Chatteur : sa fiche, ➕ un nouveau, 🔎 un autre (pas sur ce shift) ; puis le menu est remis à zéro
+    case "g_who": {
+      if (!ctx.modals) return ctx.openChatters(i);
+      const v = i.values?.[0];
+      const at = { date: cur.date, slot: appSync.SLOT_OF[cur.name] };
+      const r = v === "_new" ? ctx.modals.fresh(i, at) : v === "_other" ? ctx.modals.change(i, { ...at, mode: "any" }) : ctx.modals.fiche(i, { ...at, cid: v });
+      whoN = (whoN + 1) % 1000;
+      setTimeout(() => ctx.refreshPanels?.(cur.date), 1500);
+      return r;
+    }
     case "g_chat": return ctx.openChatters(i);
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");

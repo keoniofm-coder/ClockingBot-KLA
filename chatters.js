@@ -132,14 +132,15 @@ const draftOf = (c) => ({
 });
 const render = async (i, st) => showView(i, await (st.view === "home" ? homeView(st) : editView(st)));
 
-// ---------- Enregistrer ----------
+// ---------- Enregistrer (ici, et depuis la fiche du chatteur : fiche.js) ----------
+// st : { cid (vide = nouveau), orig : son brouillon d'avant, d : le brouillon (draftOf) } -> { ok, id, note } ou { note }
 async function save(st) {
   const d = st.d;
   if (!d.name) return { note: "✍️ Donne-lui un nom." };
   if (d.slots.length && !d.accts.length) return { note: "⚠️ Choisis au moins une modèle pour son shift." };
   const shift = appSync.habitOf(d.slots, d.accts, d.days);
   const r = await appSync.saveChatter({ id: st.cid, name: d.name, uid: d.uid !== st.orig.uid ? d.uid : undefined, shift });
-  if (r.error === "exists") return { note: `⚠️ **${r.chatter.name}** existe déjà dans l'app : choisis-le dans la liste pour le modifier.` };
+  if (r.error === "exists") return { exists: r.chatter, note: `⚠️ **${r.chatter.name}** existe déjà dans l'app : choisis-le dans la liste pour le modifier.` };
   // côté bot : son shift (le premier) pour le clocking, et le nom de son compte
   const data = ctx.getData();
   if (st.orig.uid && st.orig.uid !== d.uid) delete data.chatteurs[st.orig.uid];
@@ -155,6 +156,8 @@ async function save(st) {
   const verb = r.created ? "créé" : r.reactivated ? "réactivé" : "enregistré";
   return {
     ok: true,
+    id: r.id,
+    days: dates.length,
     note: `✅ **${d.name}** ${verb} : ${what}.${dates.length ? ` 📅 Planning mis à jour (${dates.length} jour${dates.length > 1 ? "s" : ""}).` : ""}`,
   };
 }
@@ -230,4 +233,4 @@ async function handle(i) {
   return render(i, st);
 }
 
-module.exports = { ctx, open, handle, states, cleanName };
+module.exports = { ctx, open, handle, states, cleanName, save, draftOf };

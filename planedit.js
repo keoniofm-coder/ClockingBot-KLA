@@ -16,6 +16,7 @@ const shiftModal = require("./shiftmodal");
 
 // Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date),
 // modals : { replace(i, { date, slot, out, outName, noted }), change(i, { date, slot, mode, uid, name }) } (quickmodal.js),
+// fiche(i, { date, slot, cid }) (fiche.js),
 // presence(date, slot) : { chatterId: present | retard | coupure | absent | todo | off } d'après le pointage
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours (voir open)
@@ -38,6 +39,7 @@ async function loadNow(date) {
 }
 // Dernier état lu de chaque jour : pour ouvrir une fenêtre tout de suite (Discord laisse 3 s), sans relire
 const lastDay = new Map();
+const cidOf = (date, sid) => lastDay.get(date)?.plan.find((s) => s.sid === sid)?.chatterId || null;
 const whoOf = (date, sid) => {
   const d = lastDay.get(date);
   const c = d && d.byId[d.plan.find((s) => s.sid === sid)?.chatterId];
@@ -299,9 +301,14 @@ const VIEWS = {
         row(boxRow),
         row(
           shiftModal.openButton(st.date, slot, "Tout le shift"),
-          button("pe_srp", sel ? `Remplacer ${name(sel)}`.slice(0, 80) : "Remplacer", "🔁", ButtonStyle.Secondary, !here.length),
-          button("pe_smv", sel ? `Déplacer ${name(sel)}`.slice(0, 80) : "Déplacer", "🔀", ButtonStyle.Secondary, !here.length),
-          button("pe_sed", "Comptes / shift", "✏️", ButtonStyle.Secondary, !sel),
+          // sa fiche (modèles, box, shifts, compte) ; sans les fenêtres : les anciens écrans
+          ...(ctx.modals?.fiche
+            ? [button("pe_sfi", sel ? `Fiche de ${name(sel)}`.slice(0, 80) : "Fiche", "👤", ButtonStyle.Secondary, !sel)]
+            : [
+                button("pe_srp", sel ? `Remplacer ${name(sel)}`.slice(0, 80) : "Remplacer", "🔁", ButtonStyle.Secondary, !here.length),
+                button("pe_smv", sel ? `Déplacer ${name(sel)}`.slice(0, 80) : "Déplacer", "🔀", ButtonStyle.Secondary, !here.length),
+                button("pe_sed", "Comptes / shift", "✏️", ButtonStyle.Secondary, !sel),
+              ]),
           button("pe_sdl", sel && st.delArm === sel.sid ? "Sûr ? Retirer" : "Retirer", "🗑️", ButtonStyle.Danger, !sel)
         ),
         row(
@@ -619,6 +626,11 @@ async function handle(i) {
     if (act === "srp" || act === "drep") return ctx.modals.replace(i, { date: st.date, slot: st.slot, out: w.uid, outName: w.name, noted: act === "drep" && !!st.cutNoted });
     return ctx.modals.change(i, { date: st.date, slot: st.slot, mode: act === "add" ? "ren" : "mv", ...(act === "smv" ? { uid: w.uid, name: w.name } : {}) });
   }
+  // 👤 sa fiche : la fenêtre déjà remplie avec ses modèles, ses box et ses shifts
+  if (act === "sfi" && ctx.modals?.fiche) {
+    const cid = cidOf(st.date, String(st.sel || "").split("|")[0]);
+    if (cid) return ctx.modals.fiche(i, { date: st.date, slot: st.slot || liveSlot(st.date), cid });
+  }
   // ses box (départ) : la fenêtre « Modifier le shift », où l'on écrit qui prend quelles box
   if (act === "dbox" || act === "bx") return shiftModal.open(i, st.date, st.slot || liveSlot(st.date));
   await i.deferUpdate();
@@ -863,13 +875,12 @@ async function giveBack(date, slot, cid) {
   return `reprend ses ${parts.map(({ h, b, from }) => `${boxLabel(b)} sur **${d.mName(h.m)}**${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
 }
 
-// Sous le planning du salon : les boutons, puis un menu pour modifier un shift d'un coup (✏️ fenêtre de texte)
+// Sous le planning du salon : les boutons, puis un menu pour modifier un shift d'un coup (✏️ fenêtre de texte).
+// Remplacer et Déplacer n'y sont plus (la fiche du chatteur le fait) ; ceux des anciens messages marchent encore.
 function planComponents(date, day) {
   const rows = [
     row(
       button(`pl_edit_${date}`, "Modifier", "📅", ButtonStyle.Primary),
-      button(`pl_rep_${date}`, "Remplacer", "🔁", ButtonStyle.Secondary),
-      button(`pl_mv_${date}`, "Déplacer", "🔀", ButtonStyle.Secondary),
       button(`pl_add_${date}`, "Ajouter", "➕", ButtonStyle.Success),
       button(`pl_next_${date}`, "Préparer le lendemain", "📋", ButtonStyle.Secondary)
     ),
@@ -890,6 +901,7 @@ function planComponents(date, day) {
 // Pour les fenêtres rapides (quickmodal.js) : relisent le jour avant d'agir
 const actions = {
   load: (date) => ((memo = new Map()), load(date)),
+  peek: (date) => lastDay.get(date) || null,
   replace: (st) => ((memo = new Map()), replace(st)),
   freeBoxes: (st) => ((memo = new Map()), freeBoxes(st)),
 };
