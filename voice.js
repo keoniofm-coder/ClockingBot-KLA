@@ -31,12 +31,22 @@ async function who(uid) {
   return `<@${uid}>${tag ? ` (${tag})` : ""}`;
 }
 
+let warned = false; // alerte « je ne peux pas écrire » déjà postée dans clocking (une fois par démarrage)
 async function post(voiceCh, payload) {
+  const id = VOICE_LOG_ID || voiceCh?.id;
   try {
     const ch = VOICE_LOG_ID ? await ctx.client.channels.fetch(VOICE_LOG_ID) : voiceCh;
     await ch.send({ allowedMentions: { parse: [] }, ...payload });
   } catch (e) {
     console.error("Message vocal :", e.message);
+    // le plus souvent : le rôle du bot n'a pas le droit d'écrire dans le chat du vocal
+    const clock = (process.env.CLOCKING_CHANNEL_ID || "").trim();
+    if (warned || !clock) return;
+    warned = true;
+    await ctx.client.channels
+      .fetch(clock)
+      .then((c) => c.send({ content: `⚠️ Je n'arrive pas à écrire les arrivées et départs du vocal dans <#${id}> (${String(e.message).slice(0, 120)}). Dans les réglages de ce salon › Permissions, donne au rôle du bot ✅ Voir le salon et ✅ Envoyer des messages.`, allowedMentions: { parse: [] } }))
+      .catch(() => {});
   }
 }
 
