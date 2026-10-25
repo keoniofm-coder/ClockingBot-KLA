@@ -17,6 +17,8 @@ const chatters = require("./chatters");
 const penalties = require("./penalties");
 const shiftModal = require("./shiftmodal");
 const planWatch = require("./planwatch");
+const quickModal = require("./quickmodal");
+const menus = require("./menus");
 const { EPHEMERAL, reply, done, row, button, opt, chunk, fit, plS } = require("./ui");
 const { withEmoji } = planning;
 
@@ -1056,12 +1058,15 @@ async function handleInteraction(i) {
     }
 
     remember(i.user, i.member);
+    // un seul menu éphémère ouvert à la fois par admin, supprimé après 3 min sans le toucher
+    menus.track(i);
 
     // planning modifiable (pl_ / pe_), salon day off (do_), vocaux (vc_), panneau gestion (g_), chatteurs (cm_)
     const cid = i.customId || "";
     if (cid.startsWith("cm_")) return chatters.handle(i);
     if (cid.startsWith("pn_")) return penalties.handle(i);
     if (cid.startsWith("pm_")) return shiftModal.handle(i);
+    if (cid.startsWith("qm_")) return quickModal.handle(i);
     if (/^p[leb]_/.test(cid)) return planEdit.handle(i);
     if (cid.startsWith("do_")) return dayoff.handle(i);
     if (cid.startsWith("vc_")) return voice.handle(i);
@@ -1206,6 +1211,11 @@ Object.assign(gestion.ctx, {
   fireTargets, firePreview, fire: fireChatter,
 });
 Object.assign(shiftModal.ctx, { isAdmin, refresh: refreshSoon });
+// 🔁 Remplacer, 🔀 Déplacer, 💪🏼 Renfort : des fenêtres où l'on tape le nom (au lieu des menus éphémères)
+Object.assign(quickModal.ctx, { isAdmin, refresh: refreshSoon });
+const modals = { replace: quickModal.openReplace, change: quickModal.openChange };
+planEdit.ctx.modals = modals;
+gestion.ctx.modals = modals;
 // box, modèle, chatteur ajouté ou retiré dans l'app sur un shift en cours -> une ligne dans le salon clocking
 Object.assign(planWatch.ctx, { notify: planEdit.ctx.notify, refresh: refreshSoon });
 Object.assign(appSync.hooks, { planWritten: planWatch.onWrite, beforeLoud: planWatch.prime });
@@ -1246,7 +1256,7 @@ Object.assign(voice.ctx, {
   },
   // coupure en cours (pour le bouton 🔙 sous « est revenu »)
   inCoupure: async (uid) => appSync.enabled() && (await appSync.openCoupures()).some((c) => c.discordId === uid),
-  // ⚡ Coupure (notée tout de suite) ou 🔁 Remplacer : puis ses box (quelqu'un le remplace, redonnées, retirées)
+  // ⚡ Coupure (notée tout de suite) : puis ses box (quelqu'un le remplace, redonnées, retirées)
   depart: async (i, uid, { cut }) => {
     await i.deferReply({ flags: EPHEMERAL });
     let cutText = "";
@@ -1258,6 +1268,8 @@ Object.assign(voice.ctx, {
     }
     return planEdit.openDepart(i, uid, { cutNoted: cut, cutText });
   },
+  // 🔁 Remplacer : la fenêtre tout de suite, lui déjà choisi (son shift en cours est trouvé à l'envoi)
+  replace: (i, uid) => quickModal.openReplace(i, { date: "-", out: uid }),
   retour: async (i, uid) => {
     const m = await client.users.fetch(uid);
     return retourCoupure(i, { uid, names: namesOfUser(m) });

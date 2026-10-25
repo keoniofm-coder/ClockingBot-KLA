@@ -1,12 +1,12 @@
 // ================== PLANNING MODIFIABLE DEPUIS DISCORD ==================
-// Sous le planning du salon planning : ✏️ Modifier, 🔁 Remplacer, 🔀 Déplacer, ➕ Ajouter, 📋 Préparer le lendemain,
-// et un menu par shift pour changer vite les box d'un chatteur (admins, en message éphémère).
+// Sous le planning du salon planning : ✏️ Modifier, 🔁 Remplacer, 🔀 Déplacer, ➕ Ajouter, 📋 Préparer le lendemain
+// (admins, en message éphémère). Les box de tout un shift se changent dans la fenêtre « Modifier le shift » (shiftmodal.js).
 // ✏️ Modifier ouvre un shift sur un seul écran : le shift se choisit dans un menu déroulant, on choisit un chatteur
 // et ses box changent dès qu'on les coche ; remplacer, déplacer, ajouter partent de là et y reviennent.
 // Chaque changement est écrit tout de suite dans le planning de l'app (plan/<date>, comme l'app le fait),
 // puis le message du salon se met à jour. L'app reste la vue complète ; Discord sert à saisir vite.
 // Une box donnée à quelqu'un est retirée à celui du même shift et de la même modèle qui l'avait.
-const { StringSelectMenuBuilder, TextDisplayBuilder, MessageFlags, ButtonStyle } = require("discord.js");
+const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
@@ -15,6 +15,7 @@ const { pickRow, altButton, picked } = require("./pick");
 const shiftModal = require("./shiftmodal");
 
 // Fourni par index.js : isAdmin(i), refresh(date), notify(payload), coupure({ cid, slot, date }), postPlanning(date),
+// modals : { replace(i, { date, slot, out, outName, noted }), change(i, { date, slot, mode, uid, name }) } (quickmodal.js),
 // presence(date, slot) : { chatterId: present | retard | coupure | absent | todo | off } d'après le pointage
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours (voir open)
@@ -30,8 +31,18 @@ async function loadNow(date) {
     .filter((s) => byId[s.chatterId])
     .sort((a, b) => SLOTS.findIndex((x) => x.k === a.slot) - SLOTS.findIndex((x) => x.k === b.slot) || byId[a.chatterId].name.localeCompare(byId[b.chatterId].name, "fr"));
   const mName = (mid) => withEmoji(cat.models[mid]?.name || mid);
-  return { ...day, plan, byId, cat, off: new Set(day.offs), mName };
+  const d = { ...day, plan, byId, cat, off: new Set(day.offs), mName };
+  lastDay.set(date, d);
+  if (lastDay.size > 6) lastDay.delete(lastDay.keys().next().value);
+  return d;
 }
+// Dernier état lu de chaque jour : pour ouvrir une fenêtre tout de suite (Discord laisse 3 s), sans relire
+const lastDay = new Map();
+const whoOf = (date, sid) => {
+  const d = lastDay.get(date);
+  const c = d && d.byId[d.plan.find((s) => s.sid === sid)?.chatterId];
+  return c ? { uid: c.discordId || null, name: c.name } : {};
+};
 // Un jour n'est lu qu'une fois par clic (l'action puis l'affichage) ; oublié dès qu'on écrit
 let memo = new Map();
 function load(date) {
@@ -102,6 +113,8 @@ const startOf = (date, slot) => appSync.parisMs(date, appSync.START_OF[slot]);
 // shift en cours, ou qui commence dans les 2 h (on prévient alors le salon clocking)
 const running = (date, slot) => Date.now() >= startOf(date, slot) - 2 * 3600e3 && Date.now() < startOf(date, slot) + 6 * 3600e3;
 const isNow = (date, slot) => Date.now() >= startOf(date, slot) && Date.now() < startOf(date, slot) + 6 * 3600e3;
+// Shift en cours ce jour-là, sinon le prochain, sinon le soir
+const liveSlot = (date) => (SLOTS.find((s) => isNow(date, s.k)) || SLOTS.find((s) => running(date, s.k)) || { k: "soir" }).k;
 // « sam. 24 oct. »
 const shortDay = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 // Nombre de chatteurs par shift autour du jour affiché (une seule lecture), pour le menu des shifts
@@ -136,43 +149,6 @@ const PRES = {
   present: { e: "✅", l: "là" }, retard: { e: "🟠", l: "en retard" }, coupure: { e: "⚡", l: "en coupure" },
   absent: { e: "❌", l: "absent" }, todo: { e: "⭕", l: "pas encore là" }, off: { e: "🏖️", l: "day off" },
 };
-// Box 1 à n réparties sur les chatteurs choisis, dans l'ordre de leurs box actuelles : une chacun, celles en plus
-// aux premiers ; s'il y a moins de box que de chatteurs, les derniers n'en ont pas
-function splitBoxes(list, n, mid) {
-  const rank = (s) => {
-    const l = boxList(s.boxes?.[mid]).filter((b) => b !== "all").map(Number);
-    return l.length ? Math.min(...l) : 99;
-  };
-  const order = [...list].sort((a, b) => rank(a) - rank(b));
-  let next = 1;
-  return order.map((s, i) => ({ s, l: Array.from({ length: Math.floor(n / order.length) + (i < n % order.length ? 1 : 0) }, () => String(next++)) }));
-}
-// Applique la répartition : les autres chatteurs de cette modèle sur ce shift n'ont plus de box
-async function boxSplit(st) {
-  const d = await load(st.date);
-  const slot = st.slot, mid = st.nbm, sl = slotOf(slot);
-  const on = d.plan.filter((s) => s.slot === slot && midsOf(s.accts).includes(mid));
-  const chosen = on.filter((s) => (st.nbw || []).includes(s.sid));
-  if (!mid || !chosen.length) return "Choisis la modèle et qui prend des box.";
-  const got = splitBoxes(chosen, st.nbn, mid).filter((p) => p.l.length);
-  const patch = {};
-  for (const s of on) {
-    const p = got.find((x) => x.s.sid === s.sid);
-    // box gardées pour un retour de coupure sur cette modèle : la nouvelle répartition les remplace
-    const held = Array.isArray(s.held) ? s.held.filter((h) => h && h.m !== mid) : null;
-    addPatch(patch, s.sid, { boxes: { [mid]: p ? p.l : null }, ...(held && held.length !== s.held.length ? { held: held.length ? held : null } : {}) });
-  }
-  await save(st, patch);
-  await appSync.setBoxCount(st.date, slot, mid, st.nbn).catch((e) => console.error("Nombre de box :", e.message));
-  const live = running(st.date, slot);
-  if (live)
-    await ctx.notify?.({
-      content: [`📦 **${d.mName(mid).toLocaleUpperCase("fr")}** passe à ${st.nbn} box · ${sl.emoji} ${sl.l}`, ...got.map((p) => `${tag(d.byId[p.s.chatterId])} · ${boxLabel(p.l)}`)].join("\n"),
-      allowedMentions: { users: got.map((p) => d.byId[p.s.chatterId].discordId).filter(Boolean) },
-    }).catch((e) => console.error("Box du shift (salon clocking) :", e.message));
-  return `✅ **${d.mName(mid)}** : ${st.nbn} box sur ${got.length} chatteur${got.length > 1 ? "s" : ""}.${live ? " Prévenus dans le salon clocking." : ""}`;
-}
-
 // ---------- Box : celui qui reçoit une box la prend à celui qui l'avait (même shift, même modèle) ----------
 function addPatch(patch, sid, v) {
   if (v === null || patch[sid] === null) return void (patch[sid] = v === null ? null : patch[sid]);
@@ -330,7 +306,6 @@ const VIEWS = {
         ),
         row(
           button("pe_add", "Ajouter", "➕", ButtonStyle.Success),
-          button("pe_bx", "Box du shift", "📦", ButtonStyle.Secondary, !mids.length),
           button("pe_copy", "Copier un jour", "📋", ButtonStyle.Secondary),
           button("pe_send", "Envoyer", "📣", ButtonStyle.Primary, !d.plan.length),
           closeBtn()
@@ -423,7 +398,7 @@ const VIEWS = {
         st.cutText,
         `${st.cutNoted ? "⚡ **Coupure**" : "🔁 **Il doit partir**"} · ${tag(d.byId[e.chatterId])} · ${sl.emoji} ${sl.l} · ${acctsText(d, e.accts, e.boxes)}`,
         has
-          ? `-# 🔁 Quelqu'un le remplace : il reprend ses comptes et ses box${st.cutNoted ? " (rendues à son retour)" : ""}. 📦 Redonner : box par box, à qui tu veux. 🧺 Retirer : personne ne les prend${st.cutNoted ? ", il les reprend à son retour" : ""}.`
+          ? `-# 🔁 Quelqu'un le remplace : il reprend ses comptes et ses box${st.cutNoted ? " (rendues à son retour)" : ""}. 📦 Redonner : la fenêtre du shift, tu écris qui prend quelles box. 🧺 Retirer : personne ne les prend${st.cutNoted ? ", il les reprend à son retour" : ""}.`
           : "-# Il n'a pas de box sur ce shift.",
       ]),
       components: [
@@ -559,7 +534,8 @@ const render = async (i, st, fresh) => showView(i, await VIEWS[st.view](st), fre
 async function open(i, date, view, extra = {}) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
-  if (view === "bx") return openBox(i, { date, ...extra });
+  // les box d'un shift : la fenêtre « Modifier le shift » (l'ancien écran Box du shift n'existe plus)
+  if (view === "bx") return shiftModal.open(i, date, extra.slot || liveSlot(date));
   const st = { date, view, cut: false, fate: "keep", ...extra };
   states.set(i.user.id, st);
   memo = new Map();
@@ -618,12 +594,15 @@ async function handle(i) {
   if (pub) {
     const [, act, date, slot] = pub;
     if (act === "next") return open(i, appSync.addDays(date, 1), "copy", { src: date });
+    // remplacer / déplacer / ajouter : une fenêtre où l'on tape le nom
+    if (ctx.modals && act === "rep") return ctx.modals.replace(i, { date, slot });
+    if (ctx.modals && (act === "mv" || act === "add")) return ctx.modals.change(i, { date, slot, mode: act === "add" ? "ren" : "mv" });
     return open(i, date, { edit: "sh", rep: "rep", add: "ren", mv: "mv" }[act], slot ? { slot } : {});
   }
   // menu « box » d'un shift sous le planning : pl_qb_<date>_<créneau> -> l'écran du shift, ce chatteur choisi
   const qb = id.match(/^pl_qb_(\d{4}-\d{2}-\d{2})_([a-z]+)$/);
-  if (qb) return i.values?.[0] === "_nb" ? open(i, qb[1], "bx", { slot: qb[2] }) : open(i, qb[1], "sh", { slot: qb[2], sel: `${i.values?.[0]}|` });
-  if (id.startsWith("pb_")) return handleBox(i);
+  if (qb) return i.values?.[0] === "_nb" ? shiftModal.open(i, qb[1], qb[2]) : open(i, qb[1], "sh", { slot: qb[2], sel: `${i.values?.[0]}|` });
+  if (id.startsWith("pb_")) return done(i, "Ce menu n'existe plus : les box se changent dans ✏️ **Modifier le shift**.", 10000);
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const st = states.get(i.user.id);
   if (!st) return done(i, "Ce menu a expiré : reclique sur un bouton du planning.", 8000);
@@ -634,6 +613,14 @@ async function handle(i) {
     states.delete(i.user.id);
     return done(i, "✅ C'est noté.", 4000);
   }
+  // remplacer / déplacer / ajouter : une fenêtre où l'on tape le nom (au lieu d'un écran de menus)
+  if (ctx.modals && ["srp", "smv", "add", "drep"].includes(act)) {
+    const w = whoOf(st.date, act === "drep" ? st.out : String(st.sel || "").split("|")[0]);
+    if (act === "srp" || act === "drep") return ctx.modals.replace(i, { date: st.date, slot: st.slot, out: w.uid, outName: w.name, noted: act === "drep" && !!st.cutNoted });
+    return ctx.modals.change(i, { date: st.date, slot: st.slot, mode: act === "add" ? "ren" : "mv", ...(act === "smv" ? { uid: w.uid, name: w.name } : {}) });
+  }
+  // ses box (départ) : la fenêtre « Modifier le shift », où l'on écrit qui prend quelles box
+  if (act === "dbox" || act === "bx") return shiftModal.open(i, st.date, st.slot || liveSlot(st.date));
   await i.deferUpdate();
   // 🗑️ Retirer demande un 2e clic ; n'importe quel autre clic annule
   const armed = st.delArm;
@@ -667,7 +654,6 @@ async function handle(i) {
   else if (act === "smv") Object.assign(st, { view: "mv", mvSid: selSid(), mvAcc: null, mvBoxes: [], fate: "keep" });
   else if (act === "sed") Object.assign(st, { view: "edit", sid: selSid() });
   else if (act === "add") Object.assign(st, { view: "ren", cid: null, acc: null, rBoxes: [], alt: false });
-  else if (act === "bx") return openBox(i, { date: st.date, slot: st.slot, live: st.live }, true);
   else if (act === "copy") Object.assign(st, { view: "copy", src: null, add: false });
   else if (act === "send") {
     const r = await ctx.postPlanning(st.date).catch((e) => ({ error: e.message }));
@@ -708,12 +694,7 @@ async function handle(i) {
   else if (act === "rf" || act === "mf") st.fate = v;
   else if (act === "cut") st.cut = !st.cut;
   else if (act === "drep") Object.assign(st, { view: "rep", inn: null, cut: false, fate: "keep", alt: false });
-  else if (act === "dbox") {
-    const d = await load(st.date);
-    const e = d.plan.find((s) => s.sid === st.out);
-    const mid = e && midsOf(e.accts).find((m) => boxList(e.boxes?.[m]).length);
-    return openBox(i, { date: st.date, slot: st.slot, live: true, mid }, true);
-  } else if (act === "dfree") st.note = await freeBoxes(st);
+  else if (act === "dfree") st.note = await freeBoxes(st);
   else if (act === "repok") home(await replace(st));
   else if (act === "mw") Object.assign(st, { mvSid: v, fate: "keep" });
   else if (act === "mt") {
@@ -882,209 +863,6 @@ async function giveBack(date, slot, cid) {
   return `reprend ses ${parts.map(({ h, b, from }) => `${boxLabel(b)} sur **${d.mName(h.m)}**${from.length ? ` (rendue${b.length > 1 ? "s" : ""} par ${from.map((s) => d.byId[s.chatterId].name).join(", ")})` : ""}`).join(" · ")}`;
 }
 
-// ---------- Box du shift : une ligne par box, le chatteur en face ----------
-// Message à part, avec la nouvelle mise en page de Discord (plus de 5 lignes de menus) : pour une modèle sur
-// un shift, le nombre de box, puis une ligne par box où l'on choisit son chatteur. Chaque choix est enregistré
-// tout de suite (la box est retirée à celui qui l'avait) ; 🔎 donne une box libre à qui l'on tape (s'il n'est pas sur
-// cette modèle, il y est mis en renfort ; s'il n'y a plus de box libre, on en ajoute une).
-const boxStates = new Map(); // userId -> { date, slot, live, mid, alt }
-const keycap = (n) => (n <= 9 ? `${n}\uFE0F\u20E3` : n === 10 ? "🔟" : "📦");
-async function boxView(st) {
-  if (st.live && !st.slot) Object.assign(st, shiftChoices(st)[0] || {});
-  const early = st.slot ? presenceOf(st.date, st.slot) : null;
-  const [d, counts] = await Promise.all([load(st.date), nearCounts(st.date)]);
-  st.slot = workSlot(st, d);
-  const pres = await (early || presenceOf(st.date, st.slot));
-  const slot = st.slot, sl = slotOf(slot);
-  const here = d.plan.filter((s) => s.slot === slot);
-  const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
-  if (!mids.includes(st.mid)) st.mid = mids[0] || null;
-  const mid = st.mid;
-  const name = (s) => d.byId[s.chatterId].name;
-  const on = here.filter((s) => midsOf(s.accts).includes(mid)).sort((a, b) => name(a).localeCompare(name(b), "fr"));
-  const started = Date.now() >= startOf(st.date, slot);
-  const stOf = (s) => (d.off.has(s.chatterId) ? "off" : started ? pres[s.chatterId] || "todo" : "");
-  const bx = (s) => boxList(s.boxes?.[mid]);
-  const top = Math.max(0, ...on.flatMap((s) => bx(s).filter((b) => b !== "all").map(Number)));
-  const n = (st.n = Number(d.nbox?.[`${slot}|${mid}`]) || top || on.filter((s) => stOf(s) !== "off").length || 1);
-  const holder = (b) => on.find((s) => bx(s).includes(String(b)));
-  const allIn = on.filter((s) => bx(s).includes("all"));
-  const over = on.flatMap((s) => bx(s).filter((b) => b !== "all" && Number(b) > n).map((b) => `${name(s)} (${b})`));
-  // 🔎 : ceux du shift sur cette modèle d'abord (pour la liste « Pas sur Discord »)
-  const eligible = Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id))
-    .sort((a, b) => on.some((s) => s.chatterId === b.id) - on.some((s) => s.chatterId === a.id) || a.name.localeCompare(b.name, "fr"));
-  const addOpts = eligible.map((c) => opt(c.name, c.id, on.some((s) => s.chatterId === c.id) ? `Déjà sur ${d.mName(mid)}` : null));
-  // un nouvel id à chaque affichage : sinon Discord laisse le nom choisi dans le menu 🔎
-  st.k = ((st.k || 0) % 999) + 1;
-  const live = running(st.date, slot);
-  const buttons = [
-    button("pb_auto", `Répartir sur ceux qui sont là`, "🔄", ButtonStyle.Secondary, !on.length),
-    ...(live ? [button("pb_tell", "Prévenir le clocking", "📣", ButtonStyle.Primary, !on.some((s) => bx(s).length))] : []),
-    ...altButton("pb_alt", { alt: st.alt, opts: addOpts, chatters: eligible }),
-    ...(slot ? [shiftModal.openButton(st.date, slot, "Tout modifier", ButtonStyle.Secondary)] : []),
-    button("pb_x", "Fermer", null, ButtonStyle.Secondary),
-  ];
-  // 40 éléments au plus dans un message : chaque ligne de menu en compte 2
-  const fixed = 1 + 2 + (mids.length > 1 ? 2 : 0) + (mid ? 4 : 0) + 1 + buttons.length;
-  const shownN = Math.min(n, Math.floor((40 - fixed) / 2), 15);
-  const boxRow = (b) => {
-    const h = holder(b);
-    return row(
-      new StringSelectMenuBuilder()
-        .setCustomId(`pb_b_${b}`)
-        .setPlaceholder(`Box ${b}`)
-        .addOptions(
-          opt(`Box ${b} · libre`, "_free", "Personne sur cette box", keycap(b), !h),
-          ...on.slice(0, 24).map((s) => {
-            const k = stOf(s), l = bx(s);
-            return opt(`Box ${b} · ${name(s)}`, s.sid, [k ? PRES[k].l : "", l.length ? `a ${boxesT(l)}` : "sans box"].filter(Boolean).join(" · "), h?.sid === s.sid ? keycap(b) : (k && PRES[k].e) || "👤", h?.sid === s.sid);
-          })
-        )
-    );
-  };
-  const text = [
-    st.note,
-    `📦 **Box du shift** · ${sl.emoji} ${sl.l} · ${dayLabel(st.date)}${isNow(st.date, slot) ? " · 🔴 en cours" : ""}`,
-    mid
-      ? [
-          `**${d.mName(mid).toLocaleUpperCase("fr")}** · ${on.length} chatteur${plS(on.length)} · **${n} box**`,
-          ...on.map((s) => {
-            const k = stOf(s), l = bx(s);
-            return [`${k ? `${PRES[k].e} ` : ""}${name(s)}`, l.length ? boxLabel(l) : "sans box", ["retard", "coupure", "absent", "off"].includes(k) ? PRES[k].l : ""].filter(Boolean).join(" · ");
-          }),
-          allIn.length ? `-# 📥 All Inbox : ${allIn.map(name).join(", ")}` : "",
-          over.length ? `-# En plus des ${n} box : ${over.join(", ")}` : "",
-          shownN < n ? `-# Box ${shownN + 1} à ${n} : sur l'écran du shift (✏️ Modifier).` : "",
-          "-# Une ligne par box : choisis son chatteur, c'est enregistré tout de suite. Ou tape un nom dans 🔎 : il reçoit une box libre.",
-        ].filter(Boolean).join("\n")
-      : "_Personne au planning sur ce shift._",
-  ].filter(Boolean).join("\n");
-  return {
-    flags: MessageFlags.IsComponentsV2,
-    components: [
-      new TextDisplayBuilder().setContent(fitMsg(text).slice(0, 3900)),
-      shiftRow(st, counts, { id: "pb_ss" }),
-      ...(mids.length > 1 ? [row(new StringSelectMenuBuilder().setCustomId("pb_m").setPlaceholder("Modèle").addOptions(mids.slice(0, 25).map((m) => opt(d.mName(m), m, `${here.filter((s) => midsOf(s.accts).includes(m)).length} chatteur(s)`, null, m === mid))))] : []),
-      ...(mid
-        ? [
-            row(new StringSelectMenuBuilder().setCustomId("pb_n").setPlaceholder("Nombre de box").addOptions(Array.from({ length: 15 }, (_, k) => opt(`${k + 1} box`, String(k + 1), null, "📦", k + 1 === n)))),
-            ...Array.from({ length: shownN }, (_, k) => boxRow(k + 1)),
-            pickRow(`pb_add_${st.k}`, { alt: st.alt, opts: addOpts, chatters: eligible, placeholder: "Donner une box" }),
-          ]
-        : []),
-      row(...buttons),
-    ],
-  };
-}
-// Le message des box : nouveau (fresh) ou celui où l'on a cliqué
-async function showBox(i, st, fresh) {
-  const p = { allowedMentions: { parse: [] }, ...(await boxView(st)) };
-  if (!fresh) return i.editReply(p);
-  if (fresh === "follow") return i.followUp({ ...p, flags: p.flags | EPHEMERAL });
-  return i.editReply(p);
-}
-// fresh = true depuis l'écran du shift (nouveau message à côté), sinon depuis un bouton du serveur
-async function openBox(i, extra, fromHub = false) {
-  if (!fromHub) {
-    if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
-    if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
-    await i.deferReply({ flags: EPHEMERAL });
-  }
-  const st = { date: extra.date, slot: extra.slot || null, live: !!extra.live, mid: extra.mid || null };
-  boxStates.set(i.user.id, st);
-  memo = new Map();
-  return showBox(i, st, fromHub ? "follow" : true);
-}
-async function handleBox(i) {
-  if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
-  const st = boxStates.get(i.user.id);
-  if (!st) return reply(i, { content: "Ce menu a expiré : rouvre 📦 Box du shift." });
-  const [, act, arg] = i.customId.split("_");
-  const v = i.values?.[0];
-  await i.deferUpdate();
-  if (act === "x") {
-    boxStates.delete(i.user.id);
-    return i.deleteReply().catch(() => {});
-  }
-  st.note = "";
-  const d = await load(st.date);
-  const mid = st.mid, slot = st.slot;
-  const on = d.plan.filter((s) => s.slot === slot && midsOf(s.accts).includes(mid));
-  if (act === "ss") {
-    const [a, b] = String(v).split("|");
-    if (a === "d") st.date = b;
-    else Object.assign(st, { date: a, slot: b });
-  } else if (act === "m") st.mid = v;
-  else if (act === "alt") st.alt = !st.alt;
-  else if (act === "n") {
-    // nouveau nombre de box : celles au-delà sont libérées
-    const n = Number(v) || 1;
-    const patch = {}, freed = [];
-    for (const s of on) {
-      const l = boxList(s.boxes?.[mid]);
-      const keep = l.filter((b) => b === "all" || Number(b) <= n);
-      if (keep.length < l.length) {
-        addPatch(patch, s.sid, { boxes: { [mid]: keep.length ? keep : null } });
-        freed.push(`${d.byId[s.chatterId].name} (${l.filter((b) => !keep.includes(b)).join(", ")})`);
-      }
-    }
-    await save(st, patch);
-    await appSync.setBoxCount(st.date, slot, mid, n);
-    memo = new Map();
-    st.note = `✅ **${d.mName(mid)}** : ${n} box.${freed.length ? ` Libérées : ${freed.join(", ")}.` : ""}`;
-  } else if (act === "b") {
-    const b = String(Number(arg) || 0);
-    const was = on.find((s) => boxList(s.boxes?.[mid]).includes(b));
-    if (v === "_free") {
-      if (was) {
-        const left = boxList(was.boxes[mid]).filter((x) => x !== b);
-        await save(st, { [was.sid]: { boxes: { [mid]: left.length ? left : null } } });
-        st.note = `✅ Box ${b} libre (retirée à ${d.byId[was.chatterId].name}).`;
-      }
-    } else {
-      const e = on.find((s) => s.sid === v);
-      if (!e) st.note = "⚠️ Cette ligne n'est plus au planning (changée dans l'app ?).";
-      else if (was?.sid !== e.sid) st.note = await setBoxes(st, d, e, mid, [...boxList(e.boxes?.[mid]).filter((x) => x !== "all"), b]);
-    }
-  } else if (act === "add") {
-    // 🔎 : il reçoit la première box libre (une de plus s'il n'y en a plus) ; pas encore sur cette modèle : renfort
-    const r = await picked(i, Object.values(d.byId).filter((c) => c.active && !d.off.has(c.id)), { why: "inactif ou en day off ce jour-là" });
-    if (!r.c) st.note = r.error;
-    else {
-      const e = on.find((s) => s.chatterId === r.c.id);
-      const acc = e ? null : (r.c.shift?.accts || []).find((k) => k.startsWith(mid + "|")) || on.flatMap((s) => s.accts || []).find((k) => k.startsWith(mid + "|")) || d.cat.accounts.find((a) => a.key.startsWith(mid + "|"))?.key;
-      const n = st.n || 1;
-      const used = new Set(on.flatMap((s) => boxList(s.boxes?.[mid])));
-      const free = Array.from({ length: n }, (_, k) => String(k + 1)).find((b) => !used.has(b));
-      const b = free || (n < 15 ? String(n + 1) : null);
-      if (!e && !acc) st.note = "⚠️ Aucun compte pour cette modèle dans l'app.";
-      else if (!b) st.note = "⚠️ Les 15 box sont prises : libère-en une sur sa ligne.";
-      else {
-        if (!free) await appSync.setBoxCount(st.date, slot, mid, n + 1);
-        st.note = e
-          ? await setBoxes(st, d, e, mid, [...boxList(e.boxes?.[mid]).filter((x) => x !== "all"), b])
-          : await renfort({ date: st.date, slot, cid: r.c.id, acc, rBoxes: [b], live: true });
-        if (!free) st.note += ` 📦 ${d.mName(mid)} passe à ${n + 1} box.`;
-        memo = new Map();
-      }
-      st.alt = false;
-    }
-  } else if (act === "auto") {
-    const pres = await presenceOf(st.date, slot);
-    const started = Date.now() >= startOf(st.date, slot);
-    const ok = on.filter((s) => !d.off.has(s.chatterId) && (!started || ["present", "retard"].includes(pres[s.chatterId])));
-    st.note = ok.length ? await boxSplit({ date: st.date, slot, nbm: mid, nbn: st.n || ok.length, nbw: ok.map((s) => s.sid) }) : "⚠️ Personne n'est là sur ce shift pour l'instant.";
-  } else if (act === "tell") {
-    const got = on.filter((s) => boxList(s.boxes?.[mid]).length);
-    const sl = slotOf(slot);
-    await ctx.notify?.({
-      content: [`📦 **${d.mName(mid).toLocaleUpperCase("fr")}** · ${sl.emoji} ${sl.l} · ${st.n} box`, ...got.map((s) => `${tag(d.byId[s.chatterId])} · ${boxLabel(boxList(s.boxes[mid]))}`)].join("\n"),
-      allowedMentions: { users: got.map((s) => d.byId[s.chatterId].discordId).filter(Boolean) },
-    }).then(() => (st.note = "📣 Box envoyées dans le salon clocking."), (e) => (st.note = `⚠️ Pas envoyé : ${String(e.message).slice(0, 120)}`));
-  }
-  return showBox(i, st, false);
-}
-
 // Sous le planning du salon : les boutons, puis un menu pour modifier un shift d'un coup (✏️ fenêtre de texte)
 function planComponents(date, day) {
   const rows = [
@@ -1109,4 +887,10 @@ function planComponents(date, day) {
   return rows;
 }
 
-module.exports = { ctx, handle, open, openDepart, planComponents, states, takeBoxes, addPatch, giveBack, heldText, helpers: { tag, fitMsg, running, isNow, slotOf, midsOf } };
+// Pour les fenêtres rapides (quickmodal.js) : relisent le jour avant d'agir
+const actions = {
+  load: (date) => ((memo = new Map()), load(date)),
+  replace: (st) => ((memo = new Map()), replace(st)),
+  freeBoxes: (st) => ((memo = new Map()), freeBoxes(st)),
+};
+module.exports = { ctx, actions, handle, open, openDepart, planComponents, states, takeBoxes, addPatch, giveBack, heldText, helpers: { tag, fitMsg, running, isNow, slotOf, midsOf } };

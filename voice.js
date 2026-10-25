@@ -2,8 +2,8 @@
 // Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le salon clocking
 // (VOICE_LOG_CHANNEL_ID pour un autre salon), sans notifier personne, avec ses box à droite de son nom.
 // S'il part pendant son shift (clock in, ou au planning d'un shift commencé), les admins ont deux boutons :
-// ⚡ Coupure (notée tout de suite) et 🔁 Remplacer ; les deux proposent ensuite quoi faire de ses box (quelqu'un le
-// remplace, elles sont redonnées à d'autres, ou retirées). À son retour, s'il est en coupure : 🔙 Retour de coupure.
+// ⚡ Coupure (notée tout de suite, puis quoi faire de ses box : quelqu'un le remplace, redonnées, retirées) et
+// 🔁 Remplacer (la fenêtre : qui le remplace, ou ses box retirées). À son retour, s'il est en coupure : 🔙 Retour de coupure.
 // Une micro-coupure (retour en moins de 30 s) n'affiche rien.
 const { ButtonStyle } = require("discord.js");
 const { reply, row, button } = require("./ui");
@@ -16,7 +16,8 @@ const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? process.env.CLOCKING_C
 const GRACE = Math.max(0, Number(process.env.VOICE_GRACE_S ?? 30) || 0) * 1000; // micro-coupure ignorée
 const BACK_WITHIN = 4 * 3600e3; // « est revenu » si parti depuis moins de 4 h
 
-// Fourni par index.js : client, isAdmin(i), fmtTime(t), shiftText(uid), boxTag(uid), inCoupure(uid), depart(i, uid, { cut }), retour(i, uid)
+// Fourni par index.js : client, isAdmin(i), fmtTime(t), shiftText(uid), boxTag(uid), inCoupure(uid), depart(i, uid, { cut }),
+// replace(i, uid) (la fenêtre 🔁 Remplacer), retour(i, uid)
 const ctx = {};
 const pending = new Map(); // uid -> { timer, channelId, t } : départ pas encore posté
 const lastLeft = new Map(); // uid -> heure du dernier départ posté
@@ -95,7 +96,7 @@ async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const [, act, uid] = i.customId.split("_");
   if (act === "cut") return ctx.depart(i, uid, { cut: true });
-  if (act === "rep") return ctx.depart(i, uid, { cut: false });
+  if (act === "rep") return ctx.replace ? ctx.replace(i, uid) : ctx.depart(i, uid, { cut: false });
   if (act === "back") return ctx.retour(i, uid);
   return reply(i, { content: "Ce bouton a expiré." });
 }

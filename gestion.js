@@ -1,6 +1,7 @@
 // ================== LES BOUTONS DES ADMINS (sous le panneau du shift, salon clocking) ==================
 // Un bouton par sujet, à la place des commandes « / », sous le pointage du shift dans le salon clocking.
-// Chaque bouton ouvre un menu visible seulement par l'admin qui a cliqué. Les commandes restent en secours.
+// Chaque bouton ouvre un menu visible seulement par l'admin qui a cliqué (un seul à la fois, voir menus.js), ou une
+// fenêtre : ✏️ Modifier le shift, 🔁 Remplacer, 🔀 Déplacer, 💪🏼 Renfort. Les commandes restent en secours.
 // L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
 const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
@@ -12,7 +13,8 @@ const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
 // setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra), openPenalties(i), heldText(date, slot, cid),
 // dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
-// dayChoices(), fireTargets(), firePreview(target), fire(target)
+// dayChoices(), fireTargets(), firePreview(target), fire(target),
+// modals : { replace(i, { date, slot }), change(i, { date, slot, mode }) } (quickmodal.js)
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
@@ -51,7 +53,7 @@ function panelView(live) {
         button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
         button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
-      row(button("g_box", "Box du shift", "📦", ButtonStyle.Secondary), button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
+      row(button("g_box", "Modifier le shift", "✏️", ButtonStyle.Secondary), button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary), button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)),
     ],
     allowedMentions: { parse: [] },
   };
@@ -63,13 +65,12 @@ function panelRows(date, slot) {
   return [
     row(
       button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary),
-      button(c("g_box"), "Box du shift", "📦", ButtonStyle.Secondary),
       button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
       button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
-      button(c("g_rep"), "Remplacer", "🔁", ButtonStyle.Secondary)
+      button(c("g_rep"), "Remplacer", "🔁", ButtonStyle.Secondary),
+      button(c("g_mv"), "Déplacer", "🔀", ButtonStyle.Secondary)
     ),
     row(
-      button(c("g_mv"), "Déplacer", "🔀", ButtonStyle.Secondary),
       button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
       button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
       button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
@@ -302,12 +303,14 @@ async function handle(i) {
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");
     case "g_plan": return ctx.openPlanning(i, cur.date, "sh", { live: true, slot: appSync.SLOT_OF[cur.name] });
-    // remplacer / déplacer : sur le shift du panneau (ou celui en cours, dès 15 min avant son début)
+    // remplacer / déplacer / renfort : une fenêtre sur le shift du panneau (ou celui en cours, dès 15 min avant son début)
     case "g_rep":
+      if (ctx.modals) return ctx.modals.replace(i, { date: cur.date, slot: appSync.SLOT_OF[cur.name] });
+      return ctx.openPlanning(i, cur.date, "rep", { slot: appSync.SLOT_OF[cur.name] });
     case "g_mv":
-      return ctx.openPlanning(i, cur.date, id === "g_rep" ? "rep" : "mv", { slot: appSync.SLOT_OF[cur.name] });
-    // renfort : sur ce shift, ou un des suivants dans le menu
-    case "g_ren": return ctx.openPlanning(i, cur.date, "ren", { live: true, slot: appSync.SLOT_OF[cur.name] });
+    case "g_ren":
+      if (ctx.modals) return ctx.modals.change(i, { date: cur.date, slot: appSync.SLOT_OF[cur.name], mode: id === "g_ren" ? "ren" : "mv" });
+      return ctx.openPlanning(i, cur.date, id === "g_ren" ? "ren" : "mv", { live: id === "g_ren", slot: appSync.SLOT_OF[cur.name] });
     case "g_box": return ctx.openPlanning(i, cur.date, "bx", { live: true, slot: appSync.SLOT_OF[cur.name] });
     case "g_pen": return ctx.openPenalties(i);
     case "g_off":
