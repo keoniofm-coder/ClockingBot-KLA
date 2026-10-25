@@ -82,12 +82,24 @@ async function appChatters(force) {
       name: r.data?.name || "",
       active: r.data?.active !== false,
       discordId: r.data?.discordId ? String(r.data.discordId) : "",
-      shift: r.data?.shift && typeof r.data.shift === "object" ? r.data.shift : null, // shift habituel { slot, accts, days }
+      // shift habituel { slot, slots, accts, days } : slots = ses shifts (deux pour un double shift), slot = le premier
+      shift: r.data?.shift && typeof r.data.shift === "object" ? r.data.shift : null,
     }))
     .filter((c) => c.name);
   chattersCache = { at: Date.now(), list };
   return list;
 }
+
+// Shifts habituels d'un chatteur, dans l'ordre de la journée : ["aprem", "soir"] pour un double shift
+const SLOT_ORDER = ["matin", "aprem", "soir", "nuit"];
+const habSlots = (h) =>
+  !h ? [] : [...new Set((Array.isArray(h.slots) && h.slots.length ? h.slots : [h.slot]).filter((k) => SLOT_ORDER.includes(k)))]
+    .sort((a, b) => SLOT_ORDER.indexOf(a) - SLOT_ORDER.indexOf(b));
+// Shift habituel tel que l'app l'enregistre
+const habitOf = (slots, accts, days) => {
+  const l = habSlots({ slots });
+  return l.length ? { slot: l[0], slots: l, accts: [...new Set(accts || [])], days: [...new Set(days?.length ? days : [0, 1, 2, 3, 4, 5, 6])].sort() } : null;
+};
 
 // ---------- Modèles et plateformes de l'app (cache 5 min) ----------
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -240,8 +252,8 @@ function offScope(chatter, date, off, plan) {
     return { slots: [...new Set(mine.map((s) => s.slot))], accts, mids: midsOf(accts) };
   }
   const h = chatter?.shift;
-  if (h && START_OF[h.slot] != null && (!Array.isArray(h.days) || h.days.includes(weekday(date))))
-    return { slots: [h.slot], accts: h.accts || [], mids: midsOf(h.accts) };
+  if (habSlots(h).length && (!Array.isArray(h.days) || h.days.includes(weekday(date))))
+    return { slots: habSlots(h), accts: h.accts || [], mids: midsOf(h.accts) };
   return { slots: [], accts: [], mids: [] };
 }
 // Pose un day off avec les règles de l'agence : pas deux fois le même jour, `quota` par mois,
@@ -336,6 +348,101 @@ async function plannedAccts(uid, names, shift, t) {
   const { date } = shiftDay(slot, t);
   const plan = await planOf(date);
   return [...new Set(plan.filter((s) => s.chatterId === c.id && s.slot === slot).flatMap((s) => s.accts || []))];
+}
+
+// Ce qui est prévu pour ce chatteur sur un shift d'un jour : ses comptes et ses box (toutes ses lignes réunies)
+const boxesIn = (v) => (Array.isArray(v) ? v : v ? [v] : []).map(String);
+async function plannedFor(uid, names, slot, date) {
+  const c = await chatterOf(uid, names, false);
+  if (!c) return null;
+  const mine = (await planOf(date)).filter((s) => s.chatterId === c.id && s.slot === slot);
+  const boxes = {};
+  for (const s of mine) for (const mid of midsOf(s.accts)) boxes[mid] = [...new Set([...(boxes[mid] || []), ...boxesIn(s.boxes?.[mid])])];
+  return { chatter: c, slot, date, accts: [...new Set(mine.flatMap((s) => s.accts || []))], boxes, planned: mine.length > 0 };
+}
+
+// ---------- Chatteurs créés ou modifiés depuis Discord ----------
+// Comme Équipe dans l'app : nouveau chatteur = 10 %, payé en USDC, actif. Un ancien chatteur inactif du même
+// nom est réactivé plutôt que recréé. Renvoie { id, created, reactivated } ou { error: "exists", chatter }.
+async function saveChatter({ id, name, uid, shift }) {
+  const list = await appChatters(true);
+  name = String(name || "").trim().slice(0, 60);
+  if (!id) {
+    const same = list.find((c) => norm(c.name) === norm(name));
+    if (same?.active) return { error: "exists", chatter: same };
+    if (same) id = same.id;
+  }
+  const created = !id;
+  if (created) {
+    id = "c-" + newId();
+    await putDoc("chatters", id, { name, rate: 10, method: "USDC", notes: "", active: true, shift });
+  } else await mergeDoc("chatters", id, { ...(name ? { name } : {}), active: true, shift });
+  if (uid !== undefined) await linkDiscord(uid, uid ? id : "");
+  chattersCache.at = 0;
+  return { id, created, reactivated: !created && !list.find((c) => c.id === id)?.active };
+}
+// Met le planning déjà fait d'aujourd'hui à la fin de la semaine prochaine sur son shift habituel (comme l'app),
+// en gardant ses box sur les shifts et les modèles qui ne changent pas. Renvoie les jours modifiés.
+async function applyHabit(cid, shift, from) {
+  const to = addDays(from, 13 - weekday(from));
+  const [rows, offs] = await Promise.all([
+    rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`),
+    offsBetween(from, to),
+  ]);
+  const plans = Object.fromEntries(rows.map((r) => [r.id, r.data?.shifts || {}]));
+  const want = (date) => (shift && (!Array.isArray(shift.days) || shift.days.includes(weekday(date))) && !offs.some((o) => o.chatterId === cid && o.date === date) ? habSlots(shift) : []);
+  const mids = midsOf(shift?.accts);
+  const dates = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    const mine = Object.entries(plans[d] || {}).filter(([, s]) => s?.chatterId === cid);
+    const slots = want(d);
+    const patch = {};
+    const kept = new Set();
+    for (const [sid, s] of mine) {
+      if (!slots.includes(s.slot) || kept.has(s.slot)) {
+        patch[sid] = null;
+        continue;
+      }
+      kept.add(s.slot);
+      const same = [...(s.accts || [])].sort().join() === [...(shift.accts || [])].sort().join();
+      if (same) continue;
+      const gone = Object.keys(s.boxes || {}).filter((m) => !mids.includes(m));
+      patch[sid] = { accts: shift.accts || [], ...(gone.length ? { boxes: Object.fromEntries(gone.map((m) => [m, null])) } : {}) };
+    }
+    for (const slot of slots.filter((k) => !kept.has(k))) patch[newId() + slot.slice(0, 1)] = { slot, chatterId: cid, accts: shift.accts || [] };
+    if (!Object.keys(patch).length) continue;
+    await writePlan(d, patch);
+    dates.push(d);
+  }
+  return dates;
+}
+// Nombre de chatteurs au planning de chaque jour d'une période : { date: n }
+async function planCounts(from, to) {
+  const rows = await rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`);
+  return Object.fromEntries(rows.map((r) => [r.id, new Set(Object.values(r.data?.shifts || {}).filter((x) => x?.chatterId).map((x) => x.chatterId)).size]));
+}
+// Copie le planning d'un jour sur un autre (box comprises), sans ceux qui sont en day off ce jour-là ni les
+// inactifs. replace : enlève d'abord le planning du jour ; sinon ajoute seulement les lignes qui manquent.
+async function copyPlan(from, to, { replace = true } = {}) {
+  const [src, dst, offs, chatters] = await Promise.all([planOf(from), planOf(to), offsOn(to), appChatters(true)]);
+  const active = new Set(chatters.filter((c) => c.active).map((c) => c.id));
+  const patch = {};
+  if (replace) for (const s of dst) patch[s.sid] = null;
+  const has = (s) => !replace && dst.some((x) => x.chatterId === s.chatterId && x.slot === s.slot);
+  let added = 0, skipped = 0;
+  for (const s of src) {
+    if (!active.has(s.chatterId) || offs.has(s.chatterId)) {
+      skipped++;
+      continue;
+    }
+    if (has(s)) continue;
+    // box vides (null) pas recopiées
+    const boxes = Object.fromEntries(Object.entries(s.boxes || {}).filter(([, v]) => (Array.isArray(v) ? v.length : v)));
+    patch[newId() + added] = { slot: s.slot, chatterId: s.chatterId, accts: s.accts || [], ...(Object.keys(boxes).length ? { boxes } : {}) };
+    added++;
+  }
+  if (Object.keys(patch).length) await writePlan(to, patch);
+  return { added, skipped, removed: replace ? dst.length : 0 };
 }
 
 // ---------- Pointage ----------
@@ -519,7 +626,7 @@ async function finishPost(req, patch) {
 
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
-  appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers,
+  appChatters, appCatalog, chatterOf, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, writePlan, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures,

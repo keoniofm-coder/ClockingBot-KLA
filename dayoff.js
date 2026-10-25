@@ -86,8 +86,10 @@ async function boardView(month, { board = false, admin = true } = {}) {
   };
   const prev = addMonths(month, -1), next = addMonths(month, 1);
   const nav = board ? "do_mb" : "do_mv";
+  // le tableau est visible par tous : chacun voit ses day off avec 🙋 ; poser / retirer reste aux admins
   const btns = [
     ...(admin ? [button("do_add", "Poser un day off", "➕", ButtonStyle.Success), button("do_rem", "Retirer", "➖", ButtonStyle.Secondary)] : []),
+    ...(board ? [button("do_me", "Mes day off", "🙋", ButtonStyle.Primary)] : []),
     button(`${nav}_${prev}`, cap(monthLabel(prev, true)), "◀️", ButtonStyle.Secondary),
     button(`${nav}_${next}`, cap(monthLabel(next, true)), "▶️", ButtonStyle.Secondary),
   ];
@@ -229,6 +231,24 @@ async function remOk(i, st) {
   return done(i, gone.length ? `🗑️ Day off retiré : ${gone.map((o) => `**${o.chatter.name}** (${dayShort(o.date)})`).join(", ")}.` : "Rien à retirer.", 30000);
 }
 
+// ---------- Mes day off (pour chaque chatteur) ----------
+async function mine(i) {
+  await i.deferReply({ flags: EPHEMERAL });
+  const names = [i.member?.displayName, i.user.globalName, i.user.username].filter(Boolean);
+  const c = await appSync.chatterOf(i.user.id, names, false);
+  if (!c) return done(i, "Ton compte Discord n'est relié à aucun chatteur de l'app : demande à un admin.", 30000);
+  const td = today();
+  const m = monthOf(td), next = addMonths(m, 1);
+  const [{ list }, quota] = await Promise.all([offsWithScope(`${m}-01`, `${next}-31`), appSync.dayOffQuota()]);
+  const my = list.filter((o) => o.chatterId === c.id);
+  const line = (mo) => {
+    const l = my.filter((o) => monthOf(o.date) === mo);
+    return `**${cap(monthLabel(mo))}** : ${l.length}/${quota}${l.length ? ` · ${l.map((o) => `${dayShort(o.date)}${o.scopeTxt ? ` (${o.scopeTxt})` : ""}${o.date < td ? " ✓" : ""}`).join(", ")}` : ""}`;
+  };
+  const left = Math.max(0, quota - my.filter((o) => monthOf(o.date) === m).length);
+  return done(i, [`🏖️ **Tes day off, ${c.name}**`, line(m), line(next), `-# Il t'en reste ${left} ce mois-ci. Pour en poser un, demande à un admin.`].join("\n"), 60000);
+}
+
 // ---------- Interactions (boutons et menus do_…) ----------
 async function handle(i) {
   const id = i.customId;
@@ -240,7 +260,8 @@ async function handle(i) {
     else await i.deferUpdate();
     return i.editReply(await boardView(nav[2], { admin: false }));
   }
-  if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+  if (id === "do_me") return mine(i);
+  if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Seuls les admins posent ou retirent les day off : demande à un admin. Tes day off : 🙋 **Mes day off**." });
   if (id === "do_add" || id === "do_rem") {
     const st = { view: id === "do_add" ? "add" : "rem", rm: true };
     states.set(i.user.id, st);

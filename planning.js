@@ -87,15 +87,30 @@ function slotLines(day, slot) {
   return { lines, count };
 }
 
-// Box en grands chiffres (emoji) : 1️⃣·2️⃣, 🔟, 1️⃣2️⃣ (box 12), 📥 All
+// Box en gros : les emojis de box du bot (pastilles vertes, chargées au démarrage par index.js),
+// sinon des chiffres emoji : 1️⃣·2️⃣, 🔟, 1️⃣2️⃣ (box 12), 📥 All
+const BOX_EMOJIS = {}; // "1".."15", "all" -> « <:klbox1_3:id> »
+const setBoxEmojis = (map) => Object.assign(BOX_EMOJIS, map);
 const keycap = (b) => (b === "10" ? "🔟" : [...String(b)].map((ch) => `${ch}\uFE0F\u20E3`).join(""));
-const boxesE = (l) => (!l.length ? "" : l.includes("all") ? "📥 **All**" : l.map(keycap).join("·"));
-// Message de début de shift : un chatteur par ligne, ses box en gros devant le nom, regroupés par modèle
+function boxesE(l) {
+  if (!l.length) return "";
+  if (l.includes("all")) return BOX_EMOJIS.all || "📥 **All**";
+  return l.every((b) => BOX_EMOJIS[b]) ? l.map((b) => BOX_EMOJIS[b]).join("") : l.map(keycap).join("·");
+}
+// Box d'un chatteur à côté de son nom : « [2][3] », ou modèle par modèle s'il en a plusieurs : « 🍑 [1] · 🍒 [4] »
+function boxTag(boxes, mName) {
+  const l = Object.entries(boxes || {}).map(([mid, v]) => [mid, boxList(v)]).filter(([, v]) => v.length);
+  if (l.length < 2) return l.length ? boxesE(l[0][1]) : "";
+  return l.map(([mid, v]) => `${modelMark(mName(mid))} ${boxesE(v)}`).join(" · ");
+}
+// En-tête d'un modèle : « **ANNA 🍑** · Telegram »
+const modelHead = (g) => `**${g.name.toLocaleUpperCase("fr")}**${g.samePlat && g.plats.length ? ` · ${g.plats.join(" + ")}` : ""}`;
+// Message de début de shift et planning : un chatteur par ligne, ses box en gros devant le nom, regroupés par modèle
 function rosterLines(day, slot) {
   const { groups, count } = slotGroups(day, slot);
   const lines = [];
   for (const g of groups) {
-    lines.push(`**${g.name}**${g.samePlat && g.plats.length ? ` · ${g.plats.join(" + ")}` : ""}`);
+    lines.push(modelHead(g));
     for (const p of g.people)
       lines.push(`${boxesE(p.boxes) || "▫️"} ${whoOf(p.c)}${!g.samePlat && p.plats.length ? ` (${p.plats.join(" + ")})` : ""}${tagOf(p)}`);
   }
@@ -107,7 +122,8 @@ const modelMark = (name) => {
   return w === name ? `**${name}**` : w.slice(String(name).split(/\s/)[0].length).trim().split(/\s/)[0];
 };
 
-// Un message : l'en-tête en texte, puis un bloc de couleur par shift (objets simples, acceptés tels quels par channel.send)
+// Un message : l'en-tête en texte, puis un bloc de couleur par shift, un chatteur par ligne
+// (objets simples, acceptés tels quels par channel.send)
 function planningEmbeds(day) {
   const byId = Object.fromEntries(day.chatters.map((c) => [c.id, c]));
   const plan = day.plan.filter((p) => byId[p.chatterId]);
@@ -122,7 +138,7 @@ function planningEmbeds(day) {
   const content = head.join("\n");
   if (!plan.length) return { content, embeds: [], count: 0 };
   const embeds = SLOTS.map((sl) => {
-    const { lines, count } = slotLines(day, sl.k);
+    const { lines, count } = rosterLines(day, sl.k);
     let description = lines.length ? lines.join("\n") : "_Personne de prévu_";
     if (description.length > 4000) description = description.slice(0, 3990) + "\n…";
     return { title: `${sl.emoji} ${sl.l} · ${sl.h}${count ? ` · ${count}` : ""}`, description, color: sl.color };
@@ -144,4 +160,7 @@ function chunkEmbeds(embeds) {
   return out;
 }
 
-module.exports = { SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, modelMark, cap, withEmoji };
+module.exports = {
+  SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, boxTag, modelHead, modelMark,
+  setBoxEmojis, BOX_ORDER, cap, withEmoji,
+};

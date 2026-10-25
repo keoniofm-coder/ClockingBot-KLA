@@ -1,25 +1,31 @@
 // ================== VOCAUX : ARRIVÉES ET DÉPARTS ==================
-// Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le chat d'un salon
-// (par défaut celui de Live Anna et Axelle), sans notifier personne. S'il part pendant son shift, les admins
-// ont deux boutons : ✂️ Coupure et 🔁 Remplacer. Une micro-coupure (retour en moins de 30 s) n'affiche rien.
+// Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le salon clocking
+// (VOICE_LOG_CHANNEL_ID pour un autre salon), sans notifier personne, avec ses box à droite de son nom.
+// S'il part pendant son shift, les admins ont deux boutons : ✂️ Coupure et 🔁 Remplacer.
+// Une micro-coupure (retour en moins de 30 s) n'affiche rien.
 const { ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const { reply, row, button } = require("./ui");
 
 const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
 // Live Zoé, Live Anna et Axelle, Live formation
 const VOICE_IDS = new Set(list(process.env.VOICE_CHANNEL_IDS ?? "1553562313083326524,1548280432595050556,1548281600414978109"));
-// Salon où tout est posté (vide = dans le chat de chaque vocal)
-const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? "1548280432595050556").trim();
+// Salon où tout est posté : le salon clocking par défaut (vide = dans le chat de chaque vocal)
+const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? process.env.CLOCKING_CHANNEL_ID ?? "").trim();
 const GRACE = Math.max(0, Number(process.env.VOICE_GRACE_S ?? 30) || 0) * 1000; // micro-coupure ignorée
 const BACK_WITHIN = 4 * 3600e3; // « est revenu » si parti depuis moins de 4 h
 
-// Fourni par index.js : client, isAdmin(i), fmtTime(t), sessionText(uid), openReplace(i, uid), coupure(i, uid, { min, raison })
+// Fourni par index.js : client, isAdmin(i), fmtTime(t), sessionText(uid), boxTag(uid), openReplace(i, uid), coupure(i, uid, { min, raison })
 const ctx = {};
 const pending = new Map(); // uid -> { timer, channelId, t } : départ pas encore posté
 const lastLeft = new Map(); // uid -> heure du dernier départ posté
 
 const watched = (ch) => !!ch && VOICE_IDS.has(ch.id);
 const chName = (ch) => `🔊 ${ch?.name || "vocal"}`;
+// « <@id> [2][3] » : ses box sur son shift, à droite du nom
+async function who(uid) {
+  const tag = await Promise.resolve(ctx.boxTag?.(uid)).catch(() => "");
+  return `<@${uid}>${tag ? ` ${tag}` : ""}`;
+}
 
 async function post(voiceCh, payload) {
   try {
@@ -44,7 +50,7 @@ async function onVoice(oldS, newS) {
   if (from && to) {
     clearTimeout(pending.get(uid)?.timer);
     pending.delete(uid);
-    return post(to, { content: `➡️ <@${uid}> est passé de **${chName(from)}** à **${chName(to)}** · ${time}` });
+    return post(to, { content: `➡️ ${await who(uid)} est passé de **${chName(from)}** à **${chName(to)}** · ${time}` });
   }
   if (to) {
     const p = pending.get(uid);
@@ -57,20 +63,21 @@ async function onVoice(oldS, newS) {
     const left = lastLeft.get(uid);
     lastLeft.delete(uid);
     const back = left && t - left < BACK_WITHIN;
+    const w = await who(uid);
     return post(to, {
       content: back
-        ? `🟢 <@${uid}> est revenu sur **${chName(to)}** · ${time} · parti ${Math.max(1, Math.round((t - left) / 60000))} min`
-        : `🟢 <@${uid}> a rejoint **${chName(to)}** · ${time}`,
+        ? `🟢 ${w} est revenu sur **${chName(to)}** · ${time} · parti ${Math.max(1, Math.round((t - left) / 60000))} min`
+        : `🟢 ${w} a rejoint **${chName(to)}** · ${time}`,
     });
   }
   // départ : posté après GRACE secondes s'il n'est pas revenu
   clearTimeout(pending.get(uid)?.timer);
-  const send = () => {
+  const send = async () => {
     pending.delete(uid);
     lastLeft.set(uid, t);
     const shift = ctx.sessionText?.(uid);
     return post(from, {
-      content: `🔴 <@${uid}> a quitté **${chName(from)}** · ${time}${shift ? ` · en shift ${shift}` : ""}`,
+      content: `🔴 ${await who(uid)} a quitté **${chName(from)}** · ${time}${shift ? ` · en shift ${shift}` : ""}`,
       ...(shift
         ? { components: [row(button(`vc_cut_${uid}`, "Coupure", "✂️", ButtonStyle.Secondary), button(`vc_rep_${uid}`, "Remplacer", "🔁", ButtonStyle.Secondary))] }
         : {}),

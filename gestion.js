@@ -8,7 +8,7 @@ const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = requ
 
 const GESTION_CHANNEL_ID = (process.env.GESTION_CHANNEL_ID ?? "1563688546303217784").trim();
 // Fourni par index.js : isAdmin, client, getData, saveData, SHIFTS, liveEmbed(), currentShift(), shiftBoard(name, date),
-// setMark(date, slot, cid, patch), openMenu(i, menu), openPlanning(i, date, view),
+// setMark(date, slot, cid, patch), openMenu(i, menu), openChatters(i), openPlanning(i, date, view, extra),
 // dayoffView(month), coupure(i, user, opts), retour(i, target, opts), postPlanning(date), announceShift(name),
 // dayChoices(), fireTargets(), firePreview(target), fire(target)
 const ctx = {};
@@ -38,6 +38,7 @@ function panelView(live) {
       row(
         button("g_plan", "Planning", "📅", ButtonStyle.Primary),
         button("g_rep", "Remplacer", "🔁", ButtonStyle.Secondary),
+        button("g_mv", "Déplacer", "🔀", ButtonStyle.Secondary),
         button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
         button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
@@ -242,16 +243,21 @@ const open = async (i, view, st = {}) => {
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
-  const needApp = ["g_plan", "g_rep", "g_send", "g_back", "g_off", "g_fire", "g_att"];
+  const needApp = ["g_plan", "g_rep", "g_mv", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
   switch (id) {
-    case "g_chat": return ctx.openMenu(i, "chome");
+    case "g_chat": return ctx.openChatters(i);
     case "g_mod": return ctx.openMenu(i, "mhome");
     case "g_adm": return ctx.openMenu(i, "ahome");
     case "g_plan": return ctx.openPlanning(i, today(), "list");
-    case "g_rep": return ctx.openPlanning(i, today(), "rep");
+    // remplacer / déplacer : sur le shift en cours
+    case "g_rep":
+    case "g_mv": {
+      const cur = ctx.currentShift();
+      return ctx.openPlanning(i, cur.date, id === "g_rep" ? "rep" : "mv", { slot: appSync.SLOT_OF[cur.name] });
+    }
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
