@@ -1,6 +1,6 @@
 const {
   Client, GatewayIntentBits, Events, EmbedBuilder, ButtonStyle,
-  StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
+  StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, LabelBuilder, TextDisplayBuilder, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, REST, Routes, PermissionFlagsBits,
 } = require("discord.js");
 const cron = require("node-cron");
@@ -81,10 +81,48 @@ function loadData() {
   }
 }
 function saveData() {
+  data.savedAt = Date.now();
+  writeLocal();
+  backupSoon();
+}
+const writeLocal = () => {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
+};
 loadData();
+// Copie de data.json dans l'app (docs bot/state), quelques secondes après la dernière écriture : sans volume
+// Railway, data.json repart à zéro à chaque redéploiement (clock in en cours, admins, messages suivis…).
+// L'historique n'y garde que les 7 derniers jours.
+let backupTimer = null;
+function backupSoon() {
+  if (!appSync.enabled()) return;
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => {
+    const since = Date.now() - 7 * 864e5;
+    appSync
+      .saveBotState({ ...data, historique: data.historique.filter((h) => (h.clockOut || h.clockIn) >= since) })
+      .catch((e) => console.error("Copie de la mémoire du bot :", e.message));
+  }, 3000);
+  backupTimer.unref?.();
+}
+// Au démarrage : la copie de l'app si elle est plus récente que data.json (data.json perdu au redéploiement)
+async function restoreData() {
+  if (!appSync.enabled()) return false;
+  try {
+    const r = await appSync.loadBotState();
+    if (!r || !(Number(r.savedAt) > Number(data.savedAt || 0))) return false;
+    const key = (h) => `${h.userId}|${h.clockIn}`;
+    const seen = new Set(data.historique.map(key));
+    const hist = [...data.historique, ...(r.historique || []).filter((h) => !seen.has(key(h)))].sort((a, b) => a.clockIn - b.clockIn);
+    data = { ...JSON.parse(JSON.stringify(DEFAULT_DATA)), ...r, historique: hist };
+    writeLocal();
+    console.log(`Mémoire du bot relue depuis l'app (enregistrée ${new Date(r.savedAt).toISOString()})`);
+    return true;
+  } catch (e) {
+    console.error("Mémoire du bot (app) :", e.message);
+    return false;
+  }
+}
 
 // ================== HELPERS ==================
 const fmtTime = (d) =>
@@ -264,11 +302,11 @@ const hashOf = (payloads) =>
 // (ceux de l'ancien salon gestion). Le panneau d'avant garde son pointage et Clock In / Clock Out.
 async function panelView(name, date, full = true) {
   const sh = SHIFTS[name];
-  let embed = null, who = [];
+  let embed = null, unlinked = 0;
   if (appSync.enabled() && date)
     try {
       const b = await shiftBoard(name, date);
-      who = whoChoices(b);
+      unlinked = b.day.chatters.filter((c) => c.active && !c.discordId).length;
       const { head, lines, extra } = boardLines(b);
       embed = {
         title: `${sh.emoji} Shift ${name} · ${sh.label} · ${planning.dayLabel(date)}`,
@@ -283,23 +321,9 @@ async function panelView(name, date, full = true) {
   return {
     content: `🔔 **Shift ${name} (${sh.label})** · pensez à **clock in** ✅`,
     embeds: [embed],
-    components: [clockInRow(name), ...(full && appSync.enabled() ? gestion.panelRows(date, appSync.SLOT_OF[name], who) : [])],
+    components: [clockInRow(name), ...(full && appSync.enabled() ? gestion.panelRows(date, appSync.SLOT_OF[name], { unlinked }) : [])],
     allowedMentions: { parse: [] },
   };
-}
-// Menu 👤 Chatteur sous le panneau : ceux du shift (rangés comme le pointage), avec leurs modèles et leurs box
-function whoChoices(b) {
-  const byId = Object.fromEntries(b.staff.map((p) => [p.id, p]));
-  const out = new Map();
-  for (const g of planning.slotGroups(b.day, b.slot).groups)
-    for (const x of g.people) {
-      const p = byId[x.id] || { ...x.c, off: x.off };
-      const k = b.stOf(p);
-      const o = out.get(x.id) || { value: x.id, label: x.c.name, emoji: k === "off" ? "🏖️" : ST[k].e, parts: [] };
-      o.parts.push(`${g.name}${x.boxes.length ? ` · ${x.boxes.includes("all") ? "All Inbox" : `Box ${x.boxes.join(" & ")}`}` : ""}`);
-      out.set(x.id, o);
-    }
-  return [...out.values()].map(({ parts, ...o }) => ({ ...o, description: parts.join(" · ") }));
 }
 // Envoie le panneau d'un shift en bas du salon clocking ; le précédent perd les boutons des admins
 async function announceShift(name, t = Date.now()) {
@@ -793,6 +817,7 @@ client.once(Events.ClientReady, async () => {
     console.error("Liens Discord -> app :", e.message);
   }
   publishMembers();
+  await restoreSessions().catch((e) => console.error("Clock in en cours :", e.message));
   setTimeout(() => ensureCurrentPanel().catch((e) => console.error("Panneau du shift :", e.message)), 8000);
   cron.schedule("*/5 * * * *", sweep, { timezone: TZ });
   setTimeout(sweep, 30000);
@@ -816,6 +841,33 @@ client.once(Events.ClientReady, async () => {
       postPlanning(+auto[1] < 12 ? today : appSync.addDays(today, 1)).catch((e) => console.error("Planning auto :", e.message));
     }, { timezone: TZ });
 });
+
+// Clock in en cours oubliés (bot redémarré sans sa mémoire) : retrouvés d'après le pointage de l'app (arrivée
+// notée, pas de départ). Un double shift (même arrivée sur deux shifts) redevient un seul clock in.
+async function restoreSessions(t = Date.now()) {
+  if (!appSync.enabled()) return [];
+  const live = await appSync.openClockIns(t);
+  const byUid = new Map();
+  for (const x of live) byUid.set(x.uid, [...(byUid.get(x.uid) || []), x]);
+  const back = [];
+  for (const [uid, l] of byUid) {
+    if (data.sessions[uid] || data.historique.some((h) => h.userId === uid && h.clockOut >= l[0].in)) continue;
+    const order = (x) => appSync.parisMs(x.date, appSync.START_OF[x.slot] ?? 0);
+    const [main, ...more] = [...l].sort((a, b) => a.in - b.in || order(a) - order(b));
+    const shift = SHIFT_OF_SLOT[main.slot];
+    if (!SHIFTS[shift]) continue;
+    const p = await appSync.plannedFor(uid, [data.membres[uid]?.name].filter(Boolean), main.slot, main.date).catch(() => null);
+    data.sessions[uid] = {
+      shift, clockIn: main.in, modeles: await modelesOf(p?.accts || []).catch(() => []),
+      app: { date: main.date, key: main.key, cid: main.cid, ...(more.length ? { extra: more.filter((x) => x.in === main.in).map((x) => ({ date: x.date, key: x.key })) } : {}) },
+      restored: true,
+    };
+    back.push(uid);
+    console.log(`Clock in retrouvé : ${nameOf(uid)} (${shift} depuis ${fmtTime(main.in)})`);
+  }
+  if (back.length) saveData();
+  return back;
+}
 
 // Emojis des box (pastilles vertes 1 à 15 et ALL, dans assets/box) : ajoutés une fois aux emojis de
 // l'application du bot, utilisables partout. Sans eux (BOX_EMOJIS=off, ou erreur), chiffres emoji 1️⃣ 2️⃣.
@@ -1001,6 +1053,121 @@ const PANELS = {
   },
 };
 const PANEL_OF = { modeles: "mhome", admins: "ahome" };
+
+// ---------- 💃 Modèles et 🛡️ Admins en petite fiche (boutons sous le panneau du shift) ----------
+const mLabel = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
+const mPick = (id, opts, min = 0) =>
+  new StringSelectMenuBuilder().setCustomId(id).setRequired(min > 0).setMinValues(min).setMaxValues(Math.max(1, opts.length)).addOptions(opts);
+const fiField = (i, fn, id) => {
+  try {
+    return i.fields[fn](id);
+  } catch {
+    return null;
+  }
+};
+// La liste en haut ; cocher pour retirer, ajouter un compte de l'app ou un autre nom (avec sa devise)
+async function openModels(i) {
+  if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+  const cat = appSync.enabled() ? await Promise.race([appSync.appCatalog().catch(() => null), new Promise((r) => setTimeout(() => r(null), 1500))]) : null;
+  const list = data.modeles;
+  const add = cat ? cat.accounts.filter((a) => !modeleForAcct(a.key, cat)).slice(0, 25) : [];
+  const full = list.length >= 25;
+  const m = new ModalBuilder().setCustomId("ga_models").setTitle(`💃 Modèles (${list.length})`).addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      [
+        list.map((x) => `• **${withEmoji(x.name)}** · ${x.devise}${needsFiche(x.name) ? " · 📝" : ""}`).join("\n") || "_Aucun modèle pour l'instant._",
+        list.some((x) => needsFiche(x.name)) ? "-# 📝 = fiche de fin de shift dans le salon ventes" : "",
+        full ? "-# ⚠️ 25 modèles maximum : retires-en avant d'en ajouter." : "",
+      ].filter(Boolean).join("\n").slice(0, 3900)
+    )
+  );
+  if (list.length)
+    m.addLabelComponents(mLabel("Retirer de la liste").setStringSelectMenuComponent(mPick("rem", list.map((x) => opt(withEmoji(x.name), x.name, `${x.devise}${needsFiche(x.name) ? " · fiche de fin de shift" : ""}`)))));
+  if (add.length && !full)
+    m.addLabelComponents(mLabel("Ajouter un compte de l'app").setStringSelectMenuComponent(mPick("add", add.map((a) => opt(withEmoji(`${a.model} (${a.platform})`), a.key, `Compte de l'app · ${a.devise}`)))));
+  if (!full)
+    m.addLabelComponents(
+      mLabel("Ou un autre modèle", "Son nom, ex : Zoé (Uncove)").setTextInputComponent(
+        new TextInputBuilder().setCustomId("nom").setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(80).setPlaceholder("Vide = aucun")
+      ),
+      mLabel("Sa devise").setStringSelectMenuComponent(mPick("devise", [opt("Euro (€)", "€", null, "💶", true), opt("Dollar ($)", "$", null, "💵")], 1))
+    );
+  return i.showModal(m);
+}
+async function saveModels(i) {
+  await i.deferReply({ flags: EPHEMERAL });
+  const rem = fiField(i, "getStringSelectValues", "rem") || [];
+  const add = fiField(i, "getStringSelectValues", "add") || [];
+  const nom = String(fiField(i, "getTextInputValue", "nom") || "").trim().slice(0, 80);
+  const devise = (fiField(i, "getStringSelectValues", "devise") || [])[0] === "$" ? "$" : "€";
+  const out = [];
+  if (rem.length) {
+    data.modeles = data.modeles.filter((m) => !rem.includes(m.name));
+    out.push(`🗑️ Retiré${plS(rem.length)} : **${modelesTxt(rem)}**`);
+  }
+  if (add.length && appSync.enabled()) {
+    const cat = await appSync.appCatalog();
+    const added = [];
+    for (const key of add) {
+      const a = cat.accounts.find((x) => x.key === key);
+      if (!a || modeleForAcct(key, cat) || data.modeles.length >= 25) continue;
+      const name = `${a.model} (${a.platform})`.slice(0, 80);
+      data.modeles.push({ name, devise: a.devise, app: key });
+      added.push(name);
+    }
+    if (added.length) out.push(`✅ Ajouté${plS(added.length)} : **${modelesTxt(added)}**`);
+  }
+  if (nom) {
+    if (modeleOf(nom)) out.push(`⚠️ **${withEmoji(nom)}** est déjà dans la liste.`);
+    else if (data.modeles.length >= 25) out.push("⚠️ 25 modèles maximum : retires-en d'abord.");
+    else {
+      data.modeles.push({ name: nom, devise });
+      out.push(`✅ Ajouté : **${withEmoji(nom)}** (${devise})`);
+    }
+  }
+  saveData();
+  return done(i, [...(out.length ? out : ["Rien n'a changé."]), `-# ${data.modeles.length} modèle${plS(data.modeles.length)} dans la liste.`].join("\n"), 30000);
+}
+// Les admins du bot déjà cochés : on en coche d'autres, on décoche ceux à retirer
+function openAdmins(i) {
+  if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+  const sel = new UserSelectMenuBuilder().setCustomId("who").setRequired(false).setMinValues(0).setMaxValues(25).setPlaceholder("🔎 Tape un nom");
+  if (data.admins.length) sel.setDefaultUsers(...data.admins.slice(0, 25));
+  return i.showModal(
+    new ModalBuilder().setCustomId("ga_admins").setTitle(`🛡️ Admins du bot (${data.admins.length})`).addLabelComponents(
+      mLabel("Admins du bot", "Ajoute ou retire des noms ; les admins du serveur Discord ont toujours accès").setUserSelectMenuComponent(sel)
+    )
+  );
+}
+async function saveAdmins(i) {
+  await i.deferReply({ flags: EPHEMERAL });
+  const picked = fiField(i, "getSelectedUsers", "who");
+  const list = picked ? [...picked.values()].filter((u) => !u.bot) : [];
+  for (const u of list) remember(u, fiField(i, "getSelectedMembers", "who")?.get?.(u.id));
+  const ids = list.map((u) => u.id);
+  const added = ids.filter((u) => !data.admins.includes(u)), gone = data.admins.filter((u) => !ids.includes(u));
+  data.admins = ids;
+  saveData();
+  return done(
+    i,
+    [
+      added.length ? `✅ ${mentions(added)} ${added.length > 1 ? "sont" : "est"} admin du bot.` : "",
+      gone.length ? `🗑️ ${mentions(gone)} ${gone.length > 1 ? "ne sont" : "n'est"} plus admin du bot.` : "",
+      !added.length && !gone.length ? "Rien n'a changé." : "",
+      `-# Admins du bot : ${ids.length ? mentions(ids) : "aucun"} (les admins du serveur Discord ont toujours accès).`,
+    ].filter(Boolean).join("\n"),
+    30000
+  );
+}
+// 📅 Planning (panneau du shift) : la barre « ✏️ Modif par shift », pour ce jour-là et le lendemain
+function openPlanPick(i, date) {
+  if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+  const days = [date, appSync.addDays(date, 1)];
+  const sel = new StringSelectMenuBuilder().setCustomId("pm_pickd").setPlaceholder("✏️ Modif par shift").addOptions(
+    days.flatMap((d) => planning.SLOTS.map((sl) => opt(`${sl.l} · ${planning.dayLabel(d)}`, `${d}|${sl.k}`, sl.h, sl.emoji)))
+  );
+  return reply(i, { content: "✏️ **Modif par shift** : choisis le shift, sa fiche s'ouvre (un chatteur par ligne avec ses box).", components: [row(sel)] }, false);
+}
 const HOME_OF = { madd: "mhome", mrem: "mhome", aadd: "ahome", arem: "ahome" };
 
 // Affiche un menu dans le message éphémère (note : résultat de la dernière action, au-dessus)
@@ -1088,6 +1255,10 @@ async function handleInteraction(i) {
     if (cid.startsWith("do_")) return dayoff.handle(i);
     if (cid.startsWith("vc_")) return voice.handle(i);
     if (cid.startsWith("g_")) return gestion.handle(i);
+    if (cid === "ga_models" || cid === "ga_admins") {
+      if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
+      return cid === "ga_models" ? saveModels(i) : saveAdmins(i);
+    }
 
     // ---------- Slash commands ----------
     if (i.isChatInputCommand()) {
@@ -1223,6 +1394,8 @@ Object.assign(gestion.ctx, {
   dayoffView: (month) => dayoff.boardView(month),
   coupure: runCoupure,
   retour: retourCoupure,
+  retours: retourMany,
+  openModels, openAdmins, openPlanPick,
   postPlanning: (date) => postPlanning(date),
   announceShift,
   dayChoices: () => dayChoices(""),
@@ -1233,7 +1406,7 @@ Object.assign(shiftModal.ctx, { isAdmin, refresh: refreshSoon });
 Object.assign(quickModal.ctx, { isAdmin, refresh: refreshSoon });
 // 👤 la fiche d'un chatteur (menu sous le panneau du shift) : modèles, box, shifts, compte ; ➕ un nouveau
 Object.assign(fiche.ctx, { isAdmin, refresh: refreshSoon });
-const modals = { replace: quickModal.openReplace, change: quickModal.openChange, fiche: fiche.openFiche, fresh: fiche.openNew };
+const modals = { replace: quickModal.openReplace, change: quickModal.openChange, fiche: fiche.openFiche, fresh: fiche.openNew, find: fiche.openFor };
 planEdit.ctx.modals = modals;
 gestion.ctx.modals = modals;
 // box, modèle, chatteur ajouté ou retiré dans l'app sur un shift en cours -> une ligne dans le salon clocking
@@ -1436,14 +1609,25 @@ async function noteCoupure(m, { min, raison, shift: forced } = {}) {
 // Retour de coupure : temps réel compté au pointage (comme un retard) et une ligne dans le salon clocking
 // target : { uid, names } (compte Discord) ou { cid } (chatteur de l'app)
 // giveBack : il reprend les box qu'il avait avant d'être remplacé (retirées à celui qui les a)
-async function retourCoupure(i, { uid, cid, names = [] }, { update = false, giveBack = true } = {}) {
-  const t = Date.now();
+async function retourCoupure(i, target, { update = false, giveBack = true } = {}) {
   await (update ? i.deferUpdate() : i.deferReply({ flags: EPHEMERAL }));
   if (!appSync.enabled()) return done(i, "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway.");
+  return done(i, await retourText(target, { giveBack }), 60000);
+}
+// Fiche 🔙 Retour de coupure : un ou plusieurs chatteurs (de l'app) d'un coup
+async function retourMany(i, cids, giveBack = true) {
+  await i.deferReply({ flags: EPHEMERAL });
+  if (!cids.length) return done(i, "Choisis qui revient.");
+  const out = [];
+  for (const cid of cids) out.push(await retourText({ cid }, { giveBack }));
+  return done(i, out.join("\n"), 60000);
+}
+async function retourText({ uid, cid, names = [] }, { giveBack = true } = {}) {
+  const t = Date.now();
   const r = await appSync.endCoupure({ uid, cid, names, t });
   const tag = uid || r.discordId ? `<@${uid || r.discordId}>` : `**${r.name}**`;
-  if (r.skipped === "unlinked") return done(i, `⚠️ <@${uid}> n'est relié à aucun chatteur de l'app (Équipe › Comptes Discord).`);
-  if (r.notCut) return done(i, `⚠️ ${tag} n'a pas de coupure en cours (lance d'abord une coupure).`);
+  if (r.skipped === "unlinked") return `⚠️ <@${uid}> n'est relié à aucun chatteur de l'app (Équipe › Comptes Discord).`;
+  if (r.notCut) return `⚠️ ${tag} n'a pas de coupure en cours (lance d'abord une coupure).`;
   const shift = SHIFT_OF_SLOT[r.slot];
   const back = giveBack ? await planEdit.giveBack(r.date, r.slot, r.chatterId).catch((e) => (console.error("Box rendues :", e.message), "")) : "";
   const line = [
@@ -1459,7 +1643,7 @@ async function retourCoupure(i, { uid, cid, names = [] }, { update = false, give
     console.error("Retour de coupure (salon clocking) :", e.message);
   }
   refreshSoon(r.date);
-  return done(i, `🔙 ${tag} est de retour : ${r.took} min de coupure (parti à ${fmtTime(r.since)}), noté au pointage de l'app (${r.name}).${back ? `\n📦 Il ${back}.` : ""}`, 60000);
+  return `🔙 ${tag} est de retour : ${r.took} min de coupure (parti à ${fmtTime(r.since)}), noté au pointage de l'app (${r.name}).${back ? `\n📦 Il ${back}.` : ""}`;
 }
 
 // ================== CLOCK IN ==================
@@ -1644,9 +1828,10 @@ async function finalizeClockOut(i, ventes) {
   }
 }
 
-if (require.main === module) client.login(TOKEN);
+// la mémoire gardée dans l'app est relue avant de se connecter (data.json perdu au redéploiement)
+if (require.main === module) restoreData().finally(() => client.login(TOKEN));
 // pour les tests
 module.exports = {
-  client, handleInteraction, postPlanning, refreshPlanning, refreshLive, announceShift, postEffectif, pollPost, sweep, planWatch,
+  client, handleInteraction, postPlanning, restoreData, restoreSessions, refreshPlanning, refreshLive, announceShift, postEffectif, pollPost, sweep, planWatch,
   parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };

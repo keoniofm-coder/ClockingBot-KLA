@@ -1,5 +1,5 @@
 // ================== VOCAUX : ARRIVÉES ET DÉPARTS ==================
-// Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le salon clocking
+// Quand quelqu'un rejoint ou quitte un des vocaux suivis, une ligne est postée dans le chat du vocal Live Anna et Axelle
 // (VOICE_LOG_CHANNEL_ID pour un autre salon), sans notifier personne, avec ses box à droite de son nom.
 // S'il part pendant son shift (clock in, ou au planning d'un shift commencé), les admins ont deux boutons :
 // ⚡ Coupure (notée tout de suite, puis quoi faire de ses box : quelqu'un le remplace, redonnées, retirées) et
@@ -11,8 +11,9 @@ const { reply, row, button } = require("./ui");
 const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
 // Live Zoé, Live Anna et Axelle, Live formation
 const VOICE_IDS = new Set(list(process.env.VOICE_CHANNEL_IDS ?? "1553562313083326524,1548280432595050556,1548281600414978109"));
-// Salon où tout est posté : le salon clocking par défaut (vide = dans le chat de chaque vocal)
-const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? process.env.CLOCKING_CHANNEL_ID ?? "").trim();
+// Salon où tout est posté : le chat du vocal Live Anna et Axelle par défaut (le salon clocking était trop rempli ;
+// VOICE_LOG_CHANNEL_ID vide = dans le chat de chaque vocal)
+const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? "1548280432595050556").trim();
 const GRACE = Math.max(0, Number(process.env.VOICE_GRACE_S ?? 30) || 0) * 1000; // micro-coupure ignorée
 const BACK_WITHIN = 4 * 3600e3; // « est revenu » si parti depuis moins de 4 h
 

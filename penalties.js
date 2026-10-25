@@ -5,7 +5,9 @@
 // Le numéro compte les fautes du même type ce mois-ci (il repart à 1 chaque mois). Montants en euros.
 // Les paies se font par quinzaine : le 16 et le 1er à 2 h, le récap de la quinzaine qui finit part dans le salon
 // (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
-const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+// ⚠️ Pénalités (sous le panneau du shift) ouvre une petite fiche : le chatteur (recherche), la faute, et pour une pénalité
+// ✏️ Personnalisée le montant et la raison ; 📋 le récap de la quinzaine reste un menu (annuler une erreur, l'envoyer).
+const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const { reply, done, showView, row, button, opt, plS, EPHEMERAL } = require("./ui");
 
@@ -27,7 +29,9 @@ const FAULTS = [
   { k: "vip_parle", l: "Parler à un VIP sans autorisation", e: "👑", cat: "VIP", amount: 20, free: 0 },
   { k: "vip_paye", l: "Faire payer un VIP sans autorisation", e: "💲", cat: "VIP", amount: 30, free: 0 },
 ];
-const faultOf = (k) => FAULTS.find((f) => f.k === k);
+// Pénalité personnalisée : montant et raison écrits à la main (numéro compté parmi ses personnalisées du mois)
+const PERSO = { k: "perso", l: "Personnalisée", e: "✏️", cat: "Autre" };
+const faultOf = (k) => FAULTS.find((f) => f.k === k) || (k === PERSO.k ? PERSO : null);
 // montant de la n-ième faute du mois (0 = avertissement seul)
 function amountFor(f, n) {
   if (f.tiers) {
@@ -177,7 +181,7 @@ function recapRows(list) {
 function detail(l) {
   const c = new Map();
   for (const p of l) c.set(p.fault, [...(c.get(p.fault) || []), p]);
-  return [...c.entries()].map(([k, x]) => `${faultOf(k)?.l || x[0].label} ×${x.length}`).join(", ");
+  return [...c.entries()].map(([k, x]) => (k === PERSO.k ? x.map((p) => p.label).join(", ") : `${faultOf(k)?.l || x[0].label} ×${x.length}`)).join(", ");
 }
 // « 📋 Récap des pénalités du 1er au 15 octobre 2026 » : une ligne par @chatteur avec son total, puis le total
 function recapText(k, list) {
@@ -221,13 +225,65 @@ async function autoRecap(t = Date.now()) {
   return prev;
 }
 
+// ---------- La petite fiche ----------
+const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
+const text = (id, placeholder, max = 200) => new TextInputBuilder().setCustomId(id).setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(max).setPlaceholder(placeholder);
+function modal() {
+  const faults = [
+    ...FAULTS.map((x) => ({ label: x.l, value: x.k, emoji: x.e, description: `${x.cat} · ${ruleTxt(x)}`.slice(0, 100) })),
+    { label: "Personnalisée", value: PERSO.k, emoji: PERSO.e, description: "Tu écris le montant et la raison" },
+    { label: "Juste voir le récap de la quinzaine", value: "_sum", emoji: "📋", description: "Rien n'est envoyé ; annuler une erreur, envoyer le récap" },
+  ];
+  return new ModalBuilder().setCustomId("pn_new").setTitle(`⚠️ Pénalité · ${monthLabel(monthOf(today()))}`.slice(0, 45)).addLabelComponents(
+    label("Chatteur").setUserSelectMenuComponent(new UserSelectMenuBuilder().setCustomId("who").setRequired(false).setMinValues(0).setMaxValues(1).setPlaceholder("🔎 Tape son nom")),
+    label("La faute", "Le numéro d'avertissement et la pénalité suivent le barème du mois").setStringSelectMenuComponent(
+      new StringSelectMenuBuilder().setCustomId("fault").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(faults)
+    ),
+    label("Montant (Personnalisée)", "En euros, ex : 15 · 0 = avertissement seul").setTextInputComponent(text("amount", "ex : 15", 6)),
+    label("Raison ou détail", "Le chatteur le verra ; obligatoire pour une Personnalisée").setTextInputComponent(text("note", "ex : retard de 2 h sans prévenir"))
+  );
+}
 async function open(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
-  const st = { view: "add" };
-  states.set(i.user.id, st);
+  return i.showModal(modal());
+}
+const field = (i, fn, id) => {
+  try {
+    return i.fields[fn](id);
+  } catch {
+    return null;
+  }
+};
+// La fiche envoyée : la pénalité part dans le salon (ou le récap s'affiche)
+async function submit(i) {
+  const u = field(i, "getSelectedUsers", "who")?.first?.();
+  const k = (field(i, "getStringSelectValues", "fault") || [])[0];
+  const note = String(field(i, "getTextInputValue", "note") || "").trim();
   await i.deferReply({ flags: EPHEMERAL });
-  return showView(i, await VIEWS.add(st));
+  if (k === "_sum") {
+    const st = { view: "sum" };
+    states.set(i.user.id, st);
+    return showView(i, await VIEWS.sum(st));
+  }
+  const f = faultOf(k);
+  const raw = String(field(i, "getTextInputValue", "amount") || "").replace(",", ".").replace(/[€\s]/g, "");
+  const amount = Math.round(Number(raw) * 100) / 100;
+  const errors = [
+    !u && "choisis le chatteur.",
+    u?.bot && "choisis un chatteur, pas un bot.",
+    !f && "choisis la faute.",
+    f === PERSO && !(raw && Number.isFinite(amount) && amount >= 0 && amount <= 1000) && "écris le montant en euros (ex : 15, 0 pour un avertissement seul).",
+    f === PERSO && !note && "écris la raison.",
+  ].filter(Boolean);
+  if (errors.length) return done(i, `⚠️ Rien n'est envoyé : ${errors.join(" ")}`, 30000);
+  const st = { uid: u.id, fault: f.k, ...(f === PERSO ? { custom: { amount, label: note } } : {}) };
+  await send(i, st, f === PERSO ? "" : note);
+  states.set(i.user.id, { view: "sum" });
+  return showView(i, {
+    content: st.note,
+    components: [row(button("pn_add", "Nouvelle pénalité", "⚠️", ButtonStyle.Primary), button("pn_sum", "Récap de la quinzaine", "📋", ButtonStyle.Secondary), button("pn_x", "Fermer", null, ButtonStyle.Secondary))],
+  });
 }
 
 // Enregistre la pénalité et l'annonce dans le salon pénalités
@@ -237,11 +293,12 @@ async function send(i, st, note) {
   const m = monthOf(date);
   // recalculé au moment d'envoyer (un autre admin a pu en mettre une entre-temps)
   const n = (await appSync.penaltiesIn(m)).filter((p) => p.uid === st.uid && p.fault === f.k).length + 1;
+  const custom = f === PERSO ? st.custom : null;
   const c = await appSync.chatterOf(st.uid, [ctx.nameOf(st.uid)].filter(Boolean), false).catch(() => null);
   const p = {
     id: `${m}-${appSync.newId()}`, month: m, date, at: Date.now(), by: i.user.id,
     uid: st.uid, chatterId: c?.id || null, name: c?.name || ctx.nameOf(st.uid),
-    fault: f.k, label: f.l, n, amount: amountFor(f, n), currency: "EUR", note: note || "",
+    fault: f.k, label: custom ? custom.label : f.l, n, amount: custom ? custom.amount : amountFor(f, n), currency: "EUR", note: note || "",
   };
   let where = "";
   try {
@@ -261,8 +318,12 @@ async function send(i, st, note) {
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
+  if (id === "pn_new") return submit(i);
+  // ⚠️ Nouvelle pénalité : la petite fiche
+  if (id === "pn_add") return i.showModal(modal());
+  if (id === "pn_sum" && !states.get(i.user.id)) states.set(i.user.id, { view: "sum" });
   const st = states.get(i.user.id);
-  if (!st) return done(i, "Ce menu a expiré : reclique sur ⚠️ Pénalités dans le salon gestion.", 8000);
+  if (!st) return done(i, "Ce menu a expiré : reclique sur ⚠️ Pénalités sous le panneau du shift.", 8000);
   st.note = "";
   if (id === "pn_x") {
     states.delete(i.user.id);
@@ -284,7 +345,6 @@ async function handle(i) {
     if (!st.uid || !faultOf(st.fault)) st.note = "Choisis le chatteur et la faute.";
     else await send(i, st, id === "pn_m" ? (i.fields.getTextInputValue("note") || "").trim() : "");
   } else if (id === "pn_sum") Object.assign(st, { view: "sum", period: null, del: null });
-  else if (id === "pn_add") st.view = "add";
   else if (id.startsWith("pn_pe_")) Object.assign(st, { period: periodStep(st.period || periodOf(today()), Number(id.slice(6)) || 0), del: null });
   else if (id === "pn_post") {
     const n = await postRecap(st.period).catch((e) => ({ error: e.message }));
@@ -307,4 +367,4 @@ async function handle(i) {
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, open, handle, FAULTS, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };
+module.exports = { ctx, open, handle, modal, FAULTS, PERSO, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };

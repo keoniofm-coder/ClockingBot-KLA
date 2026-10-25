@@ -229,6 +229,11 @@ const planEntries = (doc) =>
 async function planOf(date) {
   return planEntries(await getDoc("plan", date));
 }
+// Planning de plusieurs jours d'un coup : { date: [entrées] }
+async function plansBetween(from, to) {
+  const rows = await rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`);
+  return Object.fromEntries(rows.map((r) => [r.id, planEntries(r.data)]));
+}
 async function offsOn(date) {
   const rows = await rest("GET", `select=data&coll=eq.offs&data->>date=eq.${enc(date)}`);
   return new Set(rows.map((r) => r.data?.chatterId).filter(Boolean));
@@ -258,7 +263,7 @@ function offScope(chatter, date, off, plan) {
   return { slots: [], accts: [], mids: [] };
 }
 // Pose un day off avec les règles de l'agence : pas deux fois le même jour, `quota` par mois,
-// et un seul chatteur off par shift et par modèle le même jour. removeShifts : le retire du planning ce jour-là.
+// et un seul chatteur off par shift le même jour, toutes modèles confondues. removeShifts : le retire du planning ce jour-là.
 async function addOff({ cid, date, note = "", removeShifts = true, by = "discord", t = Date.now() }) {
   const month = date.slice(0, 7);
   const [chatters, plan, monthOffs, quota] = await Promise.all([appChatters(true), planOf(date), offsBetween(`${month}-01`, `${month}-31`), dayOffQuota()]);
@@ -272,7 +277,7 @@ async function addOff({ cid, date, note = "", removeShifts = true, by = "discord
   const clash = monthOffs
     .filter((o) => o.date === date && o.chatterId !== cid && byId[o.chatterId])
     .map((o) => ({ off: o, chatter: byId[o.chatterId], scope: offScope(byId[o.chatterId], date, o, plan) }))
-    .find((x) => x.scope.slots.some((k) => scope.slots.includes(k)) && x.scope.mids.some((m) => scope.mids.includes(m)));
+    .find((x) => x.scope.slots.some((k) => scope.slots.includes(k)));
   if (clash) return { error: "conflict", chatter: c, scope, other: clash.chatter, otherScope: clash.scope };
   const id = newId();
   await putDoc("offs", id, { chatterId: cid, date, note, at: t, slots: scope.slots, accts: scope.accts, by });
@@ -646,6 +651,34 @@ async function sweepAbsents({ now = Date.now(), clockIns = [] } = {}) {
   return done;
 }
 
+// ---------- Mémoire du bot (data.json) gardée aussi dans l'app ----------
+// Sans volume Railway, data.json repart à zéro à chaque redéploiement (clock in en cours, admins, messages suivis…) :
+// une copie est gardée dans docs (bot/state) et relue au démarrage.
+async function loadBotState() {
+  return getDoc("bot", "state");
+}
+async function saveBotState(state) {
+  await putDoc("bot", "state", state);
+}
+// Clock in Discord encore en cours d'après le pointage de l'app (arrivée notée, pas de départ), pour retrouver
+// ceux qui étaient clock in si le bot a redémarré sans sa mémoire. within : clock in de moins de 14 h.
+async function openClockIns(t = Date.now(), within = 14 * 3600e3) {
+  const today = parisParts(t).date;
+  const dates = [addDays(today, -1), today];
+  const [chatters, ...days] = await Promise.all([appChatters(true), ...dates.map(readMarks)]);
+  const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
+  const out = [];
+  days.forEach((marks, k) => {
+    for (const [key, m] of Object.entries(marks)) {
+      const c = byId[m?.chatterId];
+      if (!c?.discordId || m.src !== "discord" || !["present", "retard", "coupure"].includes(m.status)) continue;
+      if (!m.in || m.out || t - m.in > within || m.in > t) continue;
+      out.push({ uid: c.discordId, cid: c.id, date: dates[k], key, slot: m.slot, in: m.in });
+    }
+  });
+  return out.sort((a, b) => a.in - b.in);
+}
+
 // ---------- Envoi du planning demandé depuis l'app ----------
 async function pendingPost() {
   const d = await getDoc("config", "discordPost");
@@ -662,7 +695,8 @@ module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
-  planningDay, planOf, writePlan, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
+  planningDay, planOf, plansBetween, writePlan, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
+  loadBotState, saveBotState, openClockIns,
   norm, parisParts, parisMs, addDays,
 };

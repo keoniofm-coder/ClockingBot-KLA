@@ -1,9 +1,10 @@
 // ================== 👤 LA FICHE D'UN CHATTEUR ==================
-// Sous le panneau du shift, le menu « 👤 Chatteur » : choisir un chatteur ouvre sa fiche, une fenêtre déjà remplie
-// avec ce qu'il a ce jour-là : ses modèles, ses box, son ou ses shifts et son compte Discord. On change ce qu'on veut,
-// tout est enregistré d'un coup dans le planning de l'app (et dans son shift habituel si on le demande).
-// ➕ Ajouter un chatteur : la même fenêtre pour en créer un (Équipe dans l'app, et le planning déjà fait suit).
-// Discord ne remplit pas une fenêtre déjà ouverte : le chatteur se choisit dans le menu, avant d'ouvrir sa fiche.
+// Sous le panneau du shift, la barre « 🔎 Modifs chatteurs » : on tape un nom, sa fiche s'ouvre, une fenêtre déjà
+// remplie avec ce qu'il a ce jour-là : ses modèles, ses box, son ou ses shifts et son compte Discord. On change ce qu'on
+// veut, tout est enregistré d'un coup dans le planning de l'app (et dans son shift habituel si on le demande).
+// ➕ Ajouter un chatteur : la même fenêtre pour en créer un (Équipe dans l'app, et le planning déjà fait suit) ; elle
+// s'ouvre aussi quand on cherche quelqu'un qui n'est pas encore dans l'app (son nom et son compte déjà remplis).
+// Discord ne remplit pas une fenêtre déjà ouverte : le chatteur se choisit dans la barre, avant d'ouvrir sa fiche.
 // Custom ids : cf_save~date~créneau~chatterId (sa fiche), cf_new~date~créneau (nouveau chatteur).
 const { ModalBuilder, LabelBuilder, UserSelectMenuBuilder, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const appSync = require("./app-sync");
@@ -52,7 +53,7 @@ async function quickDay(date) {
 
 // ---------- Ouvrir ----------
 // Sa fiche : ce qu'il a ce jour-là (le shift du panneau d'abord), sinon son shift habituel
-async function openFiche(i, { date, slot, cid }) {
+async function openFiche(i, { date, slot, cid, uid }) {
   const no = disabled(i);
   if (no) return reply(i, { content: no });
   const d = await quickDay(date);
@@ -72,7 +73,7 @@ async function openFiche(i, { date, slot, cid }) {
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(d.cat, accts)),
       label("Box", "1 2 · all · vide = aucune · deux modèles : une ligne chacune (Anna 1 2)").setTextInputComponent(boxInput(boxes)),
       label(`Shift(s) ce ${dayLabel(date)}`.slice(0, 45), "Deux = double shift · aucun = retiré du planning de ce jour").setStringSelectMenuComponent(slotsPick(slots, 0)),
-      label("Compte Discord").setUserSelectMenuComponent(userPick(c.discordId)),
+      label("Compte Discord", !c.discordId && uid ? "Pas encore relié : envoie pour relier ce compte" : undefined).setUserSelectMenuComponent(userPick(c.discordId || uid)),
       label("Aussi les jours suivants ?").setStringSelectMenuComponent(
         new StringSelectMenuBuilder().setCustomId("keep").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(
           { label: "Non, seulement ce jour-là", value: "day", emoji: "📅", default: true },
@@ -82,20 +83,33 @@ async function openFiche(i, { date, slot, cid }) {
     );
   return i.showModal(m);
 }
+// 🔎 La barre de recherche : sa fiche ; s'il n'est relié à aucun chatteur, celui de l'app qui porte son nom (sa fiche,
+// son compte prêt à relier), sinon la fiche d'un nouveau chatteur avec son nom et son compte déjà remplis
+async function openFor(i, { date, slot, uid, user, member }) {
+  const no = disabled(i);
+  if (no) return reply(i, { content: no });
+  const list = await Promise.race([appSync.appChatters().catch(() => null), new Promise((r) => setTimeout(() => r(null), 1500))]);
+  if (!list) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
+  const names = [member?.displayName, member?.nick, user?.globalName, user?.username].filter(Boolean);
+  const c = list.find((x) => x.discordId === uid) || (await appSync.chatterOf(uid, names, false).catch(() => null));
+  if (c) return openFiche(i, { date, slot, cid: c.id, uid });
+  return openNew(i, { date, slot, uid, name: chatters.cleanName(names[0] || "") });
+}
 // ➕ Un nouveau chatteur : son nom, son compte, ses modèles et son shift habituels, ses box ce jour-là
-async function openNew(i, { date, slot }) {
+async function openNew(i, { date, slot, uid, name: name0 }) {
   const no = disabled(i);
   if (no) return reply(i, { content: no });
   const cat = await Promise.race([appSync.appCatalog().catch(() => null), new Promise((r) => setTimeout(() => r(null), 2200))]);
   if (!cat) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
   if (!cat.accounts.length) return reply(i, { content: "⚠️ Aucune modèle dans l'app." });
   const name = new TextInputBuilder().setCustomId("name").setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60).setPlaceholder("Prénom ou pseudo, comme dans l'app");
+  if (name0) name.setValue(name0);
   const m = new ModalBuilder()
     .setCustomId(`cf_new~${date}~${slot}`)
     .setTitle("➕ Nouveau chatteur")
     .addLabelComponents(
       label("Nom").setTextInputComponent(name),
-      label("Compte Discord", "Pour qu'il puisse clock in").setUserSelectMenuComponent(userPick()),
+      label("Compte Discord", "Pour qu'il puisse clock in").setUserSelectMenuComponent(userPick(uid)),
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(cat, [])),
       label("Shift habituel", "Deux = double shift ; le planning déjà fait suit").setStringSelectMenuComponent(slotsPick([slot], 1)),
       label(`Box ce ${dayLabel(date)}`.slice(0, 45), "S'il travaille ce shift-là : 1 2 · all · vide = aucune").setTextInputComponent(boxInput())
@@ -240,11 +254,16 @@ async function saveNew(i, date, slot0) {
   ].filter(Boolean);
   if (errors.length) return done(i, `⚠️ Rien n'est créé : ${errors.join(" ")}`, 60000);
   const linked = u && (await appSync.appChatters(true)).find((x) => x.discordId === u.id);
-  if (linked) return done(i, `⚠️ Rien n'est créé : <@${u.id}> est déjà **${linked.name}** dans l'app. Ouvre sa fiche dans 👤 Chatteur.`, 60000);
+  if (linked) return done(i, `⚠️ Rien n'est créé : <@${u.id}> est déjà **${linked.name}** dans l'app. Cherche-le dans 🔎 Modifs chatteurs.`, 60000);
   if (u) chatters.ctx.remember?.(u, field(i, "getSelectedMembers", "uid")?.get?.(u.id));
   const orig = chatters.draftOf(null);
   const r = await chatters.save({ cid: null, orig, d: { ...orig, name, uid: u?.id || "", slots, accts, days: ALL_DAYS, apply: true } });
-  if (r.exists) return done(i, `⚠️ Rien n'est créé : **${r.exists.name}** existe déjà dans l'app. Ouvre sa fiche dans 👤 Chatteur.`, 60000);
+  if (r.exists && u && !r.exists.discordId) {
+    // il était déjà dans l'app sans compte Discord : on relie juste ce compte
+    await appSync.linkDiscord(u.id, r.exists.id);
+    return done(i, `🔗 **${r.exists.name}** était déjà dans l'app : relié à <@${u.id}>. Le reste (shifts, modèles, box) se change dans sa fiche : 🔎 Modifs chatteurs.`, 60000);
+  }
+  if (r.exists) return done(i, `⚠️ Rien n'est créé : **${r.exists.name}** existe déjà dans l'app. Cherche-le dans 🔎 Modifs chatteurs${r.exists.discordId ? "" : " (👤 Pas sur Discord)"}.`, 60000);
   if (!r.ok) return done(i, r.note, 60000);
   const lines = [`➕ **${name}** créé dans l'app (Équipe) : ${where(slots)} · ${whatOf({ cat }, mids)}${u ? ` · relié à <@${u.id}>` : " · pas relié à Discord"}${r.days ? ` · 📅 planning déjà fait mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}.`];
   // ses box ce jour-là, s'il est au planning du shift (le planning déjà fait vient de le mettre sur son shift)
@@ -276,4 +295,4 @@ async function handle(i) {
   return reply(i, { content: "Cette fenêtre a expiré." });
 }
 
-module.exports = { ctx, handle, openFiche, openNew, boxesFor };
+module.exports = { ctx, handle, openFiche, openNew, openFor, boxesFor };

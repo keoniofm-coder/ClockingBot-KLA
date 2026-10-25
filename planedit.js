@@ -600,7 +600,7 @@ async function handle(i) {
   const pub = id.match(/^pl_(edit|rep|add|mv|next)_(\d{4}-\d{2}-\d{2})(?:_([a-z]+))?$/);
   if (pub) {
     const [, act, date, slot] = pub;
-    if (act === "next") return open(i, appSync.addDays(date, 1), "copy", { src: date });
+    if (act === "next") return done(i, "Ce bouton n'existe plus : le planning se prépare dans l'app, et ✏️ **Modif par shift** sous le planning.", 10000);
     // remplacer / déplacer / ajouter : une fenêtre où l'on tape le nom
     if (ctx.modals && act === "rep") return ctx.modals.replace(i, { date, slot });
     if (ctx.modals && (act === "mv" || act === "add")) return ctx.modals.change(i, { date, slot, mode: act === "add" ? "ren" : "mv" });
@@ -877,25 +877,19 @@ async function giveBack(date, slot, cid) {
 
 // Sous le planning du salon : les boutons, puis un menu pour modifier un shift d'un coup (✏️ fenêtre de texte).
 // Remplacer et Déplacer n'y sont plus (la fiche du chatteur le fait) ; ceux des anciens messages marchent encore.
+// Sous le planning du salon : la barre « ✏️ Modif par shift » (la fenêtre texte du shift choisi) et 💪🏼 Renfort
+// (le planning s'organise dans l'app ; « Modifier » et « Préparer le lendemain » ont été retirés)
 function planComponents(date, day) {
-  const rows = [
-    row(
-      button(`pl_edit_${date}`, "Modifier", "📅", ButtonStyle.Primary),
-      button(`pl_add_${date}`, "Ajouter", "➕", ButtonStyle.Success),
-      button(`pl_next_${date}`, "Préparer le lendemain", "📋", ButtonStyle.Secondary)
-    ),
-  ];
-  if (!day) return rows;
-  const n = (k) => new Set(day.plan.filter((s) => s.slot === k).map((s) => s.chatterId)).size;
-  rows.push(
+  const n = (k) => (day ? new Set(day.plan.filter((s) => s.slot === k).map((s) => s.chatterId)).size : 0);
+  return [
+    row(button(`pl_add_${date}`, "Renfort", "💪🏼", ButtonStyle.Success)),
     row(
       new StringSelectMenuBuilder()
         .setCustomId(`pm_pick~${date}`)
-        .setPlaceholder("✏️ Modifier un shift d'un coup : modèles et box (admins)")
+        .setPlaceholder("✏️ Modif par shift")
         .addOptions(SLOTS.map((sl) => opt(`${sl.l} · ${sl.h}`, sl.k, n(sl.k) ? `${n(sl.k)} chatteur${plS(n(sl.k))}` : "Personne pour l'instant", sl.emoji)))
-    )
-  );
-  return rows;
+    ),
+  ];
 }
 
 // Pour les fenêtres rapides (quickmodal.js) : relisent le jour avant d'agir

@@ -248,12 +248,13 @@ async function applyTexts(date, slot, texts) {
 }
 
 // ---------- Interactions pm_… ----------
-// pm_open~date~slot : la fenêtre ; pm_pick~date (menu des shifts) ; pm_fix~date~slot : la rouvrir avec le texte envoyé ;
-// pm_save~date~slot : la fenêtre envoyée
+// pm_open~date~slot : la fenêtre ; pm_pick~date (barre « ✏️ Modif par shift » sous le planning) ; pm_pickd (même barre,
+// choix « date|créneau ») ; pm_fix~date~slot : la rouvrir avec le texte envoyé ; pm_save~date~slot : la fenêtre envoyée
 async function handle(i) {
-  const [id, date, slot0] = i.customId.split("~");
+  let [id, date, slot0] = i.customId.split("~");
+  if (id === "pm_pickd") [date, slot0] = String(i.values?.[0] || "").split("|");
   const slot = id === "pm_pick" ? i.values?.[0] : slot0;
-  if (id === "pm_open" || id === "pm_pick") return openModal(i, date, slot);
+  if (id === "pm_open" || id === "pm_pick" || id === "pm_pickd") return openModal(i, date, slot);
   if (id === "pm_fix") {
     const d = drafts.get(i.user.id);
     return openModal(i, date, slot, d && d.date === date && d.slot === slot ? d.texts : null);
