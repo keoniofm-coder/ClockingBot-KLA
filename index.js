@@ -219,8 +219,8 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 
 // ================== COMPOSANTS ==================
 // Boutons des chatteurs, en haut du panneau du shift
-const clockInRow = (shift) =>
-  row(button(`btn_clockin_${shift}`, "Clock In", "✅", ButtonStyle.Success), button("btn_clockout", "Clock Out", "🔴", ButtonStyle.Danger));
+const clockInRow = (shift, ...more) =>
+  row(button(`btn_clockin_${shift}`, "Clock In", "✅", ButtonStyle.Success), button("btn_clockout", "Clock Out", "🔴", ButtonStyle.Danger), ...more);
 
 // Clock out : confirmation (évite un clic de travers), puis fiche de ventes si une de ses modèles en a une
 const ficheModeles = (d) => d.modeles.filter(needsFiche).slice(0, 5);
@@ -302,17 +302,16 @@ const hashOf = (payloads) =>
 // (ceux de l'ancien salon gestion). Le panneau d'avant garde son pointage et Clock In / Clock Out.
 async function panelView(name, date, full = true) {
   const sh = SHIFTS[name];
-  let embed = null, unlinked = 0;
+  let embed = null;
   if (appSync.enabled() && date)
     try {
       const b = await shiftBoard(name, date);
-      unlinked = b.day.chatters.filter((c) => c.active && !c.discordId).length;
       const { head, lines, extra } = boardLines(b);
       embed = {
         title: `${sh.emoji} Shift ${name} · ${sh.label} · ${planning.dayLabel(date)}`,
         color: sh.color,
         description: [...head, "", ...lines, ...(extra.length ? ["", `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}`] : [])].join("\n").slice(0, 4000),
-        footer: { text: full ? "En direct, relié au Pointage de l'app · boutons de gestion réservés aux admins" : "En direct, relié au Pointage de l'app" },
+        footer: { text: full ? "En direct, relié au Pointage de l'app · 🛠️ Admin : la gestion du shift (admins)" : "En direct, relié au Pointage de l'app" },
       };
     } catch (e) {
       console.error("Panneau du shift :", e.message);
@@ -321,7 +320,8 @@ async function panelView(name, date, full = true) {
   return {
     content: `🔔 **Shift ${name} (${sh.label})** · pensez à **clock in** ✅`,
     embeds: [embed],
-    components: [clockInRow(name), ...(full && appSync.enabled() ? gestion.panelRows(date, appSync.SLOT_OF[name], { unlinked }) : [])],
+    // les chatteurs ne voient que Clock In / Clock Out ; 🛠️ Admin ouvre la gestion, visible par l'admin seul
+    components: [full && appSync.enabled() ? clockInRow(name, button(`g_menu~${date}~${appSync.SLOT_OF[name]}`, "Admin", "🛠️", ButtonStyle.Secondary)) : clockInRow(name)],
     allowedMentions: { parse: [] },
   };
 }
@@ -1585,7 +1585,7 @@ async function noteCoupure(m, { min, raison, shift: forced } = {}) {
       ok = r.skipped !== "unlinked";
       point = !ok
         ? "⚠️ Ce compte Discord n'est relié à aucun chatteur de l'app : pas noté au pointage (à relier dans Équipe › Comptes Discord)."
-        : `📋 Noté « Coupure » au pointage de l'app (${r.name}). À son retour : 🔙 **Retour de coupure** (sous son message de retour dans le vocal, ou sous le panneau du shift).`;
+        : `📋 Noté « Coupure » au pointage de l'app (${r.name}). À son retour : 🔙 **Retour de coupure** (sous son message de retour dans le vocal, ou 🛠️ Admin sous le panneau du shift).`;
     } catch (e) {
       console.error("Pointage app (coupure) :", e.message);
       point = `⚠️ Pas noté au pointage : ${String(e.message || e).slice(0, 200)}`;

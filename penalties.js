@@ -323,7 +323,7 @@ async function handle(i) {
   if (id === "pn_add") return i.showModal(modal());
   if (id === "pn_sum" && !states.get(i.user.id)) states.set(i.user.id, { view: "sum" });
   const st = states.get(i.user.id);
-  if (!st) return done(i, "Ce menu a expiré : reclique sur ⚠️ Pénalités sous le panneau du shift.", 8000);
+  if (!st) return done(i, "Ce menu a expiré : reclique sur 🛠️ Admin › ⚠️ Pénalités sous le panneau du shift.", 8000);
   st.note = "";
   if (id === "pn_x") {
     states.delete(i.user.id);
