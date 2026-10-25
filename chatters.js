@@ -3,6 +3,7 @@
 // un ou deux shifts (double shift), ses modèles et ses jours. Tout est enregistré dans l'app (Équipe), et le
 // planning déjà fait d'aujourd'hui à la fin de la semaine prochaine suit si on le laisse coché (comme dans l'app).
 const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+const { pickRow, altButton, picked } = require("./pick");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
@@ -40,6 +41,7 @@ async function homeView(st) {
     }
   }
   const none = act.filter((c) => !appSync.habSlots(c.shift).length);
+  const pickOpts = act.map((c) => opt(c.name, c.id, [appSync.habSlots(c.shift).map((k) => slotOf(k).l).join(" + "), mods(c)].filter(Boolean).join(" · ") || "Sans shift habituel", slotOf(appSync.habSlots(c.shift)[0]).emoji || "👤"));
   if (none.length) lines.push(`${lines.length ? "\n" : ""}**Sans shift habituel** · ${none.length}`, none.map(who).join(" · "));
   return {
     content: st.note || "",
@@ -52,12 +54,12 @@ async function homeView(st) {
       },
     ],
     components: [
-      ...selectMenus(
-        "cm_pick",
-        act.map((c) => opt(c.name, c.id, [appSync.habSlots(c.shift).map((k) => slotOf(k).l).join(" + "), mods(c)].filter(Boolean).join(" · ") || "Sans shift habituel", slotOf(appSync.habSlots(c.shift)[0]).emoji || "👤")),
-        { placeholder: "✏️ Modifier un chatteur…", max: 2 }
+      pickRow("cm_pick", { alt: st.alt, opts: pickOpts, chatters: act, placeholder: "✏️ Modifier un chatteur" }),
+      row(
+        button("cm_new", "Nouveau chatteur", "➕", ButtonStyle.Success),
+        ...altButton("cm_alt", { alt: st.alt, opts: pickOpts, chatters: act }),
+        button("cm_x", "Fermer", null, ButtonStyle.Secondary)
       ),
-      row(button("cm_new", "Nouveau chatteur", "➕", ButtonStyle.Success), button("cm_x", "Fermer", null, ButtonStyle.Secondary)),
     ],
   };
 }
@@ -189,9 +191,17 @@ async function handle(i) {
   await i.deferUpdate();
   if (id === "cm_new") Object.assign(st, { view: "edit", cid: null, orig: draftOf(null), d: draftOf(null) });
   else if (id.startsWith("cm_pick")) {
-    const c = (await appSync.appChatters(true)).find((x) => x.id === i.values[0]);
-    if (c) Object.assign(st, { view: "edit", cid: c.id, orig: draftOf(c), d: draftOf(c) });
-  } else if (id === "cm_back") st.view = "home";
+    const r = await picked(i, (await appSync.appChatters(true)).filter((x) => x.active), { why: "inactif" });
+    const uid = i.isUserSelectMenu?.() && i.values[0];
+    const u = uid && i.users?.get(uid);
+    if (r.c) Object.assign(st, { view: "edit", cid: r.c.id, orig: draftOf(r.c), d: draftOf(r.c) });
+    else if (u && !u.bot && !(await appSync.appChatters()).some((x) => x.discordId === uid)) {
+      // pas encore chatteur : on le crée, relié à ce compte
+      const name = cleanName(i.members?.get(uid)?.displayName || u.globalName || u.username);
+      ctx.remember?.(u, i.members?.get(uid));
+      Object.assign(st, { view: "edit", cid: null, orig: draftOf(null), d: { ...draftOf(null), uid, name }, note: `ℹ️ **${name}** n'est pas encore un chatteur de l'app : tu le crées, relié à son compte.` });
+    } else st.note = r.error;
+  } else if (id === "cm_alt") st.alt = !st.alt; else if (id === "cm_back") st.view = "home";
   else if (id === "cm_u") {
     const uid = i.values[0] || "";
     const u = uid && i.users?.get(uid);

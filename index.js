@@ -1031,7 +1031,7 @@ async function handleInteraction(i) {
     const cid = i.customId || "";
     if (cid.startsWith("cm_")) return chatters.handle(i);
     if (cid.startsWith("pn_")) return penalties.handle(i);
-    if (/^p[le]_/.test(cid)) return planEdit.handle(i);
+    if (/^p[leb]_/.test(cid)) return planEdit.handle(i);
     if (cid.startsWith("do_")) return dayoff.handle(i);
     if (cid.startsWith("vc_")) return voice.handle(i);
     if (cid.startsWith("g_")) return gestion.handle(i);
