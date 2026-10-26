@@ -106,4 +106,10 @@ function v2Messages(items, { color = null, rows = [] } = {}) {
   });
 }
 
-module.exports = { EPHEMERAL, EPHEMERAL_TTL, reply, done, showView, row, button, opt, chunk, selectMenus, fit, plS, v2Messages, ButtonStyle };
+// Un bout d'id neuf à chaque ouverture d'une fenêtre préremplie : Discord remet sinon le texte d'une fenêtre fermée
+// sans l'envoyer (même id), même si elle montre autre chose (✏️ Axelle affichait la liste d'Anna)
+const BOOT = Date.now().toString(36).slice(-4);
+let seq = 0;
+const fresh = () => `${BOOT}${(++seq).toString(36)}`;
+
+module.exports = { EPHEMERAL, EPHEMERAL_TTL, reply, done, showView, row, button, opt, chunk, selectMenus, fit, plS, v2Messages, fresh, ButtonStyle };

@@ -6,13 +6,13 @@
 // ➕ Ajouter un chatteur : la même fenêtre pour en créer un (Équipe dans l'app, et le planning déjà fait suit) ; elle
 // s'ouvre aussi quand on cherche quelqu'un qui n'est pas encore dans l'app (son nom et son compte déjà remplis).
 // Discord ne remplit pas une fenêtre déjà ouverte : le chatteur se choisit dans la barre, avant d'ouvrir sa fiche.
-// Custom ids : cf_save~date~créneau~chatterId (sa fiche), cf_new~date~créneau (nouveau chatteur).
+// Custom ids : cf_save~date~créneau~chatterId~n (sa fiche), cf_new~date~créneau~n (nouveau chatteur), n : ui.fresh()
 const { ModalBuilder, LabelBuilder, UserSelectMenuBuilder, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const planEdit = require("./planedit");
 const chatters = require("./chatters");
-const { reply, done, EPHEMERAL } = require("./ui");
+const { reply, done, fresh, EPHEMERAL } = require("./ui");
 const { SLOTS, withEmoji, boxList, boxLabel, dayLabel } = planning;
 const { tag, running, slotOf, midsOf } = planEdit.helpers;
 
@@ -57,7 +57,7 @@ async function openFiche(i, { date, slot, cid, uid }) {
   const accts = main ? [...(main.accts || [])] : [...(c.shift?.accts || [])];
   const slots = mine.length ? [...new Set(mine.map((s) => s.slot))] : [slot];
   const m = new ModalBuilder()
-    .setCustomId(`cf_save~${date}~${slot}~${cid}`)
+    .setCustomId(`cf_save~${date}~${slot}~${cid}~${fresh()}`)
     .setTitle(`👤 ${c.name} · ${shortDay(date)}`.slice(0, 45))
     .addLabelComponents(
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(d.cat, accts)),
@@ -94,7 +94,7 @@ async function openNew(i, { date, slot, uid, name: name0 }) {
   const name = new TextInputBuilder().setCustomId("name").setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60).setPlaceholder("Prénom ou pseudo, comme dans l'app");
   if (name0) name.setValue(name0);
   const m = new ModalBuilder()
-    .setCustomId(`cf_new~${date}~${slot}`)
+    .setCustomId(`cf_new~${date}~${slot}~${fresh()}`)
     .setTitle("➕ Nouveau chatteur")
     .addLabelComponents(
       label("Nom").setTextInputComponent(name),
