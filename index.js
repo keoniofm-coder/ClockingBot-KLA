@@ -308,7 +308,7 @@ const boxButton = (l, date, slot, mid, n) => button(`pm_mod~${date}~${slot}~${mi
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
 async function panelView(name, date) {
   const sh = SHIFTS[name];
-  const top = `# ${sh.emoji} Shift ${name} · ${sh.label}`;
+  const top = `## ${sh.emoji} Shift ${name} · ${sh.label}`;
   let items = null;
   if (appSync.enabled() && date)
     try {
@@ -334,7 +334,7 @@ function panelItems(b, top) {
       const p = byId[x.id] || { ...x.c, off: x.off };
       const k = stOf(p);
       if (k === "off") offs.push(whoOf(x.c));
-      else items.push({ text: `## ${ST[k].e} ${whoOf(x.c)}\n-# ${detail(p) || ST[k].l}`, button: boxButton(x.boxes, date, slot, g.mid, n++), cont: `${gh} (suite)` });
+      else items.push({ text: `### ${ST[k].e} ${whoOf(x.c)}\n-# ${detail(p) || ST[k].l}`, button: boxButton(x.boxes, date, slot, g.mid, n++), cont: `${gh} (suite)` });
     }
     if (offs.length) items.push({ text: `🏖️ Day off : ${offs.join(", ")}` });
   }
@@ -440,7 +440,7 @@ async function boxView(name, date) {
     const k = b.stOf(byId[x.id] || { ...x.c, off: x.off });
     return `${k === "off" ? "🏖️" : ST[k].e} ${whoOf(x.c)}`;
   };
-  const items = [{ text: `# 📦 Box · ${sh.emoji} ${name} · ${sh.label}\n-# ${planning.dayLabel(date)} · en direct, change tout seul 15 min avant chaque shift` }];
+  const items = [{ text: `## 📦 Box · ${sh.emoji} ${name} · ${sh.label}\n-# ${planning.dayLabel(date)} · en direct, change tout seul 15 min avant chaque shift` }];
   if (!groups.length) items.push({ text: "_Personne au planning sur ce shift._" });
   for (const g of groups) {
     const held = new Map(); // box -> chatteurs
@@ -451,10 +451,10 @@ async function boxView(name, date) {
     }
     const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter((k) => k !== "all").map(Number), 0);
     const lines = [`## ${planning.modelHead(g)}`];
-    if (held.has("all")) lines.push(`## ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
+    if (held.has("all")) lines.push(`### ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
     for (let k = 1; k <= n; k++) {
       const hs = held.get(String(k)) || [];
-      lines.push(`## ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
+      lines.push(`### ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
     }
     if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
     items.push({ sep: true }, { text: lines.join("\n") });
