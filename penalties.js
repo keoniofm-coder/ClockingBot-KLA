@@ -1,7 +1,8 @@
 // ================== PÉNALITÉS ==================
 // Le barème de l'agence, saisi à la main par un admin depuis le salon gestion (rien d'automatique avec le clocking).
 // Chaque pénalité est gardée dans l'app (penalties/<id>) et annoncée dans le salon pénalités :
-//   « @chatteur AVERTISSEMENT N°3 | Ne chatte pas pendant son shift » puis « Pénalité de -10 € »
+//   « 1. @chatteur (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | Erreur de chatting » puis « Pénalité ⛔ : -5 € sur le salaire »
+// (le 1. compte les pénalités du jour dans le salon ; le shift et la modèle sont ceux où il travaille)
 // Le numéro compte les fautes du même type ce mois-ci (il repart à 1 chaque mois). Montants en euros.
 // Les paies se font par quinzaine : le 16 et le 1er à 2 h, le récap de la quinzaine qui finit part dans le salon
 // (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
@@ -9,6 +10,7 @@
 // ✏️ Pénalité perso (hors barème) : le montant et la raison écrits à la main ; 📋 le récap de la quinzaine reste un menu (annuler une erreur, l'envoyer).
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
+const { withEmoji } = require("./planning");
 const { reply, done, showView, row, button, opt, plS, EPHEMERAL } = require("./ui");
 
 const PENALTY_CHANNEL_ID = (process.env.PENALTY_CHANNEL_ID ?? "1553910044204994601").trim();
@@ -78,11 +80,34 @@ const monthLabel = (m) => new Date(`${m}-01T12:00:00Z`).toLocaleDateString("fr-F
 const dayShort = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { day: "numeric", month: "short", timeZone: "UTC" });
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Le message du salon : « @chatteur AVERTISSEMENT N°3 | Ne chatte pas pendant son shift » + la pénalité
-const lineOf = (p) =>
-  [`<@${p.uid}> **AVERTISSEMENT N°${p.n}** | ${p.label}`, p.amount ? `Pénalité de **-${euros(p.amount)}**` : "", p.note ? `-# ${p.note}` : ""]
-    .filter(Boolean)
-    .join("\n");
+// Le message du salon : « 1. @Momo (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | Erreur de chatting », puis une ligne vide et
+// « Pénalité ⛔ : -5 € sur le salaire » quand il y a une pénalité (k : sa place parmi les pénalités du jour)
+const penTxt = (amount) => `Pénalité ⛔ : **-${euros(amount)}** sur le salaire`;
+const lineOf = (p) => {
+  const l = [`${p.k || 1}. <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${p.label}`];
+  if (p.amount) l.push("", penTxt(p.amount));
+  if (p.note) l.push(...(p.amount ? [] : [""]), `-# ${p.note}`);
+  return l.join("\n");
+};
+// « (Aprem)🍑 » : le shift où il est prévu en ce moment (sinon son premier du jour, sinon son shift habituel) et ses modèles
+const SLOT_L = { matin: "Matin", aprem: "Aprem", soir: "Soir", nuit: "Nuit" };
+async function whereOf(uid, c, date) {
+  if (!c) return "";
+  const hit = await appSync.plannedSlotAt(uid, [], Date.now()).catch(() => null);
+  const day = hit?.date || date;
+  const mine = (await appSync.planOf(day).catch(() => [])).filter((s) => s.chatterId === c.id);
+  const slot = hit?.slot || Object.keys(SLOT_L).find((k) => mine.some((s) => s.slot === k)) || appSync.habSlots(c.shift)[0];
+  if (!slot) return "";
+  const planned = mine.filter((s) => s.slot === slot).flatMap((s) => s.accts || []);
+  const accts = planned.length ? planned : c.shift?.accts || [];
+  const cat = await appSync.appCatalog().catch(() => null);
+  const marks = [...new Set(accts.map((k) => String(k).split("|")[0]))].map((mid) => {
+    const name = cat?.models?.[mid]?.name || "";
+    const w = withEmoji(name);
+    return w === name ? (name ? ` ${name}` : "") : w.slice(name.split(/\s/)[0].length).trim().split(/\s/)[0];
+  });
+  return `(${SLOT_L[slot]})${marks.join("")}`;
+}
 
 // ---------- Vues ----------
 const VIEWS = {
@@ -101,7 +126,7 @@ const VIEWS = {
         `⚠️ **Pénalités** · ${monthLabel(m)}`,
         "Choisis le chatteur et la faute : le numéro d'avertissement et la pénalité suivent le barème (le compteur repart à 1 chaque mois). Le message part dans le salon pénalités.",
         st.uid ? `Chatteur : <@${st.uid}> · ce mois-ci : ${list.length ? `${list.length} avertissement${plS(list.length)}${total ? `, -${euros(total)}` : ""}` : "rien"}` : "",
-        f ? `\n${f.e} **AVERTISSEMENT N°${n}** | ${f.l}\n${amount ? `Pénalité de **-${euros(amount)}**` : "_Avertissement seul, sans pénalité._"}` : "",
+        f ? `\n${f.e} **AVERTISSEMENT N°${n}** ⚠️ | ${f.l}\n${amount ? penTxt(amount) : "_Avertissement seul, sans pénalité._"}` : "",
       ].filter(Boolean).join("\n"),
       components: [
         row(new UserSelectMenuBuilder().setCustomId("pn_u").setPlaceholder("Le chatteur").setMinValues(1).setMaxValues(1)),
@@ -292,13 +317,15 @@ async function send(i, st, note) {
   const date = today(); // jour de paie (avant 2 h : la veille)
   const m = monthOf(date);
   // recalculé au moment d'envoyer (un autre admin a pu en mettre une entre-temps)
-  const n = (await appSync.penaltiesIn(m)).filter((p) => p.uid === st.uid && p.fault === f.k).length + 1;
+  const all = await appSync.penaltiesIn(m);
+  const n = all.filter((p) => p.uid === st.uid && p.fault === f.k).length + 1;
   const custom = f === PERSO ? st.custom : null;
   const c = await appSync.chatterOf(st.uid, [ctx.nameOf(st.uid)].filter(Boolean), false).catch(() => null);
   const p = {
     id: `${m}-${appSync.newId()}`, month: m, date, at: Date.now(), by: i.user.id,
     uid: st.uid, chatterId: c?.id || null, name: c?.name || ctx.nameOf(st.uid),
     fault: f.k, label: custom ? custom.label : f.l, n, amount: custom ? custom.amount : amountFor(f, n), currency: "EUR", note: note || "",
+    k: all.filter((x) => x.date === date).length + 1, where: await whereOf(st.uid, c, date).catch(() => ""),
   };
   let where = "";
   try {
@@ -311,7 +338,7 @@ async function send(i, st, note) {
     where = ` ⚠️ Message pas envoyé dans le salon pénalités : ${String(e.message).slice(0, 150)}`;
   }
   await appSync.addPenalty(p);
-  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}> **AVERTISSEMENT N°${p.n}** | ${p.label}${p.amount ? ` · -${euros(p.amount)}` : ""}` });
+  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${p.label}${p.amount ? ` · ⛔ -${euros(p.amount)}` : ""}` });
 }
 
 // ---------- Interactions pn_… ----------
@@ -358,7 +385,7 @@ async function handle(i) {
       if (p.msg)
         await ctx.client.channels
           .fetch(p.msg.channelId)
-          .then((ch) => ch.messages.edit(p.msg.id, { content: `~~${lineOf({ ...p, note: "" }).replace(/\n/g, "~~\n~~")}~~\n-# Annulée par <@${i.user.id}>`, allowedMentions: { parse: [] } }))
+          .then((ch) => ch.messages.edit(p.msg.id, { content: `${lineOf({ ...p, note: "" }).split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${i.user.id}>`, allowedMentions: { parse: [] } }))
           .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
       st.note = `🗑️ Annulée : ${p.name} N°${p.n} ${p.label}.`;
     }
