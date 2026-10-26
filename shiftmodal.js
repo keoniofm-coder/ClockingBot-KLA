@@ -9,7 +9,7 @@
 const { ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
-const { reply, row, button, EPHEMERAL } = require("./ui");
+const { reply, row, button, fresh, EPHEMERAL } = require("./ui");
 const { SLOTS, boxList, withEmoji, dayLabel } = planning;
 
 // Fourni par index.js : isAdmin(i), refresh(date)
@@ -51,7 +51,7 @@ function modalOf(D, date, slot, texts) {
   const sl = slotOf(slot);
   const one = D.mids.length === 1 && D.only;
   const title = one ? `✏️ ${withEmoji(D.mName(D.mids[0]))} · ${sl.l} ${shortDay(date)}` : `${sl.emoji} ${sl.l} · ${shortDay(date)}`;
-  const m = new ModalBuilder().setCustomId(`pm_save~${date}~${slot}`).setTitle(title.slice(0, 45));
+  const m = new ModalBuilder().setCustomId(`pm_save~${date}~${slot}~${fresh()}`).setTitle(title.slice(0, 45));
   for (const mid of D.mids) {
     const on = D.here.filter((s) => midsOf(s.accts).includes(mid));
     const people = [...new Set(on.map((s) => s.chatterId))]
@@ -255,7 +255,7 @@ async function applyTexts(date, slot, texts) {
 // ---------- Interactions pm_… ----------
 // pm_open~date~slot : la fenêtre ; pm_mod~date~slot~modèle~n : la fenêtre d'une seule modèle (salon box, box du
 // pointage) ; pm_pick~date (barre « ✏️ Modif par shift » sous le planning) ; pm_pickd (même barre, choix
-// « date|créneau ») ; pm_fix~date~slot : la rouvrir avec le texte envoyé ; pm_save~date~slot : la fenêtre envoyée
+// « date|créneau ») ; pm_fix~date~slot : la rouvrir avec le texte envoyé ; pm_save~date~slot~n : la fenêtre envoyée
 async function handle(i) {
   let [id, date, slot0] = i.customId.split("~");
   if (id === "pm_pickd") [date, slot0] = String(i.values?.[0] || "").split("|");
