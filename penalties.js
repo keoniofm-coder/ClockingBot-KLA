@@ -80,11 +80,16 @@ const monthLabel = (m) => new Date(`${m}-01T12:00:00Z`).toLocaleDateString("fr-F
 const dayShort = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { day: "numeric", month: "short", timeZone: "UTC" });
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Le message du salon : « 1. @Momo (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | Erreur de chatting », puis une ligne vide et
+// Le message du salon : « 1. @Momo (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | 💬 Erreur de chatting », puis une ligne vide et
 // « Pénalité ⛔ : -5 € sur le salaire » quand il y a une pénalité (k : sa place parmi les pénalités du jour)
 const penTxt = (amount) => `Pénalité ⛔ : **-${euros(amount)}** sur le salaire`;
+// la faute avec son emoji (celui du barème, ✏️ pour une pénalité perso)
+const faultTxt = (p) => {
+  const e = p.e ?? faultOf(p.fault)?.e;
+  return `${e ? `${e} ` : ""}${p.label}`;
+};
 const lineOf = (p) => {
-  const l = [`${p.k || 1}. <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${p.label}`];
+  const l = [`${p.k || 1}. <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}`];
   if (p.amount) l.push("", penTxt(p.amount));
   if (p.note) l.push(...(p.amount ? [] : [""]), `-# ${p.note}`);
   return l.join("\n");
@@ -126,7 +131,7 @@ const VIEWS = {
         `⚠️ **Pénalités** · ${monthLabel(m)}`,
         "Choisis le chatteur et la faute : le numéro d'avertissement et la pénalité suivent le barème (le compteur repart à 1 chaque mois). Le message part dans le salon pénalités.",
         st.uid ? `Chatteur : <@${st.uid}> · ce mois-ci : ${list.length ? `${list.length} avertissement${plS(list.length)}${total ? `, -${euros(total)}` : ""}` : "rien"}` : "",
-        f ? `\n${f.e} **AVERTISSEMENT N°${n}** ⚠️ | ${f.l}\n${amount ? penTxt(amount) : "_Avertissement seul, sans pénalité._"}` : "",
+        f ? `\n**AVERTISSEMENT N°${n}** ⚠️ | ${f.e} ${f.l}\n${amount ? penTxt(amount) : "_Avertissement seul, sans pénalité._"}` : "",
       ].filter(Boolean).join("\n"),
       components: [
         row(new UserSelectMenuBuilder().setCustomId("pn_u").setPlaceholder("Le chatteur").setMinValues(1).setMaxValues(1)),
@@ -324,7 +329,7 @@ async function send(i, st, note) {
   const p = {
     id: `${m}-${appSync.newId()}`, month: m, date, at: Date.now(), by: i.user.id,
     uid: st.uid, chatterId: c?.id || null, name: c?.name || ctx.nameOf(st.uid),
-    fault: f.k, label: custom ? custom.label : f.l, n, amount: custom ? custom.amount : amountFor(f, n), currency: "EUR", note: note || "",
+    fault: f.k, label: custom ? custom.label : f.l, e: f.e, n, amount: custom ? custom.amount : amountFor(f, n), currency: "EUR", note: note || "",
     k: all.filter((x) => x.date === date).length + 1, where: await whereOf(st.uid, c, date).catch(() => ""),
   };
   let where = "";
@@ -338,7 +343,7 @@ async function send(i, st, note) {
     where = ` ⚠️ Message pas envoyé dans le salon pénalités : ${String(e.message).slice(0, 150)}`;
   }
   await appSync.addPenalty(p);
-  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${p.label}${p.amount ? ` · ⛔ -${euros(p.amount)}` : ""}` });
+  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}${p.amount ? ` · ⛔ -${euros(p.amount)}` : ""}` });
 }
 
 // ---------- Interactions pn_… ----------
@@ -387,7 +392,7 @@ async function handle(i) {
           .fetch(p.msg.channelId)
           .then((ch) => ch.messages.edit(p.msg.id, { content: `${lineOf({ ...p, note: "" }).split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${i.user.id}>`, allowedMentions: { parse: [] } }))
           .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
-      st.note = `🗑️ Annulée : ${p.name} N°${p.n} ${p.label}.`;
+      st.note = `🗑️ Annulée : ${p.name} N°${p.n} ${faultTxt(p)}.`;
     }
     st.del = null;
   }
