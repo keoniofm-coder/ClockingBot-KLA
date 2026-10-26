@@ -46,9 +46,12 @@ async function loadShift(date, slot) {
 const boxesOf = (entries, mid) => boxList(entries.flatMap((s) => boxList(s.boxes?.[mid])));
 
 // ---------- La fenêtre ----------
+// Toutes les modèles du shift, ou une seule (bouton ✏️ d'une modèle sous le message du salon box, ou sa box au pointage)
 function modalOf(D, date, slot, texts) {
   const sl = slotOf(slot);
-  const m = new ModalBuilder().setCustomId(`pm_save~${date}~${slot}`).setTitle(`${sl.emoji} ${sl.l} · ${shortDay(date)}`.slice(0, 45));
+  const one = D.mids.length === 1 && D.only;
+  const title = one ? `✏️ ${withEmoji(D.mName(D.mids[0]))} · ${sl.l} ${shortDay(date)}` : `${sl.emoji} ${sl.l} · ${shortDay(date)}`;
+  const m = new ModalBuilder().setCustomId(`pm_save~${date}~${slot}`).setTitle(title.slice(0, 45));
   for (const mid of D.mids) {
     const on = D.here.filter((s) => midsOf(s.accts).includes(mid));
     const people = [...new Set(on.map((s) => s.chatterId))]
@@ -70,12 +73,14 @@ function modalOf(D, date, slot, texts) {
   }
   return m;
 }
-// Ouvre la fenêtre (Discord laisse 3 s : une seule lecture du planning)
-async function openModal(i, date, slot, texts) {
+// Ouvre la fenêtre (Discord laisse 3 s : une seule lecture du planning) ; only : les modèles à montrer
+async function openModal(i, date, slot, texts, only = null) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   if (!slotOf(slot) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return reply(i, { content: "Ce bouton a expiré." });
   const D = await loadShift(date, slot);
+  const pick = (only || []).filter((m) => D.cat.models[m]).slice(0, 5);
+  if (pick.length) Object.assign(D, { mids: pick, only: true });
   if (!D.mids.length) return reply(i, { content: "⚠️ Aucune modèle active dans l'app." });
   return i.showModal(modalOf(D, date, slot, texts));
 }
@@ -226,7 +231,7 @@ async function applyTexts(date, slot, texts) {
     if (top && top !== Number(D.day.nbox?.[`${slot}|${mid}`])) nbox[`${slot}|${mid}`] = top;
   }
   if (!Object.keys(patch).length && !Object.keys(nbox).length) return { lines: ["Rien n'a changé."] };
-  // shift en cours (ou qui commence dans les 2 h) : les changements sont annoncés dans le salon clocking
+  // shift en cours (ou qui commence dans les 2 h) : les changements sont annoncés dans le salon box
   const start = appSync.parisMs(date, appSync.START_OF[slot]);
   const live = Object.keys(patch).length > 0 && Date.now() >= start - 2 * 3600e3 && Date.now() < start + 6 * 3600e3;
   await appSync.writePlan(date, patch, nbox, { loud: live });
@@ -242,22 +247,28 @@ async function applyTexts(date, slot, texts) {
       boxed.length ? `📦 ${boxed.join(" · ")}` : "",
       n.length ? `📦 ${n.join(" · ")}` : "",
       ...warn,
-      live ? "📣 Annoncé dans le salon clocking." : "",
+      live ? "📣 Annoncé dans le salon box." : "",
     ].filter(Boolean),
   };
 }
 
 // ---------- Interactions pm_… ----------
-// pm_open~date~slot : la fenêtre ; pm_pick~date (barre « ✏️ Modif par shift » sous le planning) ; pm_pickd (même barre,
-// choix « date|créneau ») ; pm_fix~date~slot : la rouvrir avec le texte envoyé ; pm_save~date~slot : la fenêtre envoyée
+// pm_open~date~slot : la fenêtre ; pm_mod~date~slot~modèle~n : la fenêtre d'une seule modèle (salon box, box du
+// pointage) ; pm_pick~date (barre « ✏️ Modif par shift » sous le planning) ; pm_pickd (même barre, choix
+// « date|créneau ») ; pm_fix~date~slot : la rouvrir avec le texte envoyé ; pm_save~date~slot : la fenêtre envoyée
 async function handle(i) {
   let [id, date, slot0] = i.customId.split("~");
   if (id === "pm_pickd") [date, slot0] = String(i.values?.[0] || "").split("|");
   const slot = id === "pm_pick" ? i.values?.[0] : slot0;
   if (id === "pm_open" || id === "pm_pick" || id === "pm_pickd") return openModal(i, date, slot);
+  if (id === "pm_mod") {
+    const mid = i.customId.split("~")[3];
+    return openModal(i, date, slot, null, mid && mid !== "_" ? [mid] : null);
+  }
   if (id === "pm_fix") {
     const d = drafts.get(i.user.id);
-    return openModal(i, date, slot, d && d.date === date && d.slot === slot ? d.texts : null);
+    const texts = d && d.date === date && d.slot === slot ? d.texts : null;
+    return openModal(i, date, slot, texts, texts && Object.keys(texts).length === 1 ? Object.keys(texts) : null);
   }
   if (id !== "pm_save") return reply(i, { content: "Ce bouton a expiré." });
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });

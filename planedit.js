@@ -314,7 +314,6 @@ const VIEWS = {
         row(
           button("pe_add", "Ajouter", "➕", ButtonStyle.Success),
           button("pe_copy", "Copier un jour", "📋", ButtonStyle.Secondary),
-          button("pe_send", "Envoyer", "📣", ButtonStyle.Primary, !d.plan.length),
           closeBtn()
         ),
       ],
@@ -669,7 +668,7 @@ async function handle(i) {
   else if (act === "copy") Object.assign(st, { view: "copy", src: null, add: false });
   else if (act === "send") {
     const r = await ctx.postPlanning(st.date).catch((e) => ({ error: e.message }));
-    st.note = r?.error ? `⚠️ Pas envoyé : ${String(r.error).slice(0, 150)}` : `📣 Planning du ${dayLabel(st.date)} envoyé dans le salon planning (${r.count} chatteur${r.count > 1 ? "s" : ""}).`;
+    st.note = r?.error ? `⚠️ Pas envoyé : ${String(r.error).slice(0, 150)}` : "📦 Message du salon box renvoyé (le shift en cours).";
   } else if (act === "slot" || act === "acc") {
     const d = await load(st.date);
     const e = d.plan.find((s) => s.sid === st.sid);

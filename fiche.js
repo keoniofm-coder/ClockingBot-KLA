@@ -173,7 +173,7 @@ async function saveFiche(i, date, slot0, cid) {
     await appSync.writePlan(date, patch, {}, { loud });
     ctx.refresh?.(date);
     lines.unshift(slots.length ? `✅ ${tag(c)} · ${where(slots)} · ${whatOf(d, mids, shown)} · ${dayLabel(date)}` : `➖ ${tag(c)} n'est plus au planning du ${dayLabel(date)}.`);
-    if (loud) lines.push("📣 Annoncé dans le salon clocking.");
+    if (loud) lines.push("📣 Annoncé dans le salon box.");
   } else if (!lines.length) lines.push(`Rien n'a changé pour ${tag(c)}.`);
   return done(i, lines.join("\n"), 60000);
 }
