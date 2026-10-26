@@ -302,6 +302,9 @@ async function retireChatter(cid, from, { dry = false } = {}) {
   const offs = (await offsBetween(from, "9999-12-31")).filter((o) => o.chatterId === cid);
   if (!dry) {
     for (const o of offs) await delDoc("offs", o.id);
+    const tpl = await planTemplate();
+    const mine = Object.keys(tpl || {}).filter((sid) => tpl[sid].chatterId === cid);
+    if (mine.length) await mergeDoc("config", "planning", { shifts: Object.fromEntries(mine.map((sid) => [sid, null])), at: Date.now(), by: "discord" });
     await mergeDoc("chatters", cid, { active: false, shift: null });
     chattersCache.at = 0;
   }
@@ -403,7 +406,10 @@ async function saveChatter({ id, name, uid, shift }) {
 }
 // Met le planning déjà fait d'aujourd'hui à la fin de la semaine prochaine sur son shift habituel (comme l'app),
 // en gardant ses box sur les shifts et les modèles qui ne changent pas. Renvoie les jours modifiés.
+// Avec le planning habituel de l'app (config/planning), c'est lui qui change, et les jours déjà faits suivent.
 async function applyHabit(cid, shift, from) {
+  const tpl = await planTemplate();
+  if (tpl) return applyTemplate(cid, shift, from, tpl);
   const to = addDays(from, 13 - weekday(from));
   const [rows, offs] = await Promise.all([
     rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}&id=lte.${enc(to)}`),
@@ -433,6 +439,107 @@ async function applyHabit(cid, shift, from) {
     if (!Object.keys(patch).length) continue;
     await writePlan(d, patch);
     dates.push(d);
+  }
+  return dates;
+}
+// ---------- Planning habituel (config/planning) : le même tous les jours, fait dans l'app ----------
+// Même forme qu'un jour ({ shifts: { sid: { slot, chatterId, accts, boxes } } }). Les jours encore vides se
+// remplissent depuis lui (sans les inactifs ni les day off), chaque ligne gardant son id ; ce qu'on change sur
+// Discord ne touche que le jour concerné.
+async function planTemplate() {
+  const d = await getDoc("config", "planning");
+  return d ? Object.fromEntries(Object.entries(d.shifts || {}).filter(([, s]) => s && s.chatterId && s.slot)) : null;
+}
+const boxesOf = (v) => (Array.isArray(v) ? v : v ? [v] : []).map(String);
+// Ligne complète à écrire sur un jour : les box qu'il n'a plus sont effacées (l'écriture est fusionnée)
+const fullEntry = (a, cur) => {
+  const e = { slot: a.slot, chatterId: a.chatterId, accts: a.accts || [] };
+  const b = { ...(a.boxes || {}) };
+  for (const m of Object.keys(cur?.boxes || {})) if (!(m in b)) b[m] = null;
+  if (Object.keys(b).length) e.boxes = b;
+  return e;
+};
+// Remplit les jours encore vides depuis le planning habituel. Renvoie les jours remplis.
+async function fillDays(dates) {
+  const tpl = await planTemplate();
+  if (!tpl || !Object.keys(tpl).length || !dates.length) return [];
+  const [chatters, plans, offs] = await Promise.all([appChatters(true), plansBetween(dates[0], dates.at(-1)), offsBetween(dates[0], dates.at(-1))]);
+  const active = new Set(chatters.filter((c) => c.active).map((c) => c.id));
+  const done = [];
+  for (const date of dates) {
+    if ((plans[date] || []).length) continue;
+    const patch = {};
+    for (const [sid, s] of Object.entries(tpl))
+      if (active.has(s.chatterId) && !offs.some((o) => o.chatterId === s.chatterId && o.date === date)) patch[sid] = fullEntry(s);
+    if (!Object.keys(patch).length) continue;
+    await writePlan(date, patch);
+    done.push(date);
+  }
+  return done;
+}
+// Son shift habituel changé depuis Discord : ses lignes du planning habituel (box gardées sur les modèles qu'il
+// garde), puis les jours déjà faits. Renvoie les jours modifiés.
+async function applyTemplate(cid, shift, from, tpl) {
+  const slots = habSlots(shift);
+  const accts = shift?.accts || [];
+  const mids = midsOf(accts);
+  const cur = Object.entries(tpl).filter(([, s]) => s.chatterId === cid).map(([sid, s]) => ({ sid, ...s }));
+  const before = {};
+  const after = {};
+  for (const s of cur.filter((x) => !slots.includes(x.slot))) [before[s.sid], after[s.sid]] = [s, null];
+  for (const slot of slots) {
+    const old = cur.find((s) => s.slot === slot);
+    if (old && [...(old.accts || [])].sort().join() === [...accts].sort().join()) continue;
+    const boxes = Object.fromEntries(Object.entries(old?.boxes || {}).filter(([m, v]) => mids.includes(m) && boxesOf(v).length));
+    const sid = old ? old.sid : newId() + slot.slice(0, 1);
+    if (old) before[sid] = old;
+    after[sid] = { slot, chatterId: cid, accts, ...(Object.keys(boxes).length ? { boxes } : {}) };
+  }
+  if (!Object.keys(after).length) return [];
+  const patch = Object.fromEntries(Object.entries(after).map(([sid, a]) => [sid, a && fullEntry(a, before[sid])]));
+  await mergeDoc("config", "planning", { shifts: patch, at: Date.now(), by: "discord" }, { shifts: {} });
+  return spreadTemplate(after, before, from);
+}
+// Lignes changées du planning habituel reportées sur les jours déjà faits : les shifts pas encore commencés
+// d'aujourd'hui et les jours suivants (comme l'app). Une box donnée est retirée aux autres de ce shift.
+async function spreadTemplate(after, before, from) {
+  const now = Date.now();
+  const [rows, offs] = await Promise.all([rest("GET", `select=id,data&coll=eq.plan&id=gte.${enc(from)}`), offsBetween(from, "9999-12-31")]);
+  const dates = [];
+  for (const r of rows.sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    const date = r.id;
+    const day = planEntries(r.data);
+    if (!day.length) continue;
+    const patch = {};
+    const used = new Set();
+    const started = (slot) => now >= parisMs(date, START_OF[slot] ?? 0);
+    for (const [sid, a] of Object.entries(after)) {
+      const b = before[sid];
+      const cid = (a || b).chatterId;
+      if (offs.some((o) => o.chatterId === cid && o.date === date)) continue;
+      if ((b && started(b.slot)) || (a && started(a.slot))) continue;
+      const find = (sl) => day.find((s) => !used.has(s.sid) && s.chatterId === cid && s.slot === sl && !(s.sid !== sid && s.sid in after));
+      const cur = day.find((s) => s.sid === sid) || (b && find(b.slot)) || (a && find(a.slot));
+      if (cur) used.add(cur.sid);
+      if (!a) {
+        if (cur) patch[cur.sid] = null;
+        continue;
+      }
+      patch[cur ? cur.sid : sid] = fullEntry(a, cur);
+      for (const [m, v] of Object.entries(a.boxes || {})) {
+        const nums = boxesOf(v).filter((k) => k !== "all");
+        if (!nums.length) continue;
+        for (const x of day.filter((s) => s.slot === a.slot && s.chatterId !== cid && patch[s.sid] !== null)) {
+          const p = patch[x.sid];
+          const had = boxesOf(p?.boxes && m in p.boxes ? p.boxes[m] : x.boxes?.[m]);
+          const left = had.filter((k) => !nums.includes(k));
+          if (left.length < had.length) patch[x.sid] = { ...(p || {}), boxes: { ...(p?.boxes || {}), [m]: left.length ? left : null } };
+        }
+      }
+    }
+    if (!Object.keys(patch).length) continue;
+    await writePlan(date, patch);
+    dates.push(date);
   }
   return dates;
 }
@@ -695,7 +802,7 @@ module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
-  planningDay, planOf, plansBetween, writePlan, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
+  planningDay, planOf, plansBetween, writePlan, planTemplate, fillDays, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
   loadBotState, saveBotState, openClockIns,
   norm, parisParts, parisMs, addDays,

@@ -494,11 +494,41 @@ function ensureBoxBoard(t = Date.now()) {
     const name = shiftAt(t + 15 * 60e3);
     const key = `${appSync.shiftDay(appSync.SLOT_OF[name], t + 15 * 60e3).date}|${name}`;
     if (data.boxMsg?.key === key) return null;
+    // un shift à venir envoyé depuis l'app reste affiché jusqu'à son tour
+    if (data.boxMsg?.hold && t < data.boxMsg.hold) return null;
     return postBoxBoard(name, t);
   });
 }
 // Les anciens « Envoyer le planning » (bouton de l'app, menus) : renvoient le message du salon box
 const postPlanning = () => boxLock(() => postBoxBoard(shiftAt(Date.now() + 15 * 60e3)));
+// « Envoyer le shift » de l'app (shift choisi) : son panneau dans le salon clocking et ses box dans le salon box.
+// Un shift à venir reste dans le salon box jusqu'à son tour (15 min avant son début, comme d'habitude).
+async function postShift(date, slot) {
+  const name = SHIFT_OF_SLOT[slot];
+  if (!SHIFTS[name]) throw new Error(`Shift inconnu : ${slot}`);
+  const at = appSync.parisMs(date, SHIFTS[name].start) - 15 * 60e3;
+  await appSync.fillDays([date]);
+  await announceShift(name, at);
+  return boxLock(async () => {
+    const r = await postBoxBoard(name, at);
+    if (at > Date.now() && data.boxMsg) {
+      data.boxMsg.hold = at;
+      saveData();
+    }
+    return r;
+  });
+}
+// Jours encore vides (aujourd'hui, demain) remplis depuis le planning habituel de l'app
+async function fillAhead() {
+  if (!appSync.enabled()) return;
+  const d = appSync.parisParts(Date.now()).date;
+  try {
+    const l = await appSync.fillDays([d, appSync.addDays(d, 1)]);
+    if (l.length) console.log(`Planning rempli depuis le planning habituel : ${l.join(", ")}`);
+  } catch (e) {
+    console.error("Planning habituel :", e.message);
+  }
+}
 async function refreshBox(date) {
   const m = data.boxMsg;
   if (!m?.id || m.key.slice(0, 10) !== date || !SHIFTS[m.key.slice(11)]) return;
@@ -527,7 +557,8 @@ async function boxNote(payload) {
 // 15 min avant chaque shift (heure de Paris) : son panneau dans le salon clocking, son message dans le salon box
 for (const [name, sh] of Object.entries(SHIFTS)) {
   const hour = (sh.start - 1 + 24) % 24; // 15 min avant => hh-1:45
-  cron.schedule(`45 ${hour} * * *`, () => {
+  cron.schedule(`45 ${hour} * * *`, async () => {
+    await fillAhead();
     announceShift(name).catch((e) => console.error("Panneau du shift :", e.message));
     ensureBoxBoard().catch((e) => console.error("Salon box :", e.message));
   }, { timezone: TZ });
@@ -774,8 +805,8 @@ function dayChoices(query) {
   return hits.slice(0, 25);
 }
 
-// Demande d'envoi faite depuis l'app (bouton « Envoyer sur Discord » de Planning › Jour) : le salon box remplace le
-// planning, son message (shift en cours) est renvoyé
+// Demande d'envoi faite depuis l'app (bouton « Envoyer le shift » de Planning) : le shift choisi (panneau et box) ;
+// une ancienne demande sans shift renvoie le message du salon box (shift en cours)
 let polling = false;
 async function pollPost() {
   if (polling || !appSync.enabled()) return;
@@ -788,9 +819,9 @@ async function pollPost() {
         patch = { status: "error", error: "Demande trop ancienne (le bot était hors ligne) : renvoie-la." };
       else
         try {
-          const r = await postPlanning(req.date);
-          patch = { status: "done", doneAt: Date.now(), url: r.url, count: r.count };
-          console.log(`Planning du ${req.date} envoyé (demandé depuis l'app)`);
+          const r = req.slot ? await postShift(req.date, req.slot) : await postPlanning(req.date);
+          patch = { status: "done", doneAt: Date.now(), url: r?.url || "", count: r?.count || 0 };
+          console.log(`${req.slot ? `Shift ${req.slot}` : "Planning"} du ${req.date} envoyé (demandé depuis l'app)`);
         } catch (e) {
           patch = { status: "error", error: String(e.message || e).slice(0, 200) };
         }
@@ -891,6 +922,8 @@ client.once(Events.ClientReady, async () => {
     console.error("Liens Discord -> app :", e.message);
   }
   publishMembers();
+  await fillAhead();
+  cron.schedule("5 0 * * *", fillAhead, { timezone: TZ });
   await restoreSessions().catch((e) => console.error("Clock in en cours :", e.message));
   setTimeout(() => ensureCurrentPanel().catch((e) => console.error("Panneau du shift :", e.message)), 8000);
   cron.schedule("*/5 * * * *", sweep, { timezone: TZ });
@@ -1893,6 +1926,6 @@ async function finalizeClockOut(i, ventes) {
 if (require.main === module) restoreData().finally(() => client.login(TOKEN));
 // pour les tests
 module.exports = {
-  client, handleInteraction, postPlanning, restoreData, restoreSessions, refreshLive, announceShift, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
+  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
   parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };
