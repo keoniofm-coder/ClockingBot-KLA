@@ -1,5 +1,7 @@
 // ================== PETITS OUTILS DISCORD (partagés par tous les menus du bot) ==================
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, MessageFlags } = require("discord.js");
+const {
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, MessageFlags, ContainerBuilder, SectionBuilder, SeparatorBuilder, TextDisplayBuilder,
+} = require("discord.js");
 
 const EPHEMERAL_TTL = 25000; // 25 secondes
 const EPHEMERAL = MessageFlags.Ephemeral;
@@ -60,4 +62,48 @@ const fit = (lines, max = 1024) => {
 };
 const plS = (n) => (n > 1 ? "s" : "");
 
-module.exports = { EPHEMERAL, EPHEMERAL_TTL, reply, done, showView, row, button, opt, chunk, selectMenus, fit, plS, ButtonStyle };
+// ---------- Messages en grand (Components V2) ----------
+// Le texte s'affiche à la taille d'un message (plus gros qu'un embed), avec des titres # / ##, et une Section met un
+// bouton à droite de sa ligne : la colonne des box est alignée. Discord : 40 composants par message (ceux d'un
+// conteneur, d'une section ou d'une rangée comptent), 4000 caractères de texte. Au-delà, la suite part dans un
+// message de plus ; les rangées de boutons vont sous le dernier.
+// items : { text } | { sep: true } | { text, button } ; keep : reste avec ce qui suit (un titre ne finit pas un message) ;
+// cont : titre répété en haut du message suivant quand la liste y continue
+const V2_MAX = 40, V2_TEXT = 3900;
+function v2Messages(items, { color = null, rows = [] } = {}) {
+  const rowCost = rows.reduce((n, r) => n + 1 + r.components.length, 0);
+  const cap = V2_MAX - 1 - rowCost;
+  const cost = (it) => (it.button ? 3 : 1);
+  const pages = [];
+  let page = null, n = 0, chars = 0;
+  for (const it of items) {
+    const len = (it.text || "").length;
+    if (!page || (page.length && (n + cost(it) > cap || chars + len > V2_TEXT))) {
+      // un titre resté en bas du message part avec sa liste
+      const carry = [];
+      while (page && page.length > 1 && (page.at(-1).keep || page.at(-1).sep)) carry.unshift(page.pop());
+      page = carry.filter((x) => !x.sep);
+      pages.push(page);
+      n = page.reduce((a, x) => a + cost(x), 0);
+      chars = page.reduce((a, x) => a + (x.text || "").length, 0);
+      if (it.sep) continue;
+      if (it.cont && pages.length > 1 && !page.length) page.push({ text: it.cont }), (n += 1), (chars += it.cont.length);
+    }
+    page.push(it);
+    n += cost(it);
+    chars += len;
+  }
+  if (!pages.length) pages.push([{ text: "\u200b" }]);
+  return pages.map((items, k) => {
+    const box = new ContainerBuilder();
+    if (color != null) box.setAccentColor(color);
+    for (const it of items) {
+      if (it.sep) box.addSeparatorComponents(new SeparatorBuilder());
+      else if (it.button) box.addSectionComponents(new SectionBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(it.text)).setButtonAccessory(it.button));
+      else box.addTextDisplayComponents(new TextDisplayBuilder().setContent(it.text));
+    }
+    return { flags: MessageFlags.IsComponentsV2, components: [box, ...(k === pages.length - 1 ? rows : [])], allowedMentions: { parse: [] } };
+  });
+}
+
+module.exports = { EPHEMERAL, EPHEMERAL_TTL, reply, done, showView, row, button, opt, chunk, selectMenus, fit, plS, v2Messages, ButtonStyle };

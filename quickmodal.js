@@ -195,7 +195,7 @@ async function saveChange(i, date, slot0, mode) {
   const where = `${sl.emoji} ${sl.l} (${dayLabel(date)})`;
   const what = `${withEmoji(cat.models[mid]?.name || mid)}${bx && bx.length ? ` · ${boxLabel(bx)}` : bx ? " · sans box" : ""}`;
   const head = !e ? `💪🏼 ${tag(c)} ${mode === "ren" ? "en renfort" : "ajouté"} sur ${where} · ${what}` : gone.length ? `🔀 ${tag(c)} passe sur ${what} · ${where}` : `📦 ${tag(c)} · ${what} · ${where}`;
-  return done(i, `✅ ${head}.${taken.length ? ` ↪️ ${taken.join(", ")}.` : ""}${running(date, slot) ? "\n📣 Annoncé dans le salon clocking." : ""}`, 60000);
+  return done(i, `✅ ${head}.${taken.length ? ` ↪️ ${taken.join(", ")}.` : ""}${running(date, slot) ? "\n📣 Annoncé dans le salon box." : ""}`, 60000);
 }
 
 async function handle(i) {

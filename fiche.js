@@ -1,7 +1,8 @@
 // ================== 👤 LA FICHE D'UN CHATTEUR ==================
 // Sous le panneau du shift, la barre « 🔎 Modifs chatteurs » : on tape un nom, sa fiche s'ouvre, une fenêtre déjà
-// remplie avec ce qu'il a ce jour-là : ses modèles, ses box, son ou ses shifts et son compte Discord. On change ce qu'on
-// veut, tout est enregistré d'un coup dans le planning de l'app (et dans son shift habituel si on le demande).
+// remplie avec ce qu'il a ce jour-là : ses modèles, son ou ses shifts et son compte Discord (pas de box : elles se
+// donnent shift par shift, ✏️ Modif par shift). Tout est enregistré d'un coup dans le planning de l'app, pour ce jour-là
+// ou comme shift habituel.
 // ➕ Ajouter un chatteur : la même fenêtre pour en créer un (Équipe dans l'app, et le planning déjà fait suit) ; elle
 // s'ouvre aussi quand on cherche quelqu'un qui n'est pas encore dans l'app (son nom et son compte déjà remplis).
 // Discord ne remplit pas une fenêtre déjà ouverte : le chatteur se choisit dans la barre, avant d'ouvrir sa fiche.
@@ -11,8 +12,6 @@ const appSync = require("./app-sync");
 const planning = require("./planning");
 const planEdit = require("./planedit");
 const chatters = require("./chatters");
-const { parseLine } = require("./shiftmodal");
-const { boxesOf } = require("./quickmodal");
 const { reply, done, EPHEMERAL } = require("./ui");
 const { SLOTS, withEmoji, boxList, boxLabel, dayLabel } = planning;
 const { tag, running, slotOf, midsOf } = planEdit.helpers;
@@ -21,9 +20,7 @@ const ctx = {}; // isAdmin(i), refresh(date)
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
 const shortDay = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
-const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const sameSet = (a, b) => [...(a || [])].sort().join() === [...(b || [])].sort().join();
-const boxText = (l) => (l.includes("all") ? "all" : l.join(" "));
 const disabled = (i) =>
   !ctx.isAdmin(i) ? "⛔ Réservé aux admins." : !appSync.enabled() ? "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." : "";
 
@@ -39,10 +36,6 @@ const slotsPick = (chosen, min) =>
 const userPick = (uid) => {
   const m = new UserSelectMenuBuilder().setCustomId("uid").setRequired(false).setMinValues(0).setMaxValues(1).setPlaceholder("🔎 Tape son nom");
   return uid ? m.setDefaultUsers(uid) : m;
-};
-const boxInput = (value) => {
-  const t = new TextInputBuilder().setCustomId("box").setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(200).setPlaceholder("ex : 1 2");
-  return value ? t.setValue(value) : t;
 };
 
 // Le jour lu à temps pour ouvrir la fenêtre (Discord laisse 3 s), sinon le dernier lu
@@ -62,22 +55,18 @@ async function openFiche(i, { date, slot, cid, uid }) {
   const mine = d.plan.filter((s) => s.chatterId === cid);
   const main = mine.find((s) => s.slot === slot) || mine[0];
   const accts = main ? [...(main.accts || [])] : [...(c.shift?.accts || [])];
-  const mids = midsOf(accts);
-  const bx = (m) => boxList(main?.boxes?.[m]);
-  const boxes = mids.length === 1 ? boxText(bx(mids[0])) : mids.filter((m) => bx(m).length).map((m) => `${d.cat.models[m]?.name || m} ${boxText(bx(m))}`).join("\n");
   const slots = mine.length ? [...new Set(mine.map((s) => s.slot))] : [slot];
   const m = new ModalBuilder()
     .setCustomId(`cf_save~${date}~${slot}~${cid}`)
     .setTitle(`👤 ${c.name} · ${shortDay(date)}`.slice(0, 45))
     .addLabelComponents(
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(d.cat, accts)),
-      label("Box", "1 2 · all · vide = aucune · deux modèles : une ligne chacune (Anna 1 2)").setTextInputComponent(boxInput(boxes)),
-      label(`Shift(s) ce ${dayLabel(date)}`.slice(0, 45), "Deux = double shift · aucun = retiré du planning de ce jour").setStringSelectMenuComponent(slotsPick(slots, 0)),
+      label("Shift(s)", "Deux = double shift · aucun = retiré du planning de ce jour").setStringSelectMenuComponent(slotsPick(slots, 0)),
       label("Compte Discord", !c.discordId && uid ? "Pas encore relié : envoie pour relier ce compte" : undefined).setUserSelectMenuComponent(userPick(c.discordId || uid)),
-      label("Aussi les jours suivants ?").setStringSelectMenuComponent(
+      label("Pour un soir ou shift habituel ?").setStringSelectMenuComponent(
         new StringSelectMenuBuilder().setCustomId("keep").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(
-          { label: "Non, seulement ce jour-là", value: "day", emoji: "📅", default: true },
-          { label: "Oui : c'est son shift habituel", value: "habit", emoji: "🔁", description: "Modèles et shifts enregistrés dans Équipe, le planning à venir suit" }
+          { label: "Pour un soir", value: "day", emoji: "📅", description: `Seulement le ${dayLabel(date)}`.slice(0, 100), default: true },
+          { label: "Shift habituel", value: "habit", emoji: "🔁", description: "Enregistré dans Équipe, le planning à venir suit" }
         )
       )
     );
@@ -111,8 +100,7 @@ async function openNew(i, { date, slot, uid, name: name0 }) {
       label("Nom").setTextInputComponent(name),
       label("Compte Discord", "Pour qu'il puisse clock in").setUserSelectMenuComponent(userPick(uid)),
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(cat, [])),
-      label("Shift habituel", "Deux = double shift ; le planning déjà fait suit").setStringSelectMenuComponent(slotsPick([slot], 1)),
-      label(`Box ce ${dayLabel(date)}`.slice(0, 45), "S'il travaille ce shift-là : 1 2 · all · vide = aucune").setTextInputComponent(boxInput())
+      label("Shift habituel", "Deux = double shift ; le planning déjà fait suit").setStringSelectMenuComponent(slotsPick([slot], 1))
     );
   return i.showModal(m);
 }
@@ -126,44 +114,6 @@ const field = (i, fn, id) => {
   }
 };
 const vals = (i, id) => field(i, "getStringSelectValues", id) || [];
-// Box écrites pour ses modèles : « 1 2 » (une modèle) ou une ligne par modèle « Anna 1 2 » ; vide = aucune
-// -> { mid: [box] } ou { error }
-function boxesFor(text, mids, mName) {
-  const out = Object.fromEntries(mids.map((m) => [m, []]));
-  const lines = String(text || "").split(/\n|\/|;/).map((s) => s.trim()).filter(Boolean);
-  for (const line of lines) {
-    const plain = boxesOf(line);
-    if (!plain?.error) {
-      if (mids.length !== 1) return { error: `« ${line} » : écris la modèle devant ses box (ex : ${mName(mids[0]) || "Anna"} 1 2).` };
-      out[mids[0]] = plain || [];
-      continue;
-    }
-    const { name, boxes } = parseLine(line);
-    const n = norm(name);
-    const mid = n && mids.find((m) => norm(mName(m)).startsWith(n));
-    if (!mid) return { error: `« ${line} » : ${name || "?"} n'est pas une de ses modèles (${mids.map(mName).join(", ")}).` };
-    const b = boxesOf(boxes.join(" ") || "0");
-    if (b?.error) return { error: `« ${line} » : écris des numéros de 1 à 15, all, ou 0 pour aucune.` };
-    out[mid] = b || [];
-  }
-  return { boxes: out };
-}
-const modelName = (cat) => (m) => cat.models[m]?.name || m;
-
-// Ses box sur un shift : retirées à ceux du même shift et de la même modèle qui les avaient ; nombre de box du
-// shift monté si on écrit une box au-delà
-function putBoxes(d, slot, sid, e, bx, patch, nbox) {
-  const taken = [];
-  const boxes = {};
-  for (const [m, l] of Object.entries(bx)) {
-    if (l.join() === boxList(e?.boxes?.[m]).join()) continue;
-    boxes[m] = l.length ? l : null;
-    if (l.length) taken.push(...planEdit.takeBoxes(d, slot, m, l, [sid], patch));
-    const top = Math.max(0, ...l.filter((b) => b !== "all").map(Number));
-    if (top > (Number(d.nbox?.[`${slot}|${m}`]) || 0)) nbox[`${slot}|${m}`] = top;
-  }
-  return { boxes, taken };
-}
 const where = (slots) => slots.map((k) => `${slotOf(k).emoji} ${slotOf(k).l}`).join(" + ");
 const whatOf = (d, mids, bx) => mids.map((m) => `**${(d.cat.models[m]?.name ? withEmoji(d.cat.models[m].name) : m).toLocaleUpperCase("fr")}**${bx?.[m]?.length ? ` · ${boxLabel(bx[m])}` : ""}`).join(" · ");
 
@@ -178,8 +128,6 @@ async function saveFiche(i, date, slot0, cid) {
   const c = d.byId[cid];
   if (!c) return done(i, "⚠️ Ce chatteur n'est plus dans l'app.", 60000);
   const mids = midsOf(accts);
-  const bx = boxesFor(field(i, "getTextInputValue", "box"), mids, modelName(d.cat));
-  if (bx.error) return done(i, `⚠️ Rien n'est changé : ${bx.error}`, 60000);
   if (!accts.length && slots.length) return done(i, "⚠️ Rien n'est changé : choisis au moins une modèle.", 60000);
   if (slots.length && d.off.has(cid)) return done(i, `⛔ Rien n'est changé : ${tag(c)} est en day off ce ${dayLabel(date)}.`, 60000);
   if (u?.bot) return done(i, "⚠️ Rien n'est changé : choisis un chatteur, pas un bot.", 60000);
@@ -195,10 +143,11 @@ async function saveFiche(i, date, slot0, cid) {
     if (keep) lines.push(`🔁 Shift habituel enregistré (Équipe) : ${where(slots)} · ${whatOf(d, mids)}${r.days ? ` · 📅 planning à venir mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}.`);
     if (keep) d = await planEdit.actions.load(date);
   }
-  // ce jour-là : ses shifts, ses modèles, ses box (sur le shift du panneau, sinon son premier shift)
+  // ce jour-là : ses shifts et ses modèles ; ses box restent (celles d'une modèle qu'il n'a plus partent), elles se
+  // donnent shift par shift dans ✏️ Modif par shift
   const mine = d.plan.filter((s) => s.chatterId === cid);
   const main = slots.includes(slot0) ? slot0 : slots[0];
-  const patch = {}, nbox = {}, taken = [];
+  const patch = {};
   const kept = new Set();
   for (const s of mine) {
     if (!slots.includes(s.slot) || kept.has(s.slot)) patch[s.sid] = null;
@@ -206,37 +155,31 @@ async function saveFiche(i, date, slot0, cid) {
   }
   for (const sl of slots) {
     const e = mine.find((s) => s.slot === sl && patch[s.sid] !== null);
-    const sid = e?.sid || appSync.newId();
-    const gone = e ? midsOf(e.accts).filter((m) => !mids.includes(m) && e.boxes?.[m]) : [];
-    const r = sl === main ? putBoxes(d, sl, sid, e, bx.boxes, patch, nbox) : { boxes: {}, taken: [] };
-    taken.push(...r.taken);
-    const boxes = { ...Object.fromEntries(gone.map((m) => [m, null])), ...r.boxes };
-    if (e) {
-      const p = {};
-      if (!sameSet(e.accts, accts)) p.accts = accts;
-      if (Object.keys(boxes).length) Object.assign(p, { boxes }, e.held ? { held: null } : {});
-      if (Object.keys(p).length) planEdit.addPatch(patch, sid, p);
-    } else {
-      const b = Object.fromEntries(Object.entries(boxes).filter(([, v]) => v));
-      planEdit.addPatch(patch, sid, { slot: sl, chatterId: cid, accts, ...(Object.keys(b).length ? { boxes: b } : {}) });
+    if (!e) {
+      planEdit.addPatch(patch, appSync.newId(), { slot: sl, chatterId: cid, accts });
+      continue;
     }
+    const gone = midsOf(e.accts).filter((m) => !mids.includes(m) && e.boxes?.[m]);
+    const p = {};
+    if (!sameSet(e.accts, accts)) p.accts = accts;
+    if (gone.length) p.boxes = Object.fromEntries(gone.map((m) => [m, null]));
+    if (Object.keys(p).length) planEdit.addPatch(patch, e.sid, p);
   }
+  const cur = mine.find((s) => s.slot === main && patch[s.sid] !== null);
+  const shown = Object.fromEntries(mids.map((m) => [m, boxList(cur?.boxes?.[m])]));
   const touched = [...new Set([...slots, ...mine.map((s) => s.slot)])];
   const loud = touched.some((sl) => running(date, sl));
-  if (Object.keys(patch).length || Object.keys(nbox).length) {
-    await appSync.writePlan(date, patch, nbox, { loud });
+  if (Object.keys(patch).length) {
+    await appSync.writePlan(date, patch, {}, { loud });
     ctx.refresh?.(date);
-    lines.unshift(
-      slots.length ? `✅ ${tag(c)} · ${where(slots)} · ${whatOf(d, mids, bx.boxes)} · ${dayLabel(date)}` : `➖ ${tag(c)} n'est plus au planning du ${dayLabel(date)}.`,
-      ...(taken.length ? [`↪️ ${taken.join(", ")}.`] : [])
-    );
-    if (loud) lines.push("📣 Annoncé dans le salon clocking.");
+    lines.unshift(slots.length ? `✅ ${tag(c)} · ${where(slots)} · ${whatOf(d, mids, shown)} · ${dayLabel(date)}` : `➖ ${tag(c)} n'est plus au planning du ${dayLabel(date)}.`);
+    if (loud) lines.push("📣 Annoncé dans le salon box.");
   } else if (!lines.length) lines.push(`Rien n'a changé pour ${tag(c)}.`);
   return done(i, lines.join("\n"), 60000);
 }
 
 // ---------- Enregistrer un nouveau chatteur ----------
-async function saveNew(i, date, slot0) {
+async function saveNew(i) {
   await i.deferReply({ flags: EPHEMERAL });
   const name = chatters.cleanName(field(i, "getTextInputValue", "name"));
   const u = field(i, "getSelectedUsers", "uid")?.first?.();
@@ -244,13 +187,11 @@ async function saveNew(i, date, slot0) {
   const slots = appSync.habSlots({ slots: vals(i, "slots") });
   const cat = await appSync.appCatalog();
   const mids = midsOf(accts);
-  const bx = boxesFor(field(i, "getTextInputValue", "box"), mids, modelName(cat));
   const errors = [
     !name && "écris son nom.",
     u?.bot && "choisis un chatteur, pas un bot.",
     !accts.length && "choisis au moins une modèle.",
     !slots.length && "choisis son shift.",
-    bx.error,
   ].filter(Boolean);
   if (errors.length) return done(i, `⚠️ Rien n'est créé : ${errors.join(" ")}`, 60000);
   const linked = u && (await appSync.appChatters(true)).find((x) => x.discordId === u.id);
@@ -261,29 +202,11 @@ async function saveNew(i, date, slot0) {
   if (r.exists && u && !r.exists.discordId) {
     // il était déjà dans l'app sans compte Discord : on relie juste ce compte
     await appSync.linkDiscord(u.id, r.exists.id);
-    return done(i, `🔗 **${r.exists.name}** était déjà dans l'app : relié à <@${u.id}>. Le reste (shifts, modèles, box) se change dans sa fiche : 🔎 Modifs chatteurs.`, 60000);
+    return done(i, `🔗 **${r.exists.name}** était déjà dans l'app : relié à <@${u.id}>. Le reste (shifts, modèles) se change dans sa fiche : 🔎 Modifs chatteurs.`, 60000);
   }
   if (r.exists) return done(i, `⚠️ Rien n'est créé : **${r.exists.name}** existe déjà dans l'app. Cherche-le dans 🔎 Modifs chatteurs${r.exists.discordId ? "" : " (👤 Pas sur Discord)"}.`, 60000);
   if (!r.ok) return done(i, r.note, 60000);
-  const lines = [`➕ **${name}** créé dans l'app (Équipe) : ${where(slots)} · ${whatOf({ cat }, mids)}${u ? ` · relié à <@${u.id}>` : " · pas relié à Discord"}${r.days ? ` · 📅 planning déjà fait mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}.`];
-  // ses box ce jour-là, s'il est au planning du shift (le planning déjà fait vient de le mettre sur son shift)
-  const want = Object.values(bx.boxes).some((l) => l.length);
-  if (want) {
-    const d = await planEdit.actions.load(date);
-    const main = slots.includes(slot0) ? slot0 : slots[0];
-    const e = d.plan.find((s) => s.chatterId === r.id && s.slot === main);
-    if (!e) lines.push(`ℹ️ Il n'est pas au planning du ${slotOf(main).emoji} ${slotOf(main).l} ce ${dayLabel(date)} : box pas mises.`);
-    else {
-      const patch = {}, nbox = {};
-      const p = putBoxes(d, main, e.sid, e, bx.boxes, patch, nbox);
-      planEdit.addPatch(patch, e.sid, { boxes: p.boxes });
-      const loud = running(date, main);
-      await appSync.writePlan(date, patch, nbox, { loud });
-      ctx.refresh?.(date);
-      lines.push(`📦 ${where([main])} · ${whatOf(d, mids, bx.boxes)}${p.taken.length ? ` · ↪️ ${p.taken.join(", ")}` : ""}${loud ? "\n📣 Annoncé dans le salon clocking." : ""}`);
-    }
-  }
-  return done(i, lines.join("\n"), 60000);
+  return done(i, `➕ **${name}** créé dans l'app (Équipe) : ${where(slots)} · ${whatOf({ cat }, mids)}${u ? ` · relié à <@${u.id}>` : " · pas relié à Discord"}${r.days ? ` · 📅 planning déjà fait mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}.\n-# Ses box se donnent shift par shift : ✏️ Modif par shift.`, 60000);
 }
 
 async function handle(i) {
@@ -291,8 +214,8 @@ async function handle(i) {
   const no = disabled(i);
   if (no) return reply(i, { content: no });
   if (id === "cf_save" && cid) return saveFiche(i, date, slot, cid);
-  if (id === "cf_new") return saveNew(i, date, slot);
+  if (id === "cf_new") return saveNew(i);
   return reply(i, { content: "Cette fenêtre a expiré." });
 }
 
-module.exports = { ctx, handle, openFiche, openNew, openFor, boxesFor };
+module.exports = { ctx, handle, openFiche, openNew, openFor };

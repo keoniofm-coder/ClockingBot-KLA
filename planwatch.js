@@ -1,6 +1,6 @@
 // ================== CHANGEMENTS FAITS DEPUIS L'APP ==================
 // Sur un shift en cours (ou qui commence dans les 2 h), un changement fait dans l'app (box, modèle, chatteur
-// ajouté ou retiré) est annoncé dans le salon clocking, comme ceux faits depuis Discord.
+// ajouté ou retiré) est annoncé dans le salon box, comme ceux faits depuis Discord.
 // Le planning de ces jours-là est relu toutes les 10 s et comparé à la lecture d'avant. Un changement est
 // annoncé quand plus rien ne bouge sur ce jour d'une lecture à l'autre (ou au bout de 45 s) : changer un
 // chatteur de modèle puis choisir ses box, ou en changer plusieurs à la suite, fait un seul message. Ce que le bot écrit lui-même n'est pas annoncé une deuxième fois (l'action qui

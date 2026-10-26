@@ -1,8 +1,8 @@
-// ================== LES BOUTONS DES ADMINS (sous le panneau du shift, salon clocking) ==================
-// Un bouton par sujet, à la place des commandes « / », sous le pointage du shift dans le salon clocking.
-// Presque tout s'ouvre en petite fiche (une fenêtre Discord) : 🔎 la fiche d'un chatteur (barre de recherche du haut),
+// ================== LES BOUTONS DES ADMINS (🛠️ Admin sous le message du salon box) ==================
+// Dans le salon clocking, les chatteurs ne voient que Clock In / Clock Out. 🛠️ Admin, sous le message du salon box, ouvre
+// pour l'admin seul (Discord ne cache pas un bouton d'un message public) la barre de recherche et un bouton par sujet. Presque tout s'ouvre en petite fiche (une fenêtre Discord) : 🔎 la fiche d'un chatteur (barre de recherche du haut),
 // ➕ Ajouter un chatteur, ✏️ Modifier le shift, 💪🏼 Renfort, ⚡ Coupure, 🔙 Retour de coupure, ⚠️ Pénalités, 💃 Modèles,
-// 🛡️ Admins, 📣 Envoyer le planning, 🔔 Renvoyer le panneau, 🚫 Virer. 📋 Pointer reste un menu visible seulement par
+// 🛡️ Admins, 🔔 Renvoyer le panneau, 🚫 Virer. 📋 Pointer reste un menu visible seulement par
 // l'admin qui a cliqué (un seul à la fois, voir menus.js). Les commandes restent en secours.
 // L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
 const { StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
@@ -66,7 +66,7 @@ function panelView(live) {
     allowedMentions: { parse: [] },
   };
 }
-// Sous le panneau d'un shift (salon clocking) : d'abord la barre 🔎 Modifs chatteurs (on tape un nom, sa fiche
+// 🛠️ Admin (sous le message du salon box) : d'abord la barre 🔎 Modifs chatteurs (on tape un nom, sa fiche
 // s'ouvre), puis les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement ; ✏️ ouvre la fenêtre pour
 // modifier tout le shift d'un coup (shiftmodal.js). unlinked : nombre de chatteurs de l'app pas reliés à Discord.
 let whoN = 0; // change l'id de la barre après chaque choix : Discord la remet à zéro (sinon le même nom ne se rechoisit pas)
@@ -90,7 +90,6 @@ function panelRows(date, slot, { unlinked = 0 } = {}) {
     row(
       button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary),
       button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary),
-      button("g_send", "Envoyer le planning", "📣", ButtonStyle.Secondary),
       button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
       button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary)
     ),
@@ -394,19 +393,24 @@ async function handle(i) {
   const [id, pDate, pSlot] = i.customId.split("~");
   const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
   const cur = pinned || ctx.currentShift();
-  const needApp = ["g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
+  const needApp = ["g_menu", "g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
   switch (id) {
-    // 🔎 Modifs chatteurs : on tape un nom, sa fiche s'ouvre (pas encore dans l'app : ➕ sa fiche de nouveau chatteur) ;
-    // puis la barre est remise à zéro
+    // 🛠️ Admin : la gestion du shift de ce panneau, dans un message que l'admin est seul à voir
+    case "g_menu": {
+      const list = await quick(appSync.appChatters());
+      const unlinked = (list || []).filter((c) => c.active && !c.discordId).length;
+      const s = ctx.SHIFTS[cur.name];
+      return reply(i, { content: `🛠️ **Admin · ${s?.emoji || ""} ${cur.name} · ${planning.dayLabel(cur.date)}**`, components: panelRows(cur.date, appSync.SLOT_OF[cur.name], { unlinked }) }, false);
+    }
+    // 🔎 Modifs chatteurs : on tape un nom, sa fiche s'ouvre (pas encore dans l'app : ➕ sa fiche de nouveau chatteur)
     case "g_find": {
       const at = { date: cur.date, slot: appSync.SLOT_OF[cur.name] };
       const uid = i.values?.[0];
       const u = i.users?.get(uid);
       whoN = (whoN + 1) % 1000;
-      setTimeout(() => ctx.refreshPanels?.(cur.date), 1500);
       if (u?.bot) return reply(i, { content: "❌ Choisis un chatteur, pas un bot." });
       return ctx.modals.find(i, { ...at, uid, user: u, member: i.members?.get(uid) });
     }
@@ -457,7 +461,12 @@ async function handle(i) {
       if (!list.length) return reply(i, { content: "🔙 Personne n'est en coupure en ce moment." });
       return i.showModal(FICHES.back(list));
     }
-    case "g_send": return i.showModal(FICHES.send());
+    // l'ancien « Envoyer le planning » (anciens messages) : le salon box le remplace, son message est renvoyé
+    case "g_send": {
+      await i.deferReply({ flags: EPHEMERAL });
+      const r = await ctx.postPlanning();
+      return done(i, r?.url ? `✅ Message du salon box renvoyé : ${r.url}` : "⚠️ Lien avec l'app désactivé.", 60000);
+    }
     case "g_shift": return i.showModal(FICHES.shift(ctx.currentShift().name));
     case "g_fire": {
       const targets = await quick(ctx.fireTargets());
@@ -479,7 +488,7 @@ async function handle(i) {
       if (!date) return reply(i, { content: "Choisis le jour." });
       await i.deferReply({ flags: EPHEMERAL });
       const r = await ctx.postPlanning(date);
-      return done(i, `✅ Planning du ${planning.dayLabel(date)} envoyé (${r.count} chatteur${r.count > 1 ? "s" : ""}) : ${r.url}`, 60000);
+      return done(i, `✅ Message du salon box renvoyé : ${r?.url}`, 60000);
     }
     case "g_shiftm": {
       const name = vals(i, "shift")[0];
@@ -549,7 +558,7 @@ async function handle(i) {
       return done(i, `✅ Panneau du shift **${i.values[0]}** envoyé dans le salon clocking.`);
     }
     const r = await ctx.postPlanning(i.values[0]);
-    return done(i, `✅ Planning du ${planning.dayLabel(i.values[0])} envoyé (${r.count} chatteur${r.count > 1 ? "s" : ""}) : ${r.url}`, 60000);
+    return done(i, `✅ Message du salon box renvoyé : ${r?.url}`, 60000);
   }
   if (id === "g_fok") {
     const t = (await ctx.fireTargets()).find((x) => x.value === st.target);
