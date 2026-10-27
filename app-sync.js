@@ -317,7 +317,7 @@ async function openCoupures(t = Date.now()) {
   const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
   const open = days
     .flatMap((m, k) => Object.values(m).map((x) => ({ ...x, date: addDays(today, k - 1) })))
-    .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId])
+    .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId] && !(t >= shiftEnd(m.date, m.slot)))
     .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot, date: m.date }))
     .sort((a, b) => a.since - b.since);
   // une seule ligne par chatteur : sa coupure la plus récente, celle que 🔙 termine (une d'hier jamais terminée
@@ -691,13 +691,33 @@ async function endCoupure({ uid, cid, names, t = Date.now() }) {
   const found = [];
   for (const date of [addDays(today, -1), today])
     for (const [key, m] of Object.entries(await readMarks(date)))
-      if (m?.chatterId === c.id && m.status === "coupure" && m.cutAt && !m.cutEnd && m.cutAt <= t) found.push({ date, key, m });
+      if (m?.chatterId === c.id && m.status === "coupure" && m.cutAt && !m.cutEnd && m.cutAt <= t && !(t >= shiftEnd(date, m.slot))) found.push({ date, key, m });
   const cur = found.sort((a, b) => b.m.cutAt - a.m.cutAt)[0];
   if (!cur) return { chatterId: c.id, name: c.name, discordId: c.discordId, notCut: true };
   const took = Math.max(1, Math.round((t - cur.m.cutAt) / 60000));
   const total = (Number(cur.m.cutDone) || 0) + took;
   await writeMark(cur.date, cur.key, { min: total, cutDone: total, cutEnd: t, at: t });
   return { chatterId: c.id, name: c.name, discordId: c.discordId, date: cur.date, slot: cur.m.slot, key: cur.key, took, total, since: cur.m.cutAt };
+}
+
+// Coupure sans retour à la fin du shift : il n'a pas pu revenir. Elle est fermée à l'heure de fin du shift et
+// comptée jusque-là (comme un retard), noBack : pas de retour.
+const shiftEnd = (date, slot) => (START_OF[slot] == null ? Infinity : parisMs(date, START_OF[slot]) + 6 * 3600e3);
+async function closeStaleCoupures(now = Date.now()) {
+  if (!enabled()) return [];
+  const today = parisParts(now).date;
+  const done = [];
+  for (const date of [addDays(today, -2), addDays(today, -1), today])
+    for (const [key, m] of Object.entries(await readMarks(date))) {
+      if (m?.status !== "coupure" || !m.cutAt || m.cutEnd) continue;
+      const end = shiftEnd(date, m.slot);
+      if (now < end) continue;
+      const took = Math.max(1, Math.round((Math.max(end, m.cutAt) - m.cutAt) / 60000));
+      const total = (Number(m.cutDone) || 0) + took;
+      await writeMark(date, key, { min: total, cutDone: total, cutEnd: Math.max(end, m.cutAt), noBack: true, at: now });
+      done.push({ date, slot: m.slot, chatterId: m.chatterId, took, total });
+    }
+  return done;
 }
 
 // Pointage posé à la main par un admin depuis Discord (comme dans l'app : jamais écrasé par le bot)
@@ -804,7 +824,7 @@ async function finishPost(req, patch) {
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
-  onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, setMark, slotStaff, lateness, shiftDay,
+  onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, closeStaleCoupures, shiftEnd, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, plansBetween, writePlan, planTemplate, fillDays, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
   loadBotState, saveBotState, openClockIns,
