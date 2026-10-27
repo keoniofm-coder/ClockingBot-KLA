@@ -67,8 +67,8 @@ function panelView(live) {
   };
 }
 // 🛠️ Admin (sous le message du salon box) : d'abord la barre 🔎 Modifs chatteurs (on tape un nom, sa fiche
-// s'ouvre), puis les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement ; ✏️ ouvre la fenêtre pour
-// modifier tout le shift d'un coup (shiftmodal.js). unlinked : nombre de chatteurs de l'app pas reliés à Discord.
+// s'ouvre), puis les boutons ; ceux qui portent ce shift (~date~créneau) le visent directement (✏️ Modifier le shift est
+// sous le message du salon box, à côté de Clock In / Clock Out). unlinked : nombre de chatteurs de l'app pas reliés à Discord.
 let whoN = 0; // change l'id de la barre après chaque choix : Discord la remet à zéro (sinon le même nom ne se rechoisit pas)
 function panelRows(date, slot, { unlinked = 0 } = {}) {
   const c = (id) => `${id}~${date}~${slot}`;
@@ -81,7 +81,6 @@ function panelRows(date, slot, { unlinked = 0 } = {}) {
         .setMaxValues(1)
     ),
     row(
-      button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary),
       button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
       button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
       button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),

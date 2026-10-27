@@ -8,7 +8,8 @@
 // (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
 // ⚠️ Pénalités (sous le panneau du shift) ouvre une petite fiche : le chatteur (recherche), la faute, et pour une pénalité
 // ✏️ Pénalité perso (hors barème) : le montant et la raison écrits à la main ; 📋 le récap de la quinzaine reste un menu (annuler une erreur, l'envoyer).
-const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+// 🗑️ sous chaque pénalité du salon (admins) : l'annuler sur place, en deux clics (le message reste, barré).
+const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const { withEmoji } = require("./planning");
 const { reply, done, showView, row, button, opt, plS, EPHEMERAL } = require("./ui");
@@ -94,6 +95,8 @@ const lineOf = (p) => {
   if (p.note) l.push(...(p.amount ? [] : [""]), `-# ${p.note}`);
   return l.join("\n");
 };
+// le bouton 🗑️ sous la pénalité (réservé aux admins au clic)
+const rmRow = (p) => row(new ButtonBuilder().setCustomId(`pn_rm~${p.id}`).setEmoji("🗑️").setStyle(ButtonStyle.Secondary));
 // « (Aprem)🍑 » : le shift où il est prévu en ce moment (sinon son premier du jour, sinon son shift habituel) et ses modèles
 const SLOT_L = { matin: "Matin", aprem: "Aprem", soir: "Soir", nuit: "Nuit" };
 async function whereOf(uid, c, date) {
@@ -335,7 +338,7 @@ async function send(i, st, note) {
   let where = "";
   try {
     const ch = await ctx.client.channels.fetch(PENALTY_CHANNEL_ID);
-    const msg = await ch.send({ content: lineOf(p), allowedMentions: { users: [p.uid] } });
+    const msg = await ch.send({ content: lineOf(p), components: [rmRow(p)], allowedMentions: { users: [p.uid] } });
     p.msg = { channelId: ch.id, id: msg.id };
     where = ` dans <#${ch.id}>`;
   } catch (e) {
@@ -346,10 +349,56 @@ async function send(i, st, note) {
   Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}${p.amount ? ` · ⛔ -${euros(p.amount)}` : ""}` });
 }
 
+// Annule une pénalité : retirée de l'app (donc de la paie) ; son message du salon reste, barré, sans le bouton 🗑️
+async function cancel(p, by) {
+  await appSync.delPenalty(p.id);
+  if (p.msg)
+    await ctx.client.channels
+      .fetch(p.msg.channelId)
+      .then((ch) => ch.messages.edit(p.msg.id, { content: `${lineOf({ ...p, note: "" }).split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${by}>`, components: [], allowedMentions: { parse: [] } }))
+      .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
+  return `🗑️ Annulée : <@${p.uid}> N°${p.n} ${faultTxt(p)}${p.amount ? ` (-${euros(p.amount)})` : ""}. Elle est retirée de sa paie dans l'app.`;
+}
+const byId = async (id) => (await appSync.penaltiesIn(id.slice(0, 7))).find((x) => x.id === id);
+// Les pénalités envoyées avant le bouton 🗑️ le reçoivent, une fois (ce mois-ci et le mois d'avant)
+async function addRmButtons() {
+  const d = ctx.getData?.();
+  if (!d || d.penRm || !appSync.enabled()) return 0;
+  const m = monthOf(today());
+  const before = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)) - 2, 15)).toISOString().slice(0, 7);
+  let n = 0;
+  for (const p of [...(await appSync.penaltiesIn(before)), ...(await appSync.penaltiesIn(m))]) {
+    if (!p.msg) continue;
+    const ch = await ctx.client.channels.fetch(p.msg.channelId).catch(() => null);
+    if (await ch?.messages.edit(p.msg.id, { components: [rmRow(p)] }).then(() => true, () => false)) n++;
+  }
+  d.penRm = 1;
+  ctx.saveData?.();
+  return n;
+}
+// 🗑️ sous une pénalité du salon : « Annuler … ? » puis Oui, annuler
+async function rmAsk(i, pid) {
+  await i.deferReply({ flags: EPHEMERAL });
+  const p = await byId(pid);
+  if (!p) return done(i, "Cette pénalité est déjà annulée.", 8000);
+  return showView(i, {
+    content: `🗑️ Annuler <@${p.uid}> **N°${p.n}** ${faultTxt(p)}${p.amount ? ` (-${euros(p.amount)})` : " (avertissement seul)"} du ${dayShort(p.date)} ?\n-# Elle est retirée de sa paie dans l'app, et son message reste barré dans le salon.`,
+    components: [row(button(`pn_rmok~${p.id}`, "Oui, annuler", "🗑️", ButtonStyle.Danger), button("pn_rmno", "Non", null, ButtonStyle.Secondary))],
+    allowedMentions: { parse: [] },
+  });
+}
+
 // ---------- Interactions pn_… ----------
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
+  if (id.startsWith("pn_rm~")) return rmAsk(i, id.slice(6));
+  if (id === "pn_rmno") return done(i, "D'accord, rien n'est annulé.", 4000);
+  if (id.startsWith("pn_rmok~")) {
+    await i.deferUpdate();
+    const p = await byId(id.slice(8));
+    return done(i, p ? await cancel(p, i.user.id) : "Cette pénalité est déjà annulée.", 15000);
+  }
   if (id === "pn_new") return submit(i);
   // ⚠️ Nouvelle pénalité : la petite fiche
   if (id === "pn_add") return i.showModal(modal());
@@ -384,19 +433,10 @@ async function handle(i) {
   } else if (id === "pn_ds") st.del = i.values[0];
   else if (id === "pn_dok") {
     const p = (await periodList(st.period)).find((x) => x.id === st.del);
-    if (p) {
-      await appSync.delPenalty(p.id);
-      // le message du salon reste, barré
-      if (p.msg)
-        await ctx.client.channels
-          .fetch(p.msg.channelId)
-          .then((ch) => ch.messages.edit(p.msg.id, { content: `${lineOf({ ...p, note: "" }).split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${i.user.id}>`, allowedMentions: { parse: [] } }))
-          .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
-      st.note = `🗑️ Annulée : ${p.name} N°${p.n} ${faultTxt(p)}.`;
-    }
+    if (p) st.note = await cancel(p, i.user.id);
     st.del = null;
   }
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, open, handle, modal, FAULTS, PERSO, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };
+module.exports = { ctx, open, handle, modal, addRmButtons, FAULTS, PERSO, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };

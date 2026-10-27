@@ -314,8 +314,7 @@ async function dropClockingPanels() {
 // ---------- Salon box : le seul salon des shifts ----------
 // Un seul message : le shift en cours, en grand, par modèle (« 1️⃣ ✅ @Jean », les box libres aussi) et le pointage, en
 // direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. 🛠️ Admin (la gestion du shift, pour
-// l'admin seul) en haut à droite, ✏️ à droite de chaque modèle (ses box et ses chatteurs, dans une fenêtre), Clock In /
-// Clock Out dessous. Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
+// l'admin seul) en haut à droite ; en bas Clock In / Clock Out et ✏️ Modifier le shift (la fenêtre avec toutes les modèles). Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
 // ceux faits dans l'app) s'écrivent dans ce salon et partent avec son message, au shift suivant.
 async function boxView(name, date) {
   const sh = SHIFTS[name];
@@ -335,7 +334,7 @@ async function boxView(name, date) {
   ].filter(Boolean).join("\n");
   const items = [{ text: top, button: button(`g_menu~${date}~${slot}`, "Admin", "🛠️", ButtonStyle.Secondary) }];
   if (!groups.length) items.push({ text: "_Personne au planning sur ce shift._" });
-  for (const [gk, g] of groups.entries()) {
+  for (const g of groups) {
     const held = new Map(); // box -> chatteurs
     const none = [];
     for (const x of g.people) {
@@ -351,12 +350,10 @@ async function boxView(name, date) {
     }
     if (held.has("vip")) lines.push(`### ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
     if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
-    const title = `## ${planning.modelHead(g)}`;
-    const edit = g.mid && button(`pm_mod~${date}~${slot}~${g.mid}~b${gk}`, "Modifier", "✏️", ButtonStyle.Primary);
-    items.push({ sep: true }, edit ? { text: title, button: edit, keep: true } : { text: title, keep: true }, { text: lines.join("\n") });
+    items.push({ sep: true }, { text: `## ${planning.modelHead(g)}`, keep: true }, { text: lines.join("\n") });
   }
   if (extra.length) items.push({ sep: true }, { text: `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}` });
-  const rows = [clockInRow(name)];
+  const rows = [clockInRow(name, button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary))];
   // un seul message : s'il déborde (très rare), la fin est coupée
   const [view, ...more] = v2Messages(items, { color: sh.color, rows });
   if (more.length) view.components.push(...rows);
@@ -834,6 +831,7 @@ client.once(Events.ClientReady, async () => {
   const recap = () => penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
   cron.schedule("2 2 * * *", recap, { timezone: TZ });
   setTimeout(recap, 20000);
+  setTimeout(() => penalties.addRmButtons().then((n) => n && console.log(`🗑️ ajouté sous ${n} pénalité(s)`)).catch((e) => console.error("Boutons 🗑️ des pénalités :", e.message)), 25000);
   const board = () => dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
   setTimeout(board, 10000);
   setInterval(board, 120000);
@@ -873,7 +871,8 @@ async function loadBoxEmojis() {
   if (/^(off|non|0|false)$/i.test(process.env.BOX_EMOJIS || "") || !client.application?.emojis) return;
   const have = await client.application.emojis.fetch();
   const map = {};
-  for (const k of planning.BOX_ORDER) {
+  // VIP 👑 s'écrit en texte : pas d'image
+  for (const k of planning.BOX_ORDER.filter((x) => x !== "vip")) {
     const name = `klbox${BOX_EMOJI_V}_${k}`;
     const e = have.find((x) => x.name === name) || (await client.application.emojis.create({ attachment: path.join(__dirname, "assets", "box", `${k}.png`), name }));
     map[k] = `<:${name}:${e.id}>`;
@@ -1813,6 +1812,6 @@ async function finalizeClockOut(i, ventes) {
 if (require.main === module) restoreData().finally(() => client.login(TOKEN));
 // pour les tests
 module.exports = {
-  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, dropClockingPanels, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
+  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, dropClockingPanels, loadBoxEmojis, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
   parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };
