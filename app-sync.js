@@ -337,7 +337,7 @@ async function setBoxCount(date, slot, mid, n) {
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 // Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app ;
 // nbox : le nombre de box par shift et modèle, écrit en même temps ({ "soir|m-anna": 4 })
-// loud : le bot veut que le salon clocking en soit prévenu (sinon l'action qui écrit le dit elle-même)
+// loud : le bot veut que le salon box en soit prévenu (sinon l'action qui écrit le dit elle-même)
 async function writePlan(date, patch, nbox, { loud = false } = {}) {
   if (loud) await hooks.beforeLoud?.(date).catch(() => {});
   await mergeDoc("plan", date, { date, shifts: patch, ...(nbox && Object.keys(nbox).length ? { nbox } : {}) }, { date, shifts: {} });
@@ -527,7 +527,7 @@ async function spreadTemplate(after, before, from) {
       }
       patch[cur ? cur.sid : sid] = fullEntry(a, cur);
       for (const [m, v] of Object.entries(a.boxes || {})) {
-        const nums = boxesOf(v).filter((k) => k !== "all");
+        const nums = boxesOf(v).filter((k) => /^\d+$/.test(k));
         if (!nums.length) continue;
         for (const x of day.filter((s) => s.slot === a.slot && s.chatterId !== cid && patch[s.sid] !== null)) {
           const p = patch[x.sid];

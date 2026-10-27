@@ -10,7 +10,7 @@ const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
-const { SLOTS, withEmoji, boxList, boxesS, boxesE, boxLabel, dayLabel } = planning;
+const { SLOTS, withEmoji, boxList, boxesS, boxesT, boxesE, boxLabel, boxIdx, isNum, soloAll, VIP, dayLabel } = planning;
 const { pickRow, altButton, picked } = require("./pick");
 const shiftModal = require("./shiftmodal");
 
@@ -22,7 +22,7 @@ const ctx = {};
 const states = new Map(); // userId -> état du menu en cours (voir open)
 
 const slotOf = (k) => SLOTS.find((s) => s.k === k) || { k, l: k, emoji: "", h: "" };
-const BOX_OPTS = [["all", "All Inbox"], ...Array.from({ length: 15 }, (_, k) => [String(k + 1), `Box ${k + 1}`])];
+const BOX_OPTS = [["all", "All Inbox"], ...Array.from({ length: 15 }, (_, k) => [String(k + 1), `Box ${k + 1}`]), ["vip", VIP]];
 
 // Tout ce qu'il faut pour un jour : planning, chatteurs, comptes de l'app, day off
 async function loadNow(date) {
@@ -89,8 +89,6 @@ const emptyMenu = (id, placeholder) =>
 const backBtn = () => button("pe_back", "Retour", "↩️", ButtonStyle.Secondary);
 const closeBtn = () => button("pe_x", "Fermer", null, ButtonStyle.Secondary);
 const head = (st, lines) => [st.note, ...lines].filter(Boolean).join("\n");
-// Box en toutes lettres dans les menus (les emojis de box n'y passent pas) : « Box 2 & 3 », « All Inbox »
-const boxesT = (l) => (!l.length ? "" : l.includes("all") ? "All Inbox" : `Box ${l.join(" & ")}`);
 const plS = (n) => (n > 1 ? "s" : "");
 // 2000 caractères au plus par message : sur un gros shift, les emojis de box (longs) passent en chiffres
 const fitMsg = (txt) => {
@@ -98,10 +96,10 @@ const fitMsg = (txt) => {
   const short = txt.replace(/<a?:klbox\d+_(\w+):\d+>/g, (m, k) => (k === "all" ? "All" : k));
   return short.length <= 2000 ? short : short.slice(0, 1990) + "\n…";
 };
-// All Inbox seul, ou des box numérotées (celle choisie en dernier gagne)
+// All Inbox ou des box numérotées (celle choisie en dernier gagne) ; VIP va avec les deux
 const cleanBoxes = (values, before) => {
   const l = boxList(values);
-  return l.includes("all") && l.length > 1 ? (before.includes("all") ? l.filter((x) => x !== "all") : ["all"]) : l;
+  return l.includes("all") && l.some(isNum) ? (before.includes("all") ? l.filter((x) => x !== "all") : soloAll(l)) : l;
 };
 
 // Shift affiché : celui choisi, sinon celui en cours si c'est ce jour-là, sinon le premier rempli
@@ -112,7 +110,7 @@ function workSlot(st, d) {
   return (cur && filled.includes(cur.k) ? cur.k : filled[0]) || "soir";
 }
 const startOf = (date, slot) => appSync.parisMs(date, appSync.START_OF[slot]);
-// shift en cours, ou qui commence dans les 2 h (on prévient alors le salon clocking)
+// shift en cours, ou qui commence dans les 2 h (on prévient alors le salon box)
 const running = (date, slot) => Date.now() >= startOf(date, slot) - 2 * 3600e3 && Date.now() < startOf(date, slot) + 6 * 3600e3;
 const isNow = (date, slot) => Date.now() >= startOf(date, slot) && Date.now() < startOf(date, slot) + 6 * 3600e3;
 // Shift en cours ce jour-là, sinon le prochain, sinon le soir
@@ -158,7 +156,7 @@ function addPatch(patch, sid, v) {
   patch[sid] = { ...cur, ...v, ...(v.boxes || cur.boxes ? { boxes: { ...(cur.boxes || {}), ...(v.boxes || {}) } } : {}) };
 }
 function takeBoxes(d, slot, mid, l, except, patch) {
-  const nums = l.filter((b) => b !== "all");
+  const nums = l.filter(isNum);
   const taken = [];
   if (!nums.length) return taken;
   for (const s of d.plan) {
@@ -195,7 +193,7 @@ function fateOpts(d, slot, who, mids, exclude) {
     ...others.slice(0, 23).map((s) => opt(`Il quitte ${names} : ${bx || "ses box"} → ${d.byId[s.chatterId].name}`, `give:${s.sid}`, acctsText(d, s.accts, s.boxes, false), "🎁")),
   ];
 }
-// Applique ce choix sur l'entrée `who` (qui quitte les modèles `mids`) ; renvoie le texte du message clocking
+// Applique ce choix sur l'entrée `who` (qui quitte les modèles `mids`) ; renvoie le texte de l'annonce du salon box
 function applyFate(d, fate, who, mids, patch) {
   if (!mids.length || !fate || fate === "keep") return mids.length ? ` · garde aussi ${mids.map((m) => `**${d.mName(m)}**`).join(", ")}` : "";
   const given = fate.startsWith("give:") && d.plan.find((s) => s.sid === fate.slice(5));
@@ -205,7 +203,7 @@ function applyFate(d, fate, who, mids, patch) {
     addPatch(patch, who.sid, { boxes: { [mid]: null } });
     if (given && midsOf(given.accts).includes(mid) && l.length) {
       const cur = boxList(patch[given.sid]?.boxes?.[mid] !== undefined ? patch[given.sid].boxes[mid] : given.boxes?.[mid]);
-      addPatch(patch, given.sid, { boxes: { [mid]: boxList([...cur.filter((b) => b !== "all"), ...l]) } });
+      addPatch(patch, given.sid, { boxes: { [mid]: soloAll(boxList([...cur.filter((b) => b !== "all"), ...l])) } });
       lines.push(`ses ${boxLabel(l)} sur **${d.mName(mid)}** → ${tag(d.byId[given.chatterId])}`);
     } else lines.push(`quitte **${d.mName(mid)}**${l.length ? ` (${boxLabel(l)} libre${l.length > 1 ? "s" : ""})` : ""}`);
   }
@@ -242,7 +240,7 @@ const VIEWS = {
     const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
     const rank = (s, mid) => {
       const l = boxList(s.boxes?.[mid]);
-      return l.length ? (l[0] === "all" ? 0 : Number(l[0])) : 99;
+      return boxIdx(l);
     };
     const line = (s, mid, multi) => {
       const k = stOf(s), l = mid ? boxList(s.boxes?.[mid]) : [];
@@ -284,7 +282,7 @@ const VIEWS = {
             .setPlaceholder(`Box de ${name(sel)} sur ${d.mName(bm)} : aucune`.slice(0, 150))
             .setMinValues(0)
             .setMaxValues(BOX_OPTS.length)
-            .addOptions(BOX_OPTS.map(([v, l]) => opt(l, v, holder(v) ? `Prise par ${holder(v)}` : v === "all" ? "Toutes les box" : "Libre", null, cur.includes(v))));
+            .addOptions(BOX_OPTS.map(([v, l]) => opt(l, v, holder(v) ? `Prise par ${holder(v)}` : v === "all" ? "Toutes les box" : v === "vip" ? "Les clients VIP" : "Libre", null, cur.includes(v))));
     return {
       content: fitMsg(head(st, [
         `📅 **${sl.emoji} ${sl.l} · ${dayLabel(st.date)}** (${sl.h}) · ${n ? `${n} chatteur${plS(n)}` : "personne"}${isNow(st.date, slot) ? " · 🔴 en cours" : ""}`,
@@ -581,7 +579,7 @@ async function freeBoxes(st) {
     await ctx.notify?.({
       content: `🧺 Box retirées à ${tag(c)}${st.cutNoted ? " (⚡ coupure, rendues à son retour)" : ""} · ${sl.emoji} ${sl.l} · ${what}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Box retirées (salon clocking) :", err.message));
+    }).catch((err) => console.error("Box retirées (salon box) :", err.message));
   return `✅ Box retirées à ${whoMd(c)} : ${what}.${st.cutNoted ? " Il les reprend à son 🔙 retour de coupure." : ""}`;
 }
 
@@ -770,12 +768,12 @@ async function replace(st) {
     const res = await ctx.coupure?.({ cid: out.id, slot: e.slot, date: st.date }).catch((err) => ({ error: err.message }));
     cut = res?.error ? ` ⚠️ Coupure pas notée : ${String(res.error).slice(0, 120)}` : " ⚡ Coupure notée au pointage.";
   }
-  // prévient les deux dans le salon clocking si le shift est en cours (ou commence bientôt)
+  // prévient les deux dans le salon box si le shift est en cours (ou commence bientôt)
   if (running(st.date, e.slot))
     await ctx.notify?.({
       content: `🔁 ${tag(r)} remplace ${tag(out)}${st.cut || st.cutNoted ? " (⚡ coupure)" : ""} · ${sl.emoji} ${sl.l} · ${what}${fate}`,
       allowedMentions: { users: [r.discordId, out.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Remplacement (salon clocking) :", err.message));
+    }).catch((err) => console.error("Remplacement (salon box) :", err.message));
   Object.assign(st, { out: null, inn: null, cut: false, cutNoted: false, cutText: "", fate: "keep", sel: `${rsid}|` });
   return `✅ ${whoMd(r)} reprend ${what} de ${whoMd(out)} sur ${sl.emoji} ${sl.l}${noPing(d, fate)}.${cut}`;
 }
@@ -804,7 +802,7 @@ async function move(st) {
     await ctx.notify?.({
       content: `🔀 ${tag(c)} passe sur ${dest} · ${sl.emoji} ${sl.l}${fate}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Déplacement (salon clocking) :", err.message));
+    }).catch((err) => console.error("Déplacement (salon box) :", err.message));
   Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep", sel: `${e.sid}|${tm}` });
   return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` · ${boxLabel(l)}` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
@@ -829,7 +827,7 @@ async function renfort(st) {
   const dest = `**${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${l.length ? ` · ${boxLabel(l)}` : ""}`;
   if (running(date, slot))
     await ctx.notify?.({ content: `💪🏼 ${tag(c)} en renfort · ${sl.emoji} ${sl.l} · ${dest}`, allowedMentions: { users: [c.discordId].filter(Boolean) } })
-      .catch((err) => console.error("Renfort (salon clocking) :", err.message));
+      .catch((err) => console.error("Renfort (salon box) :", err.message));
   Object.assign(st, { cid: null, acc: null, rBoxes: [], sel: `${sid}|${mid}` });
   return `✅ ${whoMd(c)} ${st.live ? "en renfort" : "ajouté"} sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` · ${boxLabel(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
@@ -867,7 +865,7 @@ async function giveBack(date, slot, cid) {
   for (const { h, b } of parts) {
     takeBoxes(d, slot, h.m, b, [e.sid], patch);
     const cur = boxList(e.boxes?.[h.m]).filter((x) => x !== "all");
-    addPatch(patch, e.sid, { boxes: { [h.m]: b.includes("all") ? ["all"] : boxList([...cur, ...b]) } });
+    addPatch(patch, e.sid, { boxes: { [h.m]: soloAll(boxList([...cur, ...b])) } });
   }
   addPatch(patch, e.sid, { held: null });
   await save({ date }, patch);
