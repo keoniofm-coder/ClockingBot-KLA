@@ -27,7 +27,6 @@ const { withEmoji } = planning;
 const TOKEN = (process.env.DISCORD_TOKEN || "").trim();
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const GUILD_ID = (process.env.GUILD_ID || "").trim();
-const CLOCKING_CHANNEL_ID = (process.env.CLOCKING_CHANNEL_ID || "").trim();
 const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
 // Salon box (l'ancien salon planning) : un seul message, les box du shift en cours, et 🛠️ Admin
 const PLANNING_CHANNEL_ID = (process.env.PLANNING_CHANNEL_ID || "1553946673141518466").trim();
@@ -63,7 +62,7 @@ const DEFAULT_DATA = {
   admins: [], // userIds des admins du bot
   membres: {}, // userId -> { name, username } : noms affichés dans les menus et dans l'app
   planningMsgs: {}, // ancien planning du salon (date -> { channelId, ids }) : supprimé au premier message du salon box
-  shiftMsgs: {}, // « date|SHIFT » -> { channelId, ids, hashes, full, v2 } : panneau du shift dans le salon clocking (en direct)
+  shiftMsgs: {}, // ancien panneau du salon clocking (« date|SHIFT » -> { channelId, ids }) : supprimé au démarrage
   boxMsg: null, // { channelId, id, key: « date|SHIFT », hash } : le message du salon box (en direct)
   boxNotes: [], // [{ channelId, id }] : annonces de box du shift, supprimées avec son message
   effMsgs: {}, // « date|shift » -> { channelId, id, hash } : récap de l'effectif (mis à jour en direct)
@@ -219,7 +218,7 @@ const closing = new Set(); // clock out en cours (évite le double clic)
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
 // ================== COMPOSANTS ==================
-// Boutons des chatteurs, en haut du panneau du shift
+// Boutons des chatteurs, en bas du message du salon box
 const clockInRow = (shift, ...more) =>
   row(button(`btn_clockin_${shift}`, "Clock In", "✅", ButtonStyle.Success), button("btn_clockout", "Clock Out", "🔴", ButtonStyle.Danger), ...more);
 
@@ -297,139 +296,27 @@ function ficheEmbed(uid, v) {
 // ================== ANNONCES AUTO ==================
 const hashOf = (payloads) =>
   crypto.createHash("md5").update(JSON.stringify(payloads.map((p) => ({ ...p, components: (p.components || []).map((c) => c.toJSON()) })))).digest("hex");
-// ---------- Panneau du shift (salon clocking) ----------
-// 15 min avant chaque shift : le pointage du shift en direct et en grand (comme Pointage dans l'app : ✅ là, ⭕ pas
-// encore là, 🟠 retard, ⚡ coupure, ❌ absent), une ligne par chatteur avec ses box en colonne à droite, et Clock In /
-// Clock Out dessous. La gestion (🛠️ Admin) est sous le message du salon box. Discord compte 40 éléments par message :
-// un grand shift prend deux messages, Clock In / Clock Out sous le dernier.
-const boxWord = (l) => planning.boxesT(l) || "Sans box";
-// La box à droite du nom : un clic d'admin ouvre ✏️ les box et les chatteurs de cette modèle
-const boxButton = (l, date, slot, mid, n) => button(`pm_mod~${date}~${slot}~${mid || "_"}~${n}`, boxWord(l), null, l.length ? ButtonStyle.Primary : ButtonStyle.Secondary);
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
-async function panelView(name, date) {
-  const sh = SHIFTS[name];
-  const top = `## ${sh.emoji} Shift ${name} · ${sh.label}`;
-  let items = null;
-  if (appSync.enabled() && date)
-    try {
-      items = panelItems(await shiftBoard(name, date), top);
-    } catch (e) {
-      console.error("Panneau du shift :", e.message);
-    }
-  items ||= [{ text: `${top}\nPensez bien à **clock in** avec le bouton ci-dessous.` }];
-  return v2Messages(items, { color: sh.color, rows: [clockInRow(name)] });
-}
-function panelItems(b, top) {
-  const { slot, date, day, staff, stOf, detail } = b;
-  const { head, extra } = boardLines(b);
-  const byId = Object.fromEntries(staff.map((p) => [p.id, p]));
-  const sub = `-# ${planning.dayLabel(date)} · pensez à **clock in** ✅ · en direct, relié au Pointage de l'app`;
-  const items = [{ text: [top, sub, head.length > 1 ? `### ${head[0]}` : head[0], ...head.slice(1)].join("\n") }];
-  let n = 0;
-  for (const g of planning.slotGroups(day, slot).groups) {
-    const gh = `## ${planning.modelHead(g)}`;
-    items.push({ sep: true }, { text: gh, keep: true });
-    const offs = [];
-    for (const x of g.people) {
-      const p = byId[x.id] || { ...x.c, off: x.off };
-      const k = stOf(p);
-      if (k === "off") offs.push(whoOf(x.c));
-      else items.push({ text: `### ${ST[k].e} ${whoOf(x.c)}\n-# ${detail(p) || ST[k].l}`, button: boxButton(x.boxes, date, slot, g.mid, n++), cont: `${gh} (suite)` });
-    }
-    if (offs.length) items.push({ text: `🏖️ Day off : ${offs.join(", ")}` });
-  }
-  if (extra.length) items.push({ sep: true }, { text: `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}` });
-  items.push({ text: `-# Gestion du shift et des box : 🛠️ Admin dans <#${BOX_CHANNEL_ID}>` });
-  return items;
-}
 const idsOf = (m) => m.ids || (m.id ? [m.id] : []);
-async function sendAll(ch, views) {
-  const ids = [];
-  for (const v of views) ids.push((await ch.send(v)).id);
-  return ids;
-}
 async function delAll(channelId, ids) {
   if (!ids.length) return;
   const ch = await client.channels.fetch(channelId).catch(() => null);
   for (const id of ids) await ch?.messages.delete(id).catch(() => {});
 }
-// Envoie le panneau d'un shift en bas du salon clocking (renvoyé : l'ancien du même shift est supprimé)
-async function announceShift(name, t = Date.now()) {
-  const date = appSync.shiftDay(appSync.SLOT_OF[name], t + 15 * 60e3).date;
-  const key = `${date}|${name}`;
-  const views = await panelView(name, date);
-  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-  const ids = await sendAll(ch, views);
-  const old = data.shiftMsgs[key];
-  if (old) await delAll(old.channelId, idsOf(old).filter((id) => !ids.includes(id)));
-  data.shiftMsgs[key] = { channelId: ch.id, ids, hashes: views.map((v) => hashOf([v])), full: true, v2: true };
-  for (const [k, m] of Object.entries(data.shiftMsgs)) if (k !== key) m.full = false;
-  const limit = appSync.addDays(appSync.parisParts(Date.now()).date, -2);
-  for (const k of Object.keys(data.shiftMsgs)) if (k.slice(0, 10) < limit) delete data.shiftMsgs[k];
+// Les panneaux de l'ancien salon clocking (avant le salon box unique) : supprimés au démarrage
+async function dropClockingPanels() {
+  if (!Object.keys(data.shiftMsgs || {}).length) return;
+  for (const m of Object.values(data.shiftMsgs)) await delAll(m.channelId, idsOf(m));
+  data.shiftMsgs = {};
   saveData();
-  return { ids };
-}
-async function editPanel(k, m) {
-  const [d, name] = k.split("|");
-  if (!SHIFTS[name]) return;
-  const views = await panelView(name, d);
-  const hashes = views.map((v) => hashOf([v]));
-  const ids = idsOf(m);
-  if (m.v2 && JSON.stringify(hashes) === JSON.stringify(m.hashes)) return;
-  // le panneau en cours qui change de nombre de messages (shift qui grandit) : renvoyé en bas du salon
-  const resend = async () => {
-    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    const fresh = await sendAll(ch, views);
-    await delAll(m.channelId, ids);
-    data.shiftMsgs[k] = { channelId: ch.id, ids: fresh, hashes, full: true, v2: true };
-  };
-  try {
-    if (m.full && views.length !== ids.length) return await resend();
-    const ch = await client.channels.fetch(m.channelId);
-    for (const [j, v] of views.entries()) {
-      if (j >= ids.length) break; // ancien panneau : il garde sa place, sans la suite
-      if (m.v2 && m.hashes?.[j] === hashes[j]) continue;
-      // un panneau d'avant (embed) passe en grand : son texte et son embed sont vidés
-      await ch.messages.edit(ids[j], m.v2 ? v : { content: "", embeds: [], ...v });
-    }
-    for (const id of ids.slice(views.length)) await ch.messages.delete(id).catch(() => {});
-    Object.assign(m, { ids: ids.slice(0, views.length), hashes, v2: true });
-    delete m.id;
-    delete m.hash;
-  } catch (e) {
-    console.warn("Panneau du shift à mettre à jour :", e.message);
-    if (/unknown message/i.test(e.message)) delete data.shiftMsgs[k];
-    // panneau d'avant que Discord ne laisse pas passer en grand : renvoyé s'il est en cours, sinon laissé tel quel
-    else if (!m.v2) await (m.full ? resend() : Promise.resolve(delete data.shiftMsgs[k])).catch((err) => console.warn("Panneau renvoyé :", err.message));
-  }
-}
-async function refreshAnnounces(date) {
-  for (const [k, m] of Object.entries(data.shiftMsgs)) {
-    if (k.slice(0, 10) !== date) continue;
-    await editPanel(k, m);
-    saveData();
-  }
-}
-// Au démarrage : le panneau du shift en cours (ou qui commence dans les 15 min), envoyé s'il n'y en a pas ;
-// le message du salon box aussi
-async function ensureCurrentPanel() {
-  const t = Date.now() + 15 * 60e3;
-  const name = shiftAt(t);
-  const key = `${appSync.shiftDay(appSync.SLOT_OF[name], t).date}|${name}`;
-  if (!data.shiftMsgs[key]) await announceShift(name);
-  else if (!data.shiftMsgs[key].full) {
-    for (const [k, m] of Object.entries(data.shiftMsgs)) m.full = k === key;
-    saveData();
-  }
-  await ensureBoxBoard();
 }
 
-// ---------- Salon box ----------
-// Un seul message : les box du shift en cours, en grand, par modèle (« 1️⃣ ✅ @Jean », les box libres aussi), en
-// direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. Dessous : un bouton par modèle (✏️ ses
-// box et ses chatteurs, dans une fenêtre) et 🛠️ Admin (la gestion du shift, pour l'admin seul). Les annonces de
-// changement de box (remplacement, renfort, box retirées, changements faits dans l'app) s'écrivent dans ce salon et
-// partent avec le message de leur shift.
+// ---------- Salon box : le seul salon des shifts ----------
+// Un seul message : le shift en cours, en grand, par modèle (« 1️⃣ ✅ @Jean », les box libres aussi) et le pointage, en
+// direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. 🛠️ Admin (la gestion du shift, pour
+// l'admin seul) en haut à droite, ✏️ à droite de chaque modèle (ses box et ses chatteurs, dans une fenêtre), Clock In /
+// Clock Out dessous. Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
+// ceux faits dans l'app) s'écrivent dans ce salon et partent avec son message, au shift suivant.
 async function boxView(name, date) {
   const sh = SHIFTS[name];
   const slot = appSync.SLOT_OF[name];
@@ -440,9 +327,15 @@ async function boxView(name, date) {
     const k = b.stOf(byId[x.id] || { ...x.c, off: x.off });
     return `${k === "off" ? "🏖️" : ST[k].e} ${whoOf(x.c)}`;
   };
-  const items = [{ text: `## 📦 Box · ${sh.emoji} ${name} · ${sh.label}\n-# ${planning.dayLabel(date)} · en direct, change tout seul 15 min avant chaque shift` }];
+  const { head, extra, done, due } = boardLines(b);
+  const top = [
+    `## 📦 Box · ${sh.emoji} ${name} · ${sh.label}`,
+    `-# ${planning.dayLabel(date)} · en direct, change tout seul 15 min avant chaque shift`,
+    due ? `-# **${done}/${due}** pointés · ${head[1]}` : "",
+  ].filter(Boolean).join("\n");
+  const items = [{ text: top, button: button(`g_menu~${date}~${slot}`, "Admin", "🛠️", ButtonStyle.Secondary) }];
   if (!groups.length) items.push({ text: "_Personne au planning sur ce shift._" });
-  for (const g of groups) {
+  for (const [gk, g] of groups.entries()) {
     const held = new Map(); // box -> chatteurs
     const none = [];
     for (const x of g.people) {
@@ -450,7 +343,7 @@ async function boxView(name, date) {
       for (const k of x.boxes) held.set(k, [...(held.get(k) || []), x]);
     }
     const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter(planning.isNum).map(Number), 0);
-    const lines = [`## ${planning.modelHead(g)}`];
+    const lines = [];
     if (held.has("all")) lines.push(`### ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
     for (let k = 1; k <= n; k++) {
       const hs = held.get(String(k)) || [];
@@ -458,13 +351,12 @@ async function boxView(name, date) {
     }
     if (held.has("vip")) lines.push(`### ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
     if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
-    items.push({ sep: true }, { text: lines.join("\n") });
+    const title = `## ${planning.modelHead(g)}`;
+    const edit = g.mid && button(`pm_mod~${date}~${slot}~${g.mid}~b${gk}`, "Modifier", "✏️", ButtonStyle.Primary);
+    items.push({ sep: true }, edit ? { text: title, button: edit, keep: true } : { text: title, keep: true }, { text: lines.join("\n") });
   }
-  const btns = [
-    ...groups.filter((g) => g.mid).map((g, k) => button(`pm_mod~${date}~${slot}~${g.mid}~b${k}`, g.name, "✏️", ButtonStyle.Primary)),
-    button(`g_menu~${date}~${slot}`, "Admin", "🛠️", ButtonStyle.Secondary),
-  ];
-  const rows = chunk(btns, 5).slice(0, 3).map((l) => row(...l));
+  if (extra.length) items.push({ sep: true }, { text: `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}` });
+  const rows = [clockInRow(name)];
   // un seul message : s'il déborde (très rare), la fin est coupée
   const [view, ...more] = v2Messages(items, { color: sh.color, rows });
   if (more.length) view.components.push(...rows);
@@ -477,11 +369,13 @@ async function postBoxBoard(name, t = Date.now()) {
   const ch = await client.channels.fetch(BOX_CHANNEL_ID);
   const msg = await ch.send(view);
   const old = data.boxMsg;
+  const key = `${date}|${name}`;
   if (old?.id && old.id !== msg.id) await delAll(old.channelId, [old.id]);
-  // les annonces du shift d'avant partent avec lui ; l'ancien planning du salon aussi
-  for (const x of data.boxNotes || []) await delAll(x.channelId, [x.id]);
+  // les annonces du shift d'avant partent avec lui (renvoyé pour le même shift : elles restent) ; l'ancien planning aussi
+  const next = old?.key !== key;
+  if (next) for (const x of data.boxNotes || []) await delAll(x.channelId, [x.id]);
   for (const p of Object.values(data.planningMsgs || {})) await delAll(p.channelId, p.ids || []);
-  Object.assign(data, { planningMsgs: {}, boxNotes: [], boxMsg: { channelId: ch.id, id: msg.id, key: `${date}|${name}`, hash: hashOf([view]) } });
+  Object.assign(data, { planningMsgs: {}, boxNotes: next ? [] : data.boxNotes || [], boxMsg: { channelId: ch.id, id: msg.id, key, hash: hashOf([view]) } });
   saveData();
   return { url: msg.url, count };
 }
@@ -502,14 +396,13 @@ function ensureBoxBoard(t = Date.now()) {
 }
 // Les anciens « Envoyer le planning » (bouton de l'app, menus) : renvoient le message du salon box
 const postPlanning = () => boxLock(() => postBoxBoard(shiftAt(Date.now() + 15 * 60e3)));
-// « Envoyer le shift » de l'app (shift choisi) : son panneau dans le salon clocking et ses box dans le salon box.
-// Un shift à venir reste dans le salon box jusqu'à son tour (15 min avant son début, comme d'habitude).
+// « Envoyer le shift » de l'app (shift choisi) : son message dans le salon box, en bas. Un shift à venir y reste jusqu'à
+// son tour (15 min avant son début, comme d'habitude).
 async function postShift(date, slot) {
   const name = SHIFT_OF_SLOT[slot];
   if (!SHIFTS[name]) throw new Error(`Shift inconnu : ${slot}`);
   const at = appSync.parisMs(date, SHIFTS[name].start) - 15 * 60e3;
   await appSync.fillDays([date]);
-  await announceShift(name, at);
   return boxLock(async () => {
     const r = await postBoxBoard(name, at);
     if (at > Date.now() && data.boxMsg) {
@@ -546,7 +439,12 @@ async function refreshBox(date) {
   }
   saveData();
 }
-// Annonces de changement de box (remplacement, renfort, box retirées, changements faits dans l'app) : salon box
+// 🔔 Renvoyer le panneau (/panel, 🛠️ Admin) : le message du salon box de ce shift, renvoyé en bas du salon
+function announceShift(name, t = Date.now()) {
+  return postShift(appSync.shiftDay(appSync.SLOT_OF[name], t + 15 * 60e3).date, appSync.SLOT_OF[name]);
+}
+// Annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift) : salon box, supprimées
+// avec son message au shift suivant
 async function boxNote(payload) {
   const ch = await client.channels.fetch(BOX_CHANNEL_ID);
   const msg = await ch.send(payload);
@@ -555,12 +453,11 @@ async function boxNote(payload) {
   return msg;
 }
 
-// 15 min avant chaque shift (heure de Paris) : son panneau dans le salon clocking, son message dans le salon box
+// 15 min avant chaque shift (heure de Paris) : son message dans le salon box
 for (const [name, sh] of Object.entries(SHIFTS)) {
   const hour = (sh.start - 1 + 24) % 24; // 15 min avant => hh-1:45
   cron.schedule(`45 ${hour} * * *`, async () => {
     await fillAhead();
-    announceShift(name).catch((e) => console.error("Panneau du shift :", e.message));
     ensureBoxBoard().catch((e) => console.error("Salon box :", e.message));
   }, { timezone: TZ });
 }
@@ -625,12 +522,11 @@ async function effectifView(name, date) {
 }
 async function postEffectif(name) {
   const { date } = appSync.shiftDay(appSync.SLOT_OF[name], Date.now());
-  const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
   const v = await effectifView(name, date);
-  const msg = await ch.send(v);
-  // mis à jour en direct ensuite (clock in, remplacement, box…)
+  // dans le salon box : parti avec le message du shift ; mis à jour en direct d'ici là (clock in, remplacement, box…)
+  const msg = await boxNote(v);
   data.effMsgs ||= {};
-  data.effMsgs[`${date}|${name}`] = { channelId: ch.id, id: msg.id, hash: hashOf([v]) };
+  data.effMsgs[`${date}|${name}`] = { channelId: data.boxNotes.at(-1).channelId, id: msg.id, hash: hashOf([v]) };
   const limit = appSync.addDays(appSync.parisParts(Date.now()).date, -2);
   for (const k of Object.keys(data.effMsgs)) if (k.slice(0, 10) < limit) delete data.effMsgs[k];
   saveData();
@@ -742,7 +638,7 @@ function boardLines(b) {
   return { head, lines, extra, done, due: due.length };
 }
 
-// Après un changement : salon box + panneau du shift (regroupé, 1,5 s après le dernier)
+// Après un changement : salon box (regroupé, 1,5 s après le dernier)
 const refreshTimers = new Map();
 function refreshSoon(date) {
   clearTimeout(refreshTimers.get(date));
@@ -751,10 +647,9 @@ function refreshSoon(date) {
     refreshDate(date).catch((e) => console.error("Mise à jour du planning :", e.message));
   }, 1500));
 }
-// Tout ce qui montre ce jour-là : salon box, panneaux des shifts, effectif
+// Tout ce qui montre ce jour-là : salon box, effectif
 async function refreshDate(date) {
   await refreshBox(date);
-  await refreshAnnounces(date);
   await refreshEffectifs(date);
   gestion.panelSoon();
 }
@@ -873,7 +768,7 @@ async function sweep() {
 }
 
 // ================== COMMANDES ==================
-// Toutes réservées aux admins : les chatteurs n'utilisent que les boutons Clock In / Clock Out du salon clocking
+// Toutes réservées aux admins : les chatteurs n'utilisent que les boutons Clock In / Clock Out du salon box
 const shiftChoices = Object.entries(SHIFTS).map(([k, v]) => ({ name: `${k} (${v.label})`, value: k }));
 const adminCmd = (name, description) =>
   new SlashCommandBuilder().setName(name).setDescription(description).setDefaultMemberPermissions(ADMIN_PERM);
@@ -886,7 +781,7 @@ const commands = [
     .addStringOption((o) =>
       o.setName("chatteur").setDescription("Son nom dans l'app").setAutocomplete(true)
     ),
-  adminCmd("panel", "Renvoyer le panneau d'un shift (pointage, Clock In / Clock Out) dans le salon clocking")
+  adminCmd("panel", "Renvoyer le message d'un shift (box, pointage, Clock In / Clock Out) dans le salon box")
     .addStringOption((o) =>
       o.setName("shift").setDescription("Le shift à envoyer").setRequired(true).addChoices(...shiftChoices)
     ),
@@ -926,7 +821,7 @@ client.once(Events.ClientReady, async () => {
   await fillAhead();
   cron.schedule("5 0 * * *", fillAhead, { timezone: TZ });
   await restoreSessions().catch((e) => console.error("Clock in en cours :", e.message));
-  setTimeout(() => ensureCurrentPanel().catch((e) => console.error("Panneau du shift :", e.message)), 8000);
+  setTimeout(() => dropClockingPanels().catch((e) => console.error("Anciens panneaux clocking :", e.message)).then(() => ensureBoxBoard()).catch((e) => console.error("Salon box :", e.message)), 8000);
   cron.schedule("*/5 * * * *", sweep, { timezone: TZ });
   setTimeout(sweep, 30000);
   setInterval(pollPost, 15000);
@@ -1372,7 +1267,7 @@ async function handleInteraction(i) {
           const shift = i.options.getString("shift");
           await i.deferReply({ flags: EPHEMERAL });
           await announceShift(shift);
-          return done(i, `✅ Panneau du shift **${shift}** envoyé dans le salon clocking.`);
+          return done(i, `✅ Shift **${shift}** renvoyé dans <#${BOX_CHANNEL_ID}>.`);
         }
         case "lien_app":
           return lienApp(i);
@@ -1482,7 +1377,7 @@ Object.assign(gestion.ctx, {
   openChatters: (i) => chatters.open(i),
   openPlanning: (i, date, view, extra) => planEdit.open(i, date, view, extra),
   openPenalties: (i) => penalties.open(i),
-  refreshPanels: (date) => refreshAnnounces(date).catch((e) => console.error("Panneau du shift :", e.message)),
+  refreshPanels: refreshSoon,
   heldText: (date, slot, cid) => planEdit.heldText(date, slot, cid),
   dayoffView: (month) => dayoff.boardView(month),
   coupure: runCoupure,
@@ -1512,6 +1407,7 @@ Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, sav
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
   client,
+  note: (payload) => boxNote(payload),
   isAdmin,
   fmtTime,
   // son shift s'il est clock in, sinon celui où il est au planning (déjà commencé, ou dans les 15 min)
@@ -1550,7 +1446,7 @@ Object.assign(voice.ctx, {
       const s = data.sessions[uid];
       const p = !s && appSync.enabled() ? await appSync.plannedSlotAt(uid, [data.membres[uid]?.name].filter(Boolean), Date.now()).catch(() => null) : null;
       const r = await noteCoupure(await client.users.fetch(uid), { shift: p ? SHIFT_OF_SLOT[p.slot] : undefined });
-      cutText = r.ok ? `✅ Coupure notée au pointage de l'app et dans <#${CLOCKING_CHANNEL_ID}>. À son retour : 🔙 sous son message « est revenu ».` : r.text;
+      cutText = r.ok ? `✅ Coupure notée au pointage de l'app et dans <#${BOX_CHANNEL_ID}>. À son retour : 🔙 sous son message « est revenu ».` : r.text;
     }
     return planEdit.openDepart(i, uid, { cutNoted: cut, cutText });
   },
@@ -1654,14 +1550,14 @@ async function coupure(i) {
   return i.options.getBoolean?.("retour") ? retourCoupure(i, { uid: m.id, names: namesOfUser(m) }) : runCoupure(i, m, opts);
 }
 const namesOfUser = (m) => [data.membres[m.id]?.name, m.globalName, m.username].filter(Boolean);
-// Début de coupure : « Coupure » au pointage de l'app, et une ligne qui notifie le chatteur dans le salon clocking
+// Début de coupure : « Coupure » au pointage de l'app, et une ligne qui notifie le chatteur dans le salon box
 // update : vient d'un menu éphémère (panneau gestion), le résultat remplace le menu
 async function runCoupure(i, m, { min, raison, shift: forced, update = false }) {
   await (update ? i.deferUpdate() : i.deferReply({ flags: EPHEMERAL }));
   const r = await noteCoupure(m, { min, raison, shift: forced });
   return done(i, r.text, 60000);
 }
-// Note la coupure (pointage de l'app + salon clocking) ; renvoie le compte rendu
+// Note la coupure (pointage de l'app + salon box) ; renvoie le compte rendu
 async function noteCoupure(m, { min, raison, shift: forced } = {}) {
   const t = Date.now();
   const s = data.sessions[m.id];
@@ -1688,18 +1584,17 @@ async function noteCoupure(m, { min, raison, shift: forced } = {}) {
   const line = [`⚡ <@${m.id}> **Coupure** ${fmtTime(t)}`, `${SHIFTS[shift].emoji} ${shift}`, min ? `${min} min` : "", raison].filter(Boolean).join(" · ");
   let sent = "";
   try {
-    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await ch.send({ content: line, allowedMentions: { users: [m.id] } });
-    sent = `🔔 Notifié dans <#${CLOCKING_CHANNEL_ID}>.`;
+    await boxNote({ content: line, allowedMentions: { users: [m.id] } });
+    sent = `🔔 Notifié dans <#${BOX_CHANNEL_ID}>.`;
   } catch (e) {
     ok = false;
-    console.error("Coupure (salon clocking) :", e.message);
-    sent = `⚠️ Message pas envoyé dans le salon clocking : ${String(e.message || e).slice(0, 200)}`;
+    console.error("Coupure (salon box) :", e.message);
+    sent = `⚠️ Message pas envoyé dans le salon box : ${String(e.message || e).slice(0, 200)}`;
   }
   refreshSoon(date);
   return { date, shift, ok, text: [`⚡ Coupure pour <@${m.id}> · ${SHIFTS[shift].emoji} ${shift} du ${planning.dayLabel(date)}${min ? ` · ${min} min` : ""}`, point, sent].join("\n") };
 }
-// Retour de coupure : temps réel compté au pointage (comme un retard) et une ligne dans le salon clocking
+// Retour de coupure : temps réel compté au pointage (comme un retard) et une ligne dans le salon box
 // target : { uid, names } (compte Discord) ou { cid } (chatteur de l'app)
 // giveBack : il reprend les box qu'il avait avant d'être remplacé (retirées à celui qui les a)
 async function retourCoupure(i, target, { update = false, giveBack = true } = {}) {
@@ -1729,14 +1624,7 @@ async function retourText({ uid, cid, names = [] }, { giveBack = true } = {}) {
     `${r.took} min${r.total > r.took ? ` (${r.total} min sur le shift)` : ""}`,
     back,
   ].filter(Boolean).join(" · ");
-  try {
-    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await ch.send({ content: line, allowedMentions: { parse: [] } });
-  } catch (e) {
-    console.error("Retour de coupure (salon clocking) :", e.message);
-  }
-  // ses box rendues : aussi dans le salon box
-  if (back) await boxNote({ content: `📦 ${tag} ${back}`, allowedMentions: { parse: [] } }).catch((e) => console.error("Box rendues (salon box) :", e.message));
+  await boxNote({ content: line, allowedMentions: { parse: [] } }).catch((e) => console.error("Retour de coupure (salon box) :", e.message));
   refreshSoon(r.date);
   return `🔙 ${tag} est de retour : ${r.took} min de coupure (parti à ${fmtTime(r.since)}), noté au pointage de l'app (${r.name}).${back ? `\n📦 Il ${back}.` : ""}`;
 }
@@ -1815,8 +1703,7 @@ async function startClockIn(i) {
     saveData();
 
     const { late, isLate } = appSync.lateness(appSync.SLOT_OF[shift], t);
-    const ch = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await ch.send({ content: clockLine("in", uid, s, t, isLate ? late : 0), allowedMentions: { parse: [] } });
+    await boxNote({ content: clockLine("in", uid, s, t, isLate ? late : 0), allowedMentions: { parse: [] } }).catch((e) => console.error("Clock in (salon box) :", e.message));
     const note = await syncClockIn(i, shift, t);
     refreshSoon(data.sessions[uid]?.app?.date || appSync.shiftDay(appSync.SLOT_OF[shift], t).date);
     const models = appSync.enabled() && Object.keys(boxes).length ? (await appSync.appCatalog()).models : {};
@@ -1912,8 +1799,7 @@ async function finalizeClockOut(i, ventes) {
       const ventesCh = await client.channels.fetch(VENTES_CHANNEL_ID);
       await ventesCh.send({ embeds: ventes.map((v) => ficheEmbed(uid, v)), allowedMentions: { parse: [] } });
     }
-    const clockCh = await client.channels.fetch(CLOCKING_CHANNEL_ID);
-    await clockCh.send({ content: clockLine("out", uid, { ...s, modeles }, tOut), allowedMentions: { parse: [] } });
+    await boxNote({ content: clockLine("out", uid, { ...s, modeles }, tOut), allowedMentions: { parse: [] } }).catch((e) => console.error("Clock out (salon box) :", e.message));
     appSync.onClockOut({ app: s.app, t: tOut }).catch((e) => console.error("Pointage app (clock out) :", e.message))
       .finally(() => (s.app?.date ? refreshSoon(s.app.date) : gestion.panelSoon()));
 
@@ -1927,6 +1813,6 @@ async function finalizeClockOut(i, ventes) {
 if (require.main === module) restoreData().finally(() => client.login(TOKEN));
 // pour les tests
 module.exports = {
-  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
+  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, dropClockingPanels, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
   parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };

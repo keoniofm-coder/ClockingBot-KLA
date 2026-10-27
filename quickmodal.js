@@ -188,7 +188,7 @@ async function saveChange(i, date, slot0, mode) {
     planEdit.addPatch(patch, sid, { slot, chatterId: c.id, accts, ...(Object.keys(b).length ? { boxes: b } : {}) });
   }
   if (!Object.keys(patch).length) return done(i, `Rien n'a changé pour ${tag(c)}.`, 30000);
-  // shift en cours ou qui commence bientôt : la ligne part dans le salon clocking (comme un changement de l'app)
+  // shift en cours ou qui commence bientôt : la ligne part dans le salon box (comme un changement de l'app)
   await appSync.writePlan(date, patch, null, { loud: running(date, slot) });
   ctx.refresh?.(date);
   const cat = d.cat;

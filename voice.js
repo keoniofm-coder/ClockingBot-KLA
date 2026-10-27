@@ -17,7 +17,7 @@ const VOICE_LOG_ID = (process.env.VOICE_LOG_CHANNEL_ID ?? "1548280432595050556")
 const GRACE = Math.max(0, Number(process.env.VOICE_GRACE_S ?? 30) || 0) * 1000; // micro-coupure ignorée
 const BACK_WITHIN = 4 * 3600e3; // « est revenu » si parti depuis moins de 4 h
 
-// Fourni par index.js : client, isAdmin(i), fmtTime(t), shiftText(uid), boxTag(uid), inCoupure(uid), depart(i, uid, { cut }),
+// Fourni par index.js : client, note(payload) (une annonce du salon box), isAdmin(i), fmtTime(t), shiftText(uid), boxTag(uid), inCoupure(uid), depart(i, uid, { cut }),
 // replace(i, uid) (la fenêtre 🔁 Remplacer), retour(i, uid)
 const ctx = {};
 const pending = new Map(); // uid -> { timer, channelId, t } : départ pas encore posté
@@ -31,7 +31,7 @@ async function who(uid) {
   return `<@${uid}>${tag ? ` (${tag})` : ""}`;
 }
 
-let warned = false; // alerte « je ne peux pas écrire » déjà postée dans clocking (une fois par démarrage)
+let warned = false; // alerte « je ne peux pas écrire » déjà postée dans le salon box (une fois par démarrage)
 async function post(voiceCh, payload) {
   const id = VOICE_LOG_ID || voiceCh?.id;
   try {
@@ -40,12 +40,10 @@ async function post(voiceCh, payload) {
   } catch (e) {
     console.error("Message vocal :", e.message);
     // le plus souvent : le rôle du bot n'a pas le droit d'écrire dans le chat du vocal
-    const clock = (process.env.CLOCKING_CHANNEL_ID || "").trim();
-    if (warned || !clock) return;
+    if (warned || !ctx.note) return;
     warned = true;
-    await ctx.client.channels
-      .fetch(clock)
-      .then((c) => c.send({ content: `⚠️ Je n'arrive pas à écrire les arrivées et départs du vocal dans <#${id}> (${String(e.message).slice(0, 120)}). Dans les réglages de ce salon › Permissions, donne au rôle du bot ✅ Voir le salon et ✅ Envoyer des messages.`, allowedMentions: { parse: [] } }))
+    await ctx
+      .note({ content: `⚠️ Je n'arrive pas à écrire les arrivées et départs du vocal dans <#${id}> (${String(e.message).slice(0, 120)}). Dans les réglages de ce salon › Permissions, donne au rôle du bot ✅ Voir le salon et ✅ Envoyer des messages.`, allowedMentions: { parse: [] } })
       .catch(() => {});
   }
 }

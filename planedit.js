@@ -110,7 +110,7 @@ function workSlot(st, d) {
   return (cur && filled.includes(cur.k) ? cur.k : filled[0]) || "soir";
 }
 const startOf = (date, slot) => appSync.parisMs(date, appSync.START_OF[slot]);
-// shift en cours, ou qui commence dans les 2 h (on prévient alors le salon clocking)
+// shift en cours, ou qui commence dans les 2 h (on prévient alors le salon box)
 const running = (date, slot) => Date.now() >= startOf(date, slot) - 2 * 3600e3 && Date.now() < startOf(date, slot) + 6 * 3600e3;
 const isNow = (date, slot) => Date.now() >= startOf(date, slot) && Date.now() < startOf(date, slot) + 6 * 3600e3;
 // Shift en cours ce jour-là, sinon le prochain, sinon le soir
@@ -193,7 +193,7 @@ function fateOpts(d, slot, who, mids, exclude) {
     ...others.slice(0, 23).map((s) => opt(`Il quitte ${names} : ${bx || "ses box"} → ${d.byId[s.chatterId].name}`, `give:${s.sid}`, acctsText(d, s.accts, s.boxes, false), "🎁")),
   ];
 }
-// Applique ce choix sur l'entrée `who` (qui quitte les modèles `mids`) ; renvoie le texte du message clocking
+// Applique ce choix sur l'entrée `who` (qui quitte les modèles `mids`) ; renvoie le texte de l'annonce du salon box
 function applyFate(d, fate, who, mids, patch) {
   if (!mids.length || !fate || fate === "keep") return mids.length ? ` · garde aussi ${mids.map((m) => `**${d.mName(m)}**`).join(", ")}` : "";
   const given = fate.startsWith("give:") && d.plan.find((s) => s.sid === fate.slice(5));
@@ -579,7 +579,7 @@ async function freeBoxes(st) {
     await ctx.notify?.({
       content: `🧺 Box retirées à ${tag(c)}${st.cutNoted ? " (⚡ coupure, rendues à son retour)" : ""} · ${sl.emoji} ${sl.l} · ${what}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Box retirées (salon clocking) :", err.message));
+    }).catch((err) => console.error("Box retirées (salon box) :", err.message));
   return `✅ Box retirées à ${whoMd(c)} : ${what}.${st.cutNoted ? " Il les reprend à son 🔙 retour de coupure." : ""}`;
 }
 
@@ -768,12 +768,12 @@ async function replace(st) {
     const res = await ctx.coupure?.({ cid: out.id, slot: e.slot, date: st.date }).catch((err) => ({ error: err.message }));
     cut = res?.error ? ` ⚠️ Coupure pas notée : ${String(res.error).slice(0, 120)}` : " ⚡ Coupure notée au pointage.";
   }
-  // prévient les deux dans le salon clocking si le shift est en cours (ou commence bientôt)
+  // prévient les deux dans le salon box si le shift est en cours (ou commence bientôt)
   if (running(st.date, e.slot))
     await ctx.notify?.({
       content: `🔁 ${tag(r)} remplace ${tag(out)}${st.cut || st.cutNoted ? " (⚡ coupure)" : ""} · ${sl.emoji} ${sl.l} · ${what}${fate}`,
       allowedMentions: { users: [r.discordId, out.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Remplacement (salon clocking) :", err.message));
+    }).catch((err) => console.error("Remplacement (salon box) :", err.message));
   Object.assign(st, { out: null, inn: null, cut: false, cutNoted: false, cutText: "", fate: "keep", sel: `${rsid}|` });
   return `✅ ${whoMd(r)} reprend ${what} de ${whoMd(out)} sur ${sl.emoji} ${sl.l}${noPing(d, fate)}.${cut}`;
 }
@@ -802,7 +802,7 @@ async function move(st) {
     await ctx.notify?.({
       content: `🔀 ${tag(c)} passe sur ${dest} · ${sl.emoji} ${sl.l}${fate}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
-    }).catch((err) => console.error("Déplacement (salon clocking) :", err.message));
+    }).catch((err) => console.error("Déplacement (salon box) :", err.message));
   Object.assign(st, { mvSid: null, mvAcc: null, mvBoxes: [], fate: "keep", sel: `${e.sid}|${tm}` });
   return `✅ ${whoMd(c)} passe sur ${d.mName(tm)}${l.length ? ` · ${boxLabel(l)}` : ""}${noPing(d, fate)}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }
@@ -827,7 +827,7 @@ async function renfort(st) {
   const dest = `**${d.mName(mid).toLocaleUpperCase("fr")}** ${d.cat.platName(st.acc.split("|")[1])}${l.length ? ` · ${boxLabel(l)}` : ""}`;
   if (running(date, slot))
     await ctx.notify?.({ content: `💪🏼 ${tag(c)} en renfort · ${sl.emoji} ${sl.l} · ${dest}`, allowedMentions: { users: [c.discordId].filter(Boolean) } })
-      .catch((err) => console.error("Renfort (salon clocking) :", err.message));
+      .catch((err) => console.error("Renfort (salon box) :", err.message));
   Object.assign(st, { cid: null, acc: null, rBoxes: [], sel: `${sid}|${mid}` });
   return `✅ ${whoMd(c)} ${st.live ? "en renfort" : "ajouté"} sur ${sl.emoji} ${sl.l} (${dayLabel(date)}) · ${d.mName(mid)}${l.length ? ` · ${boxLabel(l)}` : ""}.${taken.length ? ` ↪️ ${cap(taken.join(", "))}.` : ""}`;
 }

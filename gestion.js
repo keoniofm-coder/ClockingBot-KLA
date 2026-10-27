@@ -1,5 +1,5 @@
-// ================== LES BOUTONS DES ADMINS (🛠️ Admin sous le message du salon box) ==================
-// Dans le salon clocking, les chatteurs ne voient que Clock In / Clock Out. 🛠️ Admin, sous le message du salon box, ouvre
+// ================== LES BOUTONS DES ADMINS (🛠️ Admin en haut du message du salon box) ==================
+// Dans le salon box, les chatteurs n'utilisent que Clock In / Clock Out. 🛠️ Admin, en haut du message du salon box, ouvre
 // pour l'admin seul (Discord ne cache pas un bouton d'un message public) la barre de recherche et un bouton par sujet. Presque tout s'ouvre en petite fiche (une fenêtre Discord) : 🔎 la fiche d'un chatteur (barre de recherche du haut),
 // ➕ Ajouter un chatteur, ✏️ Modifier le shift, 💪🏼 Renfort, ⚡ Coupure, 🔙 Retour de coupure, ⚠️ Pénalités, 💃 Modèles,
 // 🛡️ Admins, 🔔 Renvoyer le panneau, 🚫 Virer. 📋 Pointer reste un menu visible seulement par
@@ -22,7 +22,7 @@ const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
 const DURATIONS = [5, 10, 15, 20, 30, 45, 60, 90, 120];
-// Raison d'une coupure (fiche ⚡ Coupure) : écrite dans la ligne du salon clocking et au pointage
+// Raison d'une coupure (fiche ⚡ Coupure) : écrite dans la ligne du salon box et au pointage
 const CUT_WHY = [
   ["", "Je ne sais pas", "❔"], ["courant", "Coupure de courant", "🔌"], ["internet", "Internet / connexion", "🌐"],
   ["appareil", "Ordinateur ou téléphone", "💻"], ["pause", "Pause", "☕"], ["urgence", "Urgence perso", "🚨"],
@@ -201,7 +201,7 @@ const VIEWS = {
       content: [
         st.note,
         "⚡ **Noter une coupure**",
-        "Le chatteur est notifié dans le salon clocking et passe en « Coupure » au pointage. À son retour : 🔙 **Retour de coupure**.",
+        "Le chatteur est notifié dans le salon box et passe en « Coupure » au pointage. À son retour : 🔙 **Retour de coupure**.",
         st.user ? `Chatteur : <@${st.user.id}>${st.min ? ` · ${st.min} min` : ""}` : "",
       ].filter(Boolean).join("\n"),
       components: [
@@ -260,10 +260,10 @@ const VIEWS = {
       ],
     };
   },
-  // Renvoyer le panneau d'un shift (pointage, Clock In / Clock Out et ces boutons) en bas du salon clocking
+  // Renvoyer le message d'un shift (box, pointage, Clock In / Clock Out) en bas du salon box
   shift() {
     return {
-      content: "🔔 **Renvoyer le panneau d'un shift** en bas du salon clocking (il remplace le précédent du même shift).",
+      content: "🔔 **Renvoyer le panneau d'un shift** en bas du salon box (il remplace le message du salon box).",
       components: [
         row(
           new StringSelectMenuBuilder()
@@ -328,7 +328,7 @@ const FICHES = {
   // ⚡ Coupure : le chatteur (recherche), la durée prévue, la raison
   cut() {
     return new ModalBuilder().setCustomId("g_cutm").setTitle("⚡ Noter une coupure").addLabelComponents(
-      label("Chatteur", "Notifié dans le salon clocking, « Coupure » au pointage").setUserSelectMenuComponent(users("who")),
+      label("Chatteur", "Notifié dans le salon box, « Coupure » au pointage").setUserSelectMenuComponent(users("who")),
       label("Durée prévue").setStringSelectMenuComponent(pick("min", [{ label: "Je ne sais pas", value: "0", emoji: "❔", default: true }, ...DURATIONS.map((m) => ({ label: `${m} min`, value: String(m), emoji: "⏱️" }))])),
       label("Raison").setStringSelectMenuComponent(pick("why", CUT_WHY.map(([value, l, emoji]) => ({ label: l, value: value || "_", emoji, default: !value })))),
       label("Détail (optionnel)", "Le chatteur le verra").setTextInputComponent(textIn("note", { placeholder: "ex : orage, box internet en panne" }))
@@ -354,10 +354,10 @@ const FICHES = {
       )
     );
   },
-  // 🔔 Renvoyer le panneau d'un shift en bas du salon clocking
+  // 🔔 Renvoyer le panneau d'un shift en bas du salon box
   shift(cur) {
     return new ModalBuilder().setCustomId("g_shiftm").setTitle("🔔 Renvoyer le panneau").addLabelComponents(
-      label("Quel shift ?", "Il remplace le panneau précédent du même shift").setStringSelectMenuComponent(
+      label("Quel shift ?", "Il remplace le message du salon box").setStringSelectMenuComponent(
         pick("shift", Object.entries(ctx.SHIFTS).map(([k, v]) => ({ label: `${k} (${v.label})`, value: k, emoji: v.emoji, default: k === cur })))
       )
     );
@@ -495,7 +495,7 @@ async function handle(i) {
       if (!ctx.SHIFTS[name]) return reply(i, { content: "Choisis le shift." });
       await i.deferReply({ flags: EPHEMERAL });
       await ctx.announceShift(name);
-      return done(i, `✅ Panneau du shift **${name}** envoyé dans le salon clocking.`);
+      return done(i, `✅ Shift **${name}** renvoyé dans le salon box.`);
     }
     case "g_firem": {
       if (vals(i, "ok")[0] !== "yes") return reply(i, { content: "Rien n'est fait : confirme dans la dernière case." });
@@ -555,7 +555,7 @@ async function handle(i) {
     await i.deferUpdate();
     if (id === "g_ss") {
       await ctx.announceShift(i.values[0]);
-      return done(i, `✅ Panneau du shift **${i.values[0]}** envoyé dans le salon clocking.`);
+      return done(i, `✅ Shift **${i.values[0]}** renvoyé dans le salon box.`);
     }
     const r = await ctx.postPlanning(i.values[0]);
     return done(i, `✅ Message du salon box renvoyé : ${r?.url}`, 60000);

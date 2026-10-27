@@ -56,7 +56,7 @@ async function prime(date) {
   sids.set(date, new Map(plan.map((s) => [s.sid, `${s.slot}|${s.chatterId}`])));
 }
 
-// Shifts surveillés : ceux où le bot prévient le salon clocking (en cours ou qui commencent dans les 2 h)
+// Shifts surveillés : ceux où le bot prévient le salon box (en cours ou qui commencent dans les 2 h)
 function liveShifts() {
   const td = appSync.parisParts(Date.now()).date;
   return [-1, 0, 1].flatMap((k) => SLOTS.map((s) => ({ date: appSync.addDays(td, k), slot: s.k }))).filter((x) => running(x.date, x.slot));

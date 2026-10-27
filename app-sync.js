@@ -337,7 +337,7 @@ async function setBoxCount(date, slot, mid, n) {
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 // Écrit des entrées du planning d'un jour : { sid: entrée } (null = supprimée), comme l'app ;
 // nbox : le nombre de box par shift et modèle, écrit en même temps ({ "soir|m-anna": 4 })
-// loud : le bot veut que le salon clocking en soit prévenu (sinon l'action qui écrit le dit elle-même)
+// loud : le bot veut que le salon box en soit prévenu (sinon l'action qui écrit le dit elle-même)
 async function writePlan(date, patch, nbox, { loud = false } = {}) {
   if (loud) await hooks.beforeLoud?.(date).catch(() => {});
   await mergeDoc("plan", date, { date, shifts: patch, ...(nbox && Object.keys(nbox).length ? { nbox } : {}) }, { date, shifts: {} });
