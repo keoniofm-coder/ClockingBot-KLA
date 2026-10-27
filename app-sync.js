@@ -315,11 +315,14 @@ async function openCoupures(t = Date.now()) {
   const today = parisParts(t).date;
   const [chatters, ...days] = await Promise.all([appChatters(), readMarks(addDays(today, -1)), readMarks(today)]);
   const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
-  return days
+  const open = days
     .flatMap((m, k) => Object.values(m).map((x) => ({ ...x, date: addDays(today, k - 1) })))
     .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId])
     .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot, date: m.date }))
     .sort((a, b) => a.since - b.since);
+  // une seule ligne par chatteur : sa coupure la plus récente, celle que 🔙 termine (une d'hier jamais terminée
+  // le mettait deux fois dans la liste, et Discord refusait d'ouvrir la fenêtre)
+  return [...new Map(open.map((c) => [c.id, c])).values()].sort((a, b) => a.since - b.since);
 }
 // Tout ce qu'il faut pour afficher le planning d'un jour
 async function planningDay(date) {
