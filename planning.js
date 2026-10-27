@@ -8,12 +8,19 @@ const SLOTS = [
   { k: "nuit", shift: "NUIT", l: "Nuit", h: "02h → 08h", emoji: "🌙", color: 0x79a3e3 },
 ];
 
-const BOX_ORDER = ["all", ...Array.from({ length: 15 }, (_, k) => String(k + 1))];
+// Box : All Inbox, 1 à 15, et « vip » (il gère les clients VIP de la modèle, avec ou sans box ; plusieurs peuvent l'avoir)
+const BOX_ORDER = ["all", ...Array.from({ length: 15 }, (_, k) => String(k + 1)), "vip"];
+const VIP = "VIP 👑";
+const isNum = (b) => /^\d+$/.test(b);
 const boxList = (v) =>
   [...new Set((Array.isArray(v) ? v : v ? [v] : []).map(String).filter((x) => BOX_ORDER.includes(x)))]
     .sort((a, b) => BOX_ORDER.indexOf(a) - BOX_ORDER.indexOf(b));
-// Box en court : « B1·2 », « All »
-const boxesS = (l) => (!l.length ? "" : l.includes("all") ? "All" : "B" + l.join("·"));
+// All Inbox remplace les box numérotées (VIP reste)
+const soloAll = (l) => (l.includes("all") ? l.filter((b) => !isNum(b)) : l);
+// Box en court : « B1·2 », « All », « B1 VIP »
+const boxesS = (l) => [l.includes("all") ? "All" : l.some(isNum) ? "B" + l.filter(isNum).join("·") : "", l.includes("vip") ? "VIP" : ""].filter(Boolean).join(" ");
+// Box en toutes lettres (menus, boutons, réponses) : « Box 2 & 3 », « All Inbox », « VIP 👑 », « Box 1 & VIP 👑 »
+const boxesT = (l) => [l.includes("all") ? "All Inbox" : l.some(isNum) ? `Box ${l.filter(isNum).join(" & ")}` : "", l.includes("vip") ? VIP : ""].filter(Boolean).join(" & ");
 const boxIdx = (l) => (l.length ? BOX_ORDER.indexOf(l[0]) : 99);
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -93,9 +100,9 @@ const BOX_EMOJIS = {}; // "1".."15", "all" -> « <:klbox1_3:id> »
 const setBoxEmojis = (map) => Object.assign(BOX_EMOJIS, map);
 const keycap = (b) => (b === "10" ? "🔟" : [...String(b)].map((ch) => `${ch}\uFE0F\u20E3`).join(""));
 function boxesE(l) {
-  if (!l.length) return "";
-  if (l.includes("all")) return BOX_EMOJIS.all || "📥 **All**";
-  return l.map((b) => BOX_EMOJIS[b] || keycap(b)).join(" & ");
+  const out = l.includes("all") ? [BOX_EMOJIS.all || "📥 **All**"] : l.filter(isNum).map((b) => BOX_EMOJIS[b] || keycap(b));
+  if (l.includes("vip")) out.push(VIP);
+  return out.join(" & ");
 }
 // « Box : 2️⃣ & 3️⃣ »
 const boxLabel = (l) => (l.length ? `Box : ${boxesE(l)}` : "");
@@ -180,6 +187,6 @@ function chunkEmbeds(embeds) {
 }
 
 module.exports = {
-  SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesE, boxLabel, boxTag, modelHead, modelMark,
+  SLOTS, planningEmbeds, slotLines, rosterLines, slotGroups, chunkEmbeds, dayLabel, boxList, boxesS, boxesT, boxesE, boxLabel, isNum, soloAll, boxIdx, VIP, boxTag, modelHead, modelMark,
   setBoxEmojis, BOX_ORDER, cap, withEmoji,
 };

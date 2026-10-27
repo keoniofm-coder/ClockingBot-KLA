@@ -527,7 +527,7 @@ async function spreadTemplate(after, before, from) {
       }
       patch[cur ? cur.sid : sid] = fullEntry(a, cur);
       for (const [m, v] of Object.entries(a.boxes || {})) {
-        const nums = boxesOf(v).filter((k) => k !== "all");
+        const nums = boxesOf(v).filter((k) => /^\d+$/.test(k));
         if (!nums.length) continue;
         for (const x of day.filter((s) => s.slot === a.slot && s.chatterId !== cid && patch[s.sid] !== null)) {
           const p = patch[x.sid];

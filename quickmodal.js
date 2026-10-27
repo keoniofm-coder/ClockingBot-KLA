@@ -98,15 +98,15 @@ async function fromUser(i, id, chatters) {
 }
 const fromName = (name, chatters) => (String(name || "").trim() ? findChatter(String(name).trim(), chatters) : null);
 const sel = (i, id, def) => field(i, "getStringSelectValues", id)?.[0] || def;
-// « 3 4 », « all », « 0 » (aucune) ; vide : null (sans changement) ; { error } si une box n'existe pas
+// « 3 4 », « all », « VIP », « 0 » (aucune) ; vide : null (sans changement) ; { error } si une box n'existe pas
 function boxesOf(t) {
   const s = String(t || "").trim();
   if (!s) return null;
   if (/^(0|aucune?|non|rien|-)$/i.test(s)) return [];
   const { boxes, name } = parseLine(`x ${s}`);
-  const bad = boxes.filter((b) => b !== "all" && (Number(b) < 1 || Number(b) > 15));
-  if (name !== "x" || bad.length || !boxes.length) return { error: `Box « ${s} » : écris des numéros de 1 à 15 (ex : 3 4), all, ou 0 pour aucune.` };
-  return boxes.includes("all") ? ["all"] : boxList(boxes);
+  const bad = boxes.filter((b) => planning.isNum(b) && (Number(b) < 1 || Number(b) > 15));
+  if (name !== "x" || bad.length || !boxes.length) return { error: `Box « ${s} » : écris des numéros de 1 à 15 (ex : 3 4), all, VIP, ou 0 pour aucune.` };
+  return planning.soloAll(boxList(boxes));
 }
 
 // ---------- Remplacer ----------

@@ -10,7 +10,7 @@ const { ModalBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require(
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, row, button, fresh, EPHEMERAL } = require("./ui");
-const { SLOTS, boxList, withEmoji, dayLabel } = planning;
+const { SLOTS, boxList, boxesT, boxIdx, isNum, soloAll, withEmoji, dayLabel } = planning;
 
 // Fourni par index.js : isAdmin(i), refresh(date)
 const ctx = {};
@@ -25,10 +25,10 @@ const norm = (s) =>
   String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 const shortDay = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 const same = (a, b) => a.length === b.length && a.every((x, k) => x === b[k]);
-// Box écrites dans la fenêtre : « 1 2 », « all »
-const boxText = (l) => (l.includes("all") ? "all" : l.join(" "));
-const boxWords = (l) => (!l.length ? "sans box" : l.includes("all") ? "All Inbox" : `Box ${l.join(" & ")}`);
-const rank = (l) => (!l.length ? 99 : l[0] === "all" ? 0 : Number(l[0]));
+// Box écrites dans la fenêtre : « 1 2 », « all », « VIP »
+const boxText = (l) => soloAll(l).map((b) => (b === "vip" ? "VIP" : b)).join(" ");
+const boxWords = (l) => boxesT(l) || "sans box";
+const rank = (l) => boxIdx(l);
 
 // Le shift tel qu'il est maintenant, et les modèles de la fenêtre (5 cases au plus : celles du shift d'abord)
 async function loadShift(date, slot) {
@@ -86,7 +86,7 @@ async function openModal(i, date, slot, texts, only = null) {
 }
 
 // ---------- Lecture du texte ----------
-// « Jean 1 2 », « Jean : 1.2 », « Jean box 1 & 2 », « Jean 1-3 », « Jean all » -> { name: "Jean", boxes: [...] }
+// « Jean 1 2 », « Jean : 1.2 », « Jean box 1 & 2 », « Jean 1-3 », « Jean all », « Jean VIP » -> { name: "Jean", boxes: [...] }
 function parseLine(line) {
   const t = String(line)
     .replace(/^[\s\-•*·>]+/, "")
@@ -100,6 +100,7 @@ function parseLine(line) {
     const m = w.match(/^(?:box|b)?(\d{1,3})$/);
     if (m) boxes.unshift(String(Number(m[1])));
     else if (["all", "inbox", "allinbox"].includes(w)) boxes.unshift("all");
+    else if (w === "vip") boxes.unshift("vip");
     else if (!["", "box", "boxes", "b", "et", "and"].includes(w)) break;
     toks.pop();
   }
@@ -149,14 +150,15 @@ async function applyTexts(date, slot, texts) {
         errors.push(`${ml(mid)} · ${r.error}`);
         continue;
       }
-      const bad = boxes.filter((b) => b !== "all" && !(Number(b) >= 1 && Number(b) <= 15));
-      if (bad.length) errors.push(`${ml(mid)} · ${r.c.name} : Box ${bad.join(", ")} n'existe pas (de 1 à 15, ou all)`);
+      const bad = boxes.filter((b) => isNum(b) && !(Number(b) >= 1 && Number(b) <= 15));
+      if (bad.length) errors.push(`${ml(mid)} · ${r.c.name} : Box ${bad.join(", ")} n'existe pas (de 1 à 15, all ou VIP)`);
       const m = want.get(r.c.id) || new Map();
       want.set(r.c.id, m);
       let l = boxList([...(m.get(mid) || []), ...boxes]);
-      if (l.includes("all")) l = ["all"];
+      l = soloAll(l);
       m.set(mid, l);
-      for (const b of l.filter((x) => x !== "all")) {
+      // All Inbox et VIP peuvent être à plusieurs, une box numérotée à un seul
+      for (const b of l.filter(isNum)) {
         const k = `${mid}|${b}`;
         if (owner[k] && owner[k] !== r.c.id) errors.push(`${ml(mid)} · Box ${b} écrite pour ${D.byId[owner[k]].name} et pour ${r.c.name} : une box = un chatteur`);
         owner[k] = r.c.id;
@@ -227,7 +229,7 @@ async function applyTexts(date, slot, texts) {
   // nombre de box de chaque modèle : la plus haute écrite
   const nbox = {};
   for (const mid of mids) {
-    const top = Math.max(0, ...[...want.values()].flatMap((m) => (m.get(mid) || []).filter((b) => b !== "all").map(Number)));
+    const top = Math.max(0, ...[...want.values()].flatMap((m) => (m.get(mid) || []).filter(isNum).map(Number)));
     if (top && top !== Number(D.day.nbox?.[`${slot}|${mid}`])) nbox[`${slot}|${mid}`] = top;
   }
   if (!Object.keys(patch).length && !Object.keys(nbox).length) return { lines: ["Rien n'a changé."] };

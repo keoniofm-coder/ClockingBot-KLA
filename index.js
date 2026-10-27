@@ -302,7 +302,7 @@ const hashOf = (payloads) =>
 // encore là, 🟠 retard, ⚡ coupure, ❌ absent), une ligne par chatteur avec ses box en colonne à droite, et Clock In /
 // Clock Out dessous. La gestion (🛠️ Admin) est sous le message du salon box. Discord compte 40 éléments par message :
 // un grand shift prend deux messages, Clock In / Clock Out sous le dernier.
-const boxWord = (l) => (!l.length ? "Sans box" : l.includes("all") ? "All Inbox" : `Box ${l.join(" & ")}`);
+const boxWord = (l) => planning.boxesT(l) || "Sans box";
 // La box à droite du nom : un clic d'admin ouvre ✏️ les box et les chatteurs de cette modèle
 const boxButton = (l, date, slot, mid, n) => button(`pm_mod~${date}~${slot}~${mid || "_"}~${n}`, boxWord(l), null, l.length ? ButtonStyle.Primary : ButtonStyle.Secondary);
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
@@ -449,13 +449,14 @@ async function boxView(name, date) {
       if (!x.boxes.length) none.push(x);
       for (const k of x.boxes) held.set(k, [...(held.get(k) || []), x]);
     }
-    const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter((k) => k !== "all").map(Number), 0);
+    const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter(planning.isNum).map(Number), 0);
     const lines = [`## ${planning.modelHead(g)}`];
     if (held.has("all")) lines.push(`### ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
     for (let k = 1; k <= n; k++) {
       const hs = held.get(String(k)) || [];
       lines.push(`### ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
     }
+    if (held.has("vip")) lines.push(`### ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
     if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
     items.push({ sep: true }, { text: lines.join("\n") });
   }

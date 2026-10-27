@@ -10,7 +10,7 @@ const { StringSelectMenuBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const planning = require("./planning");
 const { reply, done, showView, row, button, opt, selectMenus, EPHEMERAL } = require("./ui");
-const { SLOTS, withEmoji, boxList, boxesS, boxesE, boxLabel, dayLabel } = planning;
+const { SLOTS, withEmoji, boxList, boxesS, boxesT, boxesE, boxLabel, boxIdx, isNum, soloAll, VIP, dayLabel } = planning;
 const { pickRow, altButton, picked } = require("./pick");
 const shiftModal = require("./shiftmodal");
 
@@ -22,7 +22,7 @@ const ctx = {};
 const states = new Map(); // userId -> état du menu en cours (voir open)
 
 const slotOf = (k) => SLOTS.find((s) => s.k === k) || { k, l: k, emoji: "", h: "" };
-const BOX_OPTS = [["all", "All Inbox"], ...Array.from({ length: 15 }, (_, k) => [String(k + 1), `Box ${k + 1}`])];
+const BOX_OPTS = [["all", "All Inbox"], ...Array.from({ length: 15 }, (_, k) => [String(k + 1), `Box ${k + 1}`]), ["vip", VIP]];
 
 // Tout ce qu'il faut pour un jour : planning, chatteurs, comptes de l'app, day off
 async function loadNow(date) {
@@ -89,8 +89,6 @@ const emptyMenu = (id, placeholder) =>
 const backBtn = () => button("pe_back", "Retour", "↩️", ButtonStyle.Secondary);
 const closeBtn = () => button("pe_x", "Fermer", null, ButtonStyle.Secondary);
 const head = (st, lines) => [st.note, ...lines].filter(Boolean).join("\n");
-// Box en toutes lettres dans les menus (les emojis de box n'y passent pas) : « Box 2 & 3 », « All Inbox »
-const boxesT = (l) => (!l.length ? "" : l.includes("all") ? "All Inbox" : `Box ${l.join(" & ")}`);
 const plS = (n) => (n > 1 ? "s" : "");
 // 2000 caractères au plus par message : sur un gros shift, les emojis de box (longs) passent en chiffres
 const fitMsg = (txt) => {
@@ -98,10 +96,10 @@ const fitMsg = (txt) => {
   const short = txt.replace(/<a?:klbox\d+_(\w+):\d+>/g, (m, k) => (k === "all" ? "All" : k));
   return short.length <= 2000 ? short : short.slice(0, 1990) + "\n…";
 };
-// All Inbox seul, ou des box numérotées (celle choisie en dernier gagne)
+// All Inbox ou des box numérotées (celle choisie en dernier gagne) ; VIP va avec les deux
 const cleanBoxes = (values, before) => {
   const l = boxList(values);
-  return l.includes("all") && l.length > 1 ? (before.includes("all") ? l.filter((x) => x !== "all") : ["all"]) : l;
+  return l.includes("all") && l.some(isNum) ? (before.includes("all") ? l.filter((x) => x !== "all") : soloAll(l)) : l;
 };
 
 // Shift affiché : celui choisi, sinon celui en cours si c'est ce jour-là, sinon le premier rempli
@@ -158,7 +156,7 @@ function addPatch(patch, sid, v) {
   patch[sid] = { ...cur, ...v, ...(v.boxes || cur.boxes ? { boxes: { ...(cur.boxes || {}), ...(v.boxes || {}) } } : {}) };
 }
 function takeBoxes(d, slot, mid, l, except, patch) {
-  const nums = l.filter((b) => b !== "all");
+  const nums = l.filter(isNum);
   const taken = [];
   if (!nums.length) return taken;
   for (const s of d.plan) {
@@ -205,7 +203,7 @@ function applyFate(d, fate, who, mids, patch) {
     addPatch(patch, who.sid, { boxes: { [mid]: null } });
     if (given && midsOf(given.accts).includes(mid) && l.length) {
       const cur = boxList(patch[given.sid]?.boxes?.[mid] !== undefined ? patch[given.sid].boxes[mid] : given.boxes?.[mid]);
-      addPatch(patch, given.sid, { boxes: { [mid]: boxList([...cur.filter((b) => b !== "all"), ...l]) } });
+      addPatch(patch, given.sid, { boxes: { [mid]: soloAll(boxList([...cur.filter((b) => b !== "all"), ...l])) } });
       lines.push(`ses ${boxLabel(l)} sur **${d.mName(mid)}** → ${tag(d.byId[given.chatterId])}`);
     } else lines.push(`quitte **${d.mName(mid)}**${l.length ? ` (${boxLabel(l)} libre${l.length > 1 ? "s" : ""})` : ""}`);
   }
@@ -242,7 +240,7 @@ const VIEWS = {
     const mids = [...new Set(here.flatMap((s) => midsOf(s.accts)))].sort((a, b) => d.mName(a).localeCompare(d.mName(b), "fr"));
     const rank = (s, mid) => {
       const l = boxList(s.boxes?.[mid]);
-      return l.length ? (l[0] === "all" ? 0 : Number(l[0])) : 99;
+      return boxIdx(l);
     };
     const line = (s, mid, multi) => {
       const k = stOf(s), l = mid ? boxList(s.boxes?.[mid]) : [];
@@ -284,7 +282,7 @@ const VIEWS = {
             .setPlaceholder(`Box de ${name(sel)} sur ${d.mName(bm)} : aucune`.slice(0, 150))
             .setMinValues(0)
             .setMaxValues(BOX_OPTS.length)
-            .addOptions(BOX_OPTS.map(([v, l]) => opt(l, v, holder(v) ? `Prise par ${holder(v)}` : v === "all" ? "Toutes les box" : "Libre", null, cur.includes(v))));
+            .addOptions(BOX_OPTS.map(([v, l]) => opt(l, v, holder(v) ? `Prise par ${holder(v)}` : v === "all" ? "Toutes les box" : v === "vip" ? "Les clients VIP" : "Libre", null, cur.includes(v))));
     return {
       content: fitMsg(head(st, [
         `📅 **${sl.emoji} ${sl.l} · ${dayLabel(st.date)}** (${sl.h}) · ${n ? `${n} chatteur${plS(n)}` : "personne"}${isNow(st.date, slot) ? " · 🔴 en cours" : ""}`,
@@ -867,7 +865,7 @@ async function giveBack(date, slot, cid) {
   for (const { h, b } of parts) {
     takeBoxes(d, slot, h.m, b, [e.sid], patch);
     const cur = boxList(e.boxes?.[h.m]).filter((x) => x !== "all");
-    addPatch(patch, e.sid, { boxes: { [h.m]: b.includes("all") ? ["all"] : boxList([...cur, ...b]) } });
+    addPatch(patch, e.sid, { boxes: { [h.m]: soloAll(boxList([...cur, ...b])) } });
   }
   addPatch(patch, e.sid, { held: null });
   await save({ date }, patch);
