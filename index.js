@@ -569,8 +569,8 @@ async function shiftBoard(name, date) {
   const [day, staff] = await Promise.all([appSync.planningDay(date), appSync.slotStaff(date, slot)]);
   const { seen, covering } = clockInsOf(name, date);
   const here = (p) => seen.has(p.discordId) || covering.has(p.discordId);
-  // revenu de sa coupure : de nouveau ✅, la coupure reste écrite à droite de son nom
-  const backFromCut = (m) => m?.status === "coupure" && m.cutAt && m.cutEnd;
+  // revenu de sa coupure : de nouveau ✅, la coupure reste écrite à droite de son nom (pas revenu avant la fin du shift : ⚡)
+  const backFromCut = (m) => m?.status === "coupure" && m.cutAt && m.cutEnd && !m.noBack;
   const stOf = (p) =>
     p.off ? "off" : backFromCut(p.mark) ? "present" : ST[p.mark?.status] && !(p.mark.status === "absent" && here(p)) ? p.mark.status : here(p) ? "present" : "todo";
   const detail = (p) => {
@@ -582,7 +582,14 @@ async function shiftBoard(name, date) {
     else if (k === "todo") bits.push("pas encore là");
     else if (k === "present") bits.push(covering.has(p.discordId) && !seen.has(p.discordId) ? `double shift, là depuis ${inT ? fmtTime(inT) : "le shift d'avant"}` : inT ? `arrivé ${fmtTime(inT)}` : "présent");
     else if (k === "retard") bits.push(`retard ${m.min || "?"} min`);
-    else if (k === "coupure") bits.push(m.cutAt && !m.cutEnd ? `en coupure depuis ${fmtTime(m.cutAt)}${Date.now() - m.cutAt >= 60e3 ? ` · ${dur((Date.now() - m.cutAt) / 60e3)}` : ""}` : `coupure ${m.min ? dur(m.min) : ""}`.trim());
+    else if (k === "coupure")
+      bits.push(
+        m.cutAt && !m.cutEnd
+          ? `en coupure depuis ${fmtTime(m.cutAt)}${Date.now() - m.cutAt >= 60e3 ? ` · ${dur((Date.now() - m.cutAt) / 60e3)}` : ""}`
+          : m.noBack && m.cutAt
+            ? `coupure depuis ${fmtTime(m.cutAt)}, pas revenu avant la fin du shift · ${dur(Math.round((m.cutEnd - m.cutAt) / 60e3))}`
+            : `coupure ${m.min ? dur(m.min) : ""}`.trim()
+      );
     if (backFromCut(m)) {
       const last = Math.round((m.cutEnd - m.cutAt) / 60e3);
       bits.push(`coupure ${fmtTime(m.cutAt)} → ${fmtTime(m.cutEnd)} : ${dur(last)}${Number(m.min) > last ? ` (${dur(m.min)} au total)` : ""}`);
@@ -729,8 +736,41 @@ const num = (x) => Number(x) || 0;
 
 // Absents automatiques (et rattrapage des pointages qui n'ont pas pu s'écrire au clock in)
 let sweeping = false;
+// Clock out oublié : 4 h après la fin de son shift (le dernier, en double shift), le bot le fait à sa place, à l'heure
+// de fin du shift (sans fiche de ventes) ; une ligne dans le salon box le dit
+const AUTO_OUT_H = Number(process.env.AUTO_CLOCKOUT_H ?? 4);
+function sessionEnd(s) {
+  const slotOf = (key) => key.slice(0, key.indexOf("_"));
+  const shifts = s.app?.key ? [{ date: s.app.date, key: s.app.key }, ...(s.app.extra || [])].map((x) => ({ date: x.date, slot: slotOf(x.key) })) : [];
+  const slot = appSync.SLOT_OF[s.shift];
+  if (!shifts.length && slot) shifts.push({ date: appSync.shiftDay(slot, s.clockIn).date, slot });
+  const ends = shifts.map((x) => appSync.shiftEnd(x.date, x.slot)).filter(Number.isFinite);
+  return ends.length ? Math.max(s.clockIn, ...ends) : null;
+}
+async function autoClockOuts(now = Date.now()) {
+  if (!(AUTO_OUT_H > 0)) return [];
+  const done = [];
+  for (const [uid, s] of Object.entries(data.sessions)) {
+    const end = sessionEnd(s);
+    if (end == null || now < end + AUTO_OUT_H * 3600e3 || closing.has(uid)) continue;
+    delete data.sessions[uid];
+    outDraft.delete(uid);
+    data.historique.push({ userId: uid, shift: s.shift, clockIn: s.clockIn, clockOut: end, modeles: s.modeles, ventes: [], auto: true });
+    saveData();
+    console.log(`Clock out automatique : ${nameOf(uid)} (${s.shift}), à ${fmtTime(end)}`);
+    await boxNote({ content: `${clockLine("out", uid, s, end)} · automatique, pas de clock out ${AUTO_OUT_H} h après la fin du shift`, allowedMentions: { parse: [] } })
+      .catch((e) => console.error("Clock out automatique (salon box) :", e.message));
+    await appSync.onClockOut({ app: s.app, t: end }).catch((e) => console.error("Pointage app (clock out automatique) :", e.message));
+    if (s.app?.date) refreshSoon(s.app.date);
+    done.push({ uid, end });
+  }
+  return done;
+}
+
 async function sweep() {
-  if (sweeping || !appSync.enabled()) return;
+  if (sweeping) return;
+  await autoClockOuts().catch((e) => console.error("Clock out automatique :", e.message));
+  if (!appSync.enabled()) return;
   sweeping = true;
   try {
     // double shift : encore clock in au début d'un autre shift prévu ce jour-là -> présent aussi sur celui-là
@@ -756,6 +796,11 @@ async function sweep() {
     for (const x of await appSync.sweepAbsents({ clockIns })) {
       touched.add(x.date);
       console.log(`Pointage auto : ${x.name} ${x.status} (${x.slot} du ${x.date})`);
+    }
+    // coupure sans 🔙 retour à la fin du shift : il n'a pas pu revenir, fermée à l'heure de fin
+    for (const x of await appSync.closeStaleCoupures()) {
+      touched.add(x.date);
+      console.log(`Coupure sans retour : ${x.chatterId} (${x.slot} du ${x.date}), ${x.took} min jusqu'à la fin du shift`);
     }
     touched.forEach(refreshSoon);
   } catch (e) {
@@ -1812,6 +1857,6 @@ async function finalizeClockOut(i, ventes) {
 if (require.main === module) restoreData().finally(() => client.login(TOKEN));
 // pour les tests
 module.exports = {
-  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, dropClockingPanels, loadBoxEmojis, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
+  client, handleInteraction, postPlanning, postShift, fillAhead, restoreData, restoreSessions, refreshLive, announceShift, dropClockingPanels, loadBoxEmojis, autoClockOuts, ensureBoxBoard, refreshBox, postEffectif, pollPost, sweep, planWatch,
   parseDay, dayChoices, getData: () => data, SHIFTS, voice, dayoff, planEdit, gestion, pointageEmbed,
 };
