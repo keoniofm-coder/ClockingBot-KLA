@@ -255,6 +255,9 @@ async function mine(i) {
 
 // ---------- Les petites fiches (fenêtres Discord) ----------
 const WINDOW = 30; // jours proposés
+// un chatteur pose ses day off à partir du 3e jour : ni demain ni après-demain (le temps de s'organiser)
+const SELF_FROM = 3;
+const selfFrom = () => appSync.addDays(today(), SELF_FROM);
 const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
 const selectOf = (id, opts, { min = 0, required = min > 0, placeholder } = {}) => {
   const m = new StringSelectMenuBuilder().setCustomId(id).setRequired(required).setMinValues(min).setMaxValues(Math.max(1, opts.length)).addOptions(opts);
@@ -317,11 +320,11 @@ async function openAddAdmin(i) {
   );
   return i.showModal(m);
 }
-// ➕ un chatteur pour lui-même : ses day off déjà cochés (décocher = retirer), à partir de demain
+// ➕ un chatteur pour lui-même : ses day off déjà cochés (décocher = retirer), à partir du 3e jour
 async function openAddSelf(i, c) {
-  const days = await quick(windowInfo(appSync.addDays(today(), 1), c));
+  const days = await quick(windowInfo(selfFrom(), c));
   if (!days) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
-  return i.showModal(new ModalBuilder().setCustomId(`do_selfm~${c.id}`).setTitle(`🏖️ Mes day off · ${c.name}`.slice(0, 45)).addLabelComponents(...dayFields(days, "Coche tes jours (3 par mois), décoche pour en retirer")));
+  return i.showModal(new ModalBuilder().setCustomId(`do_selfm~${c.id}`).setTitle(`🏖️ Mes day off · ${c.name}`.slice(0, 45)).addLabelComponents(...dayFields(days, "3 par mois, pas demain ni après-demain ; décoche pour en retirer")));
 }
 // ➖ Retirer : les day off à venir (les siens pour un chatteur)
 async function openRem(i, c) {
@@ -382,13 +385,13 @@ async function submitAdd(i) {
   after(touched);
   return done(i, [`🏖️ **${c.name}**`, ...out].join("\n").slice(0, 1900), 60000);
 }
-// Un chatteur pour lui-même : les jours cochés = ses day off (décochés = retirés), à partir de demain
+// Un chatteur pour lui-même : les jours cochés = ses day off (décochés = retirés), à partir du 3e jour
 async function submitSelf(i, cid) {
   await i.deferReply({ flags: EPHEMERAL });
   const c = (await appSync.appChatters(true)).find((x) => x.id === cid);
   if (!c || (!ctx.isAdmin(i) && c.discordId !== i.user.id)) return done(i, "⛔ Ce ne sont pas tes day off.", 30000);
-  const from = appSync.addDays(today(), 1);
-  const want = new Set([...vals(i, "d0"), ...vals(i, "d1")]);
+  const from = selfFrom();
+  const want = new Set([...vals(i, "d0"), ...vals(i, "d1")].filter((d) => d >= from));
   const mine = (await appSync.offsBetween(from, appSync.addDays(from, WINDOW - 1))).filter((o) => o.chatterId === cid);
   const gone = mine.filter((o) => !want.has(o.date));
   for (const o of gone) await appSync.delDoc("offs", o.id);

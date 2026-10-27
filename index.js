@@ -297,6 +297,20 @@ function ficheEmbed(uid, v) {
 const hashOf = (payloads) =>
   crypto.createHash("md5").update(JSON.stringify(payloads.map((p) => ({ ...p, components: (p.components || []).map((c) => c.toJSON()) })))).digest("hex");
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
+// Les heures à droite du nom, sur le message du salon box :
+// « ✅ Clock in : 19h57 | ⚡ Début coupure : 22h00 » puis « ⚡ Coupure : 22h00 → 23h54 », « ❌ Clock out : 23h30 »
+const hh = (t) => fmtTime(t).replace(":", "h");
+function timesOf(p, k) {
+  if (k === "off" || k === "todo") return "";
+  const m = p.mark || {};
+  const inT = m.in || (p.discordId && data.sessions[p.discordId]?.clockIn);
+  return [
+    inT ? `✅ Clock in : ${hh(inT)}` : "",
+    m.cutAt && !m.cutEnd ? `⚡ Début coupure : ${hh(m.cutAt)}` : "",
+    m.cutAt && m.cutEnd ? `⚡ Coupure : ${hh(m.cutAt)} → ${hh(m.cutEnd)}${m.noBack ? " (pas revenu)" : ""}` : "",
+    m.out ? `❌ Clock out : ${hh(m.out)}` : "",
+  ].filter(Boolean).join(" | ");
+}
 const idsOf = (m) => m.ids || (m.id ? [m.id] : []);
 async function delAll(channelId, ids) {
   if (!ids.length) return;
@@ -323,8 +337,10 @@ async function boxView(name, date) {
   const byId = Object.fromEntries(b.staff.map((p) => [p.id, p]));
   const { groups, count } = planning.slotGroups(b.day, slot);
   const who = (x) => {
-    const k = b.stOf(byId[x.id] || { ...x.c, off: x.off });
-    return `${k === "off" ? "🏖️" : ST[k].e} ${whoOf(x.c)}`;
+    const p = byId[x.id] || { ...x.c, off: x.off };
+    const k = b.stOf(p);
+    const t = timesOf(p, k);
+    return `${k === "off" ? "🏖️" : ST[k].e} ${whoOf(x.c)}${t ? ` ${t}` : ""}`;
   };
   const { head, extra, done, due } = boardLines(b);
   const top = [
