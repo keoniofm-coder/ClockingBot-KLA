@@ -298,17 +298,17 @@ const hashOf = (payloads) =>
   crypto.createHash("md5").update(JSON.stringify(payloads.map((p) => ({ ...p, components: (p.components || []).map((c) => c.toJSON()) })))).digest("hex");
 const whoOf = (c) => (c.discordId ? `<@${c.discordId}>` : `**${c.name}**`);
 // Les heures à droite du nom, sur le message du salon box :
-// « ✅ Clock in : 19h57 | ⚡ Début coupure : 22h00 » puis « ⚡ Coupure : 22h00 → 23h54 », « ❌ Clock out : 23h30 »
+// « ✔️ 19h57 | ⚡ Depuis 22h00 » puis « ⚡ 🔙 22h00 ➡️ 23h54 », « ❌ 23h30 » (clock out)
 const hh = (t) => fmtTime(t).replace(":", "h");
 function timesOf(p, k) {
   if (k === "off" || k === "todo") return "";
   const m = p.mark || {};
   const inT = m.in || (p.discordId && data.sessions[p.discordId]?.clockIn);
   return [
-    inT ? `✅ Clock in : ${hh(inT)}` : "",
-    m.cutAt && !m.cutEnd ? `⚡ Début coupure : ${hh(m.cutAt)}` : "",
-    m.cutAt && m.cutEnd ? `⚡ Coupure : ${hh(m.cutAt)} → ${hh(m.cutEnd)}${m.noBack ? " (pas revenu)" : ""}` : "",
-    m.out ? `❌ Clock out : ${hh(m.out)}` : "",
+    inT ? `✔️ ${hh(inT)}` : "",
+    m.cutAt && !m.cutEnd ? `⚡ Depuis ${hh(m.cutAt)}` : "",
+    m.cutAt && m.cutEnd ? (m.noBack ? `⚡ ${hh(m.cutAt)} ➡️ ${hh(m.cutEnd)} (pas revenu)` : `⚡ 🔙 ${hh(m.cutAt)} ➡️ ${hh(m.cutEnd)}`) : "",
+    m.out ? `❌ ${hh(m.out)}` : "",
   ].filter(Boolean).join(" | ");
 }
 const idsOf = (m) => m.ids || (m.id ? [m.id] : []);
@@ -326,7 +326,7 @@ async function dropClockingPanels() {
 }
 
 // ---------- Salon box : le seul salon des shifts ----------
-// Un seul message : le shift en cours, en grand, par modèle (« 1️⃣ ✅ @Jean », les box libres aussi) et le pointage, en
+// Un seul message : le shift en cours, en grand, par modèle (« Box : 1️⃣ ✅ @Jean », les box libres aussi) et le pointage, en
 // direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. 🛠️ Admin (la gestion du shift, pour
 // l'admin seul) en haut à droite ; en bas Clock In / Clock Out et ✏️ Modifier le shift (la fenêtre avec toutes les modèles). Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
 // ceux faits dans l'app) s'écrivent dans ce salon et partent avec son message, au shift suivant.
@@ -359,12 +359,12 @@ async function boxView(name, date) {
     }
     const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter(planning.isNum).map(Number), 0);
     const lines = [];
-    if (held.has("all")) lines.push(`### ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
+    if (held.has("all")) lines.push(`### Box : ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
     for (let k = 1; k <= n; k++) {
       const hs = held.get(String(k)) || [];
-      lines.push(`### ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
+      lines.push(`### Box : ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
     }
-    if (held.has("vip")) lines.push(`### ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
+    if (held.has("vip")) lines.push(`### Box : ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
     if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
     items.push({ sep: true }, { text: `## ${planning.modelHead(g)}`, keep: true }, { text: lines.join("\n") });
   }
