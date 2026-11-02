@@ -460,4 +460,4 @@ async function handle(i) {
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, open, handle, modal, addRmButtons, FAULTS, PERSO, amountFor, ruleTxt, money, totals, totTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };
+module.exports = { ctx, open, handle, modal, addRmButtons, FAULTS, PERSO, amountFor, ruleTxt, money, totals, totTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, periodLabel, payDayLabel, workDay };

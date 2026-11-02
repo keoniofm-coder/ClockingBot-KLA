@@ -4,14 +4,18 @@
 //   « @chatteur Bien joué 💸 Prime de **20 €** | A ramené un bon chatteur »
 // L'onglet Paies de l'app l'ajoute à sa paie (quinzaine du jour de la prime, coupée à 2 h comme les pénalités).
 // 🗑️ sous chaque prime du salon (admins) : l'annuler sur place, en deux clics (le message reste, barré).
+// Comme les pénalités : le 16 et le 1er à 2 h, le récap des primes de la quinzaine qui finit part dans le salon primes
+// (une ligne par chatteur avec son total et ses raisons) ; rien n'est posté s'il n'y a eu aucune prime.
+// 📋 Récap de la quinzaine (après une prime) : voir les autres quinzaines et envoyer le récap à la main.
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
-const { money, workDay } = require("./penalties");
-const { reply, done, showView, row, button, EPHEMERAL } = require("./ui");
+const { money, workDay, periodOf, periodStep, periodLabel, payDayLabel } = require("./penalties");
+const { reply, done, showView, row, button, plS, EPHEMERAL } = require("./ui");
 
 const PRIMES_CHANNEL_ID = (process.env.PRIMES_CHANNEL_ID ?? "1548285118026878996").trim();
-// Fourni par index.js : isAdmin(i), client, nameOf(uid)
+// Fourni par index.js : isAdmin(i), client, nameOf(uid), getData(), saveData()
 const ctx = {};
+const states = new Map(); // userId -> { period } du récap ouvert
 
 const monthLabel = (m) => new Date(`${m}-01T12:00:00Z`).toLocaleDateString("fr-FR", { month: "long", year: "numeric", timeZone: "UTC" });
 const dayShort = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { day: "numeric", month: "short", timeZone: "UTC" });
@@ -20,6 +24,93 @@ const curOf = (p) => (p?.currency === "USD" ? "USD" : "EUR");
 // Le message du salon
 const lineOf = (p) => `<@${p.uid}> Bien joué 💸 Prime de **${money(p.amount, curOf(p))}** | ${p.reason}`;
 const rmRow = (p) => row(new ButtonBuilder().setCustomId(`pr_rm~${p.id}`).setEmoji("🗑️").setStyle(ButtonStyle.Secondary));
+
+// ---------- Récap d'une quinzaine ----------
+// totaux par monnaie : « +30 € et +5 $ »
+const totals = (l) => l.reduce((t, p) => ((t[curOf(p)] += Number(p.amount) || 0), t), { EUR: 0, USD: 0 });
+const totTxt = (t) => Object.entries(t).filter(([, v]) => v).map(([c, v]) => `+${money(Math.round(v * 100) / 100, c)}`).join(" et ") || "0 €";
+const totVal = (t) => t.EUR + t.USD;
+async function periodList(k) {
+  return (await appSync.primesIn(k.slice(0, 7))).filter((p) => periodOf(p.date) === k).sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+// une ligne par chatteur, les plus grosses primes d'abord
+function recapRows(list) {
+  const by = new Map();
+  for (const p of list) by.set(p.uid, [...(by.get(p.uid) || []), p]);
+  return [...by.entries()]
+    .map(([uid, l]) => ({ uid, l, tot: totals(l) }))
+    .sort((a, b) => totVal(b.tot) - totVal(a.tot) || b.l.length - a.l.length);
+}
+const rowTxt = (r) => `<@${r.uid}> · **${totTxt(r.tot)}** · ${r.l.length} prime${plS(r.l.length)}\n-# ${r.l.map((p) => p.reason).join(" · ").slice(0, 300)}`;
+// « 📋 Récap des primes du 1er au 15 novembre 2026 » : une ligne par @chatteur avec son total et ses raisons, puis le total
+function recapText(k, list) {
+  const rows = recapRows(list);
+  let body = rows.map(rowTxt).join("\n");
+  if (body.length > 1700) body = body.slice(0, body.lastIndexOf("\n", 1700)) + "\n…";
+  return [
+    `📋 **Récap des primes ${periodLabel(k)}**`,
+    `-# À ajouter à la paie du ${payDayLabel(k)}.`,
+    "",
+    rows.length ? body : "_Aucune prime sur cette quinzaine._",
+    ...(rows.length ? ["", `**Total : ${totTxt(totals(list))}** 💸`] : []),
+  ].join("\n");
+}
+// Envoie le récap d'une quinzaine dans le salon primes
+async function postRecap(k, t = Date.now(), list = null) {
+  list ||= await periodList(k);
+  const ch = await ctx.client.channels.fetch(PRIMES_CHANNEL_ID);
+  const msg = await ch.send({ content: recapText(k, list), allowedMentions: { users: [...new Set(list.map((p) => p.uid))].slice(0, 100) } });
+  markSent(k, { channelId: ch.id, id: msg.id, at: t });
+  return list.length;
+}
+function markSent(k, v) {
+  const data = ctx.getData();
+  data.primeRecaps ||= {};
+  data.primeRecaps[k] = v;
+  for (const x of Object.keys(data.primeRecaps)) if (x < periodStep(k, -6)) delete data.primeRecaps[x];
+  ctx.saveData();
+}
+// Le 1er et le 16 à 2 h (et au démarrage, si le bot était éteint à ce moment-là) : récap de la quinzaine qui vient de finir
+async function autoRecap(t = Date.now()) {
+  if (!appSync.enabled() || !PRIMES_CHANNEL_ID || !ctx.getData) return null;
+  const d = workDay(t);
+  const cur = periodOf(d);
+  const prev = periodStep(cur, -1);
+  const since = Number(d.slice(8, 10)) - (cur.endsWith("A") ? 1 : 16); // jours depuis la coupure
+  // déjà fait après la fin de la quinzaine (un envoi à la main avant la fin ne compte pas : il en manquait peut-être)
+  const sent = ctx.getData().primeRecaps?.[prev];
+  if ((sent && periodOf(workDay(sent.at)) > prev) || since > 2) return null;
+  const list = await periodList(prev);
+  // aucune prime : rien à poster, c'est noté pour ne pas revenir dessus
+  if (!list.length) return markSent(prev, { at: t, empty: true }), null;
+  await postRecap(prev, t, list);
+  return prev;
+}
+// Le récap dans Discord (visible seulement par l'admin) : changer de quinzaine, l'envoyer dans le salon
+async function sumView(st) {
+  const k = (st.period ||= periodOf(workDay()));
+  const list = await periodList(k);
+  const rows = recapRows(list);
+  const tot = totals(list);
+  const sent = ctx.getData?.().primeRecaps?.[k];
+  return {
+    content: [
+      st.note,
+      `📋 **Primes ${periodLabel(k)}**${totVal(tot) ? ` · ${totTxt(tot)} au total` : ""} · paie du ${payDayLabel(k)}`,
+      rows.length ? rows.map(rowTxt).join("\n").slice(0, 1800) : "_Aucune prime sur cette quinzaine._",
+      sent && !sent.empty ? `-# Récap envoyé dans le salon primes le ${dayShort(workDay(sent.at + 121 * 60e3))}.` : "",
+    ].filter(Boolean).join("\n"),
+    components: [
+      row(
+        button("pr_pe_-1", "Quinzaine d'avant", "◀️", ButtonStyle.Secondary),
+        button("pr_pe_1", "Quinzaine d'après", "▶️", ButtonStyle.Secondary, k >= periodOf(workDay())),
+        button("pr_post", "Envoyer le récap", "📣", ButtonStyle.Secondary, !rows.length),
+        button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success)
+      ),
+    ],
+    allowedMentions: { parse: [] },
+  };
+}
 
 // ---------- La petite fiche ----------
 const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
@@ -92,7 +183,7 @@ async function submit(i) {
       `✅ Envoyé${where} : <@${p.uid}> 💸 **${money(amount, currency)}** | ${reason}`,
       c ? `-# Ajoutée à sa paie dans l'app (onglet Paies, ${monthLabel(m)}).` : "-# ⚠️ Pas relié à un chatteur de l'app : relie son compte Discord dans sa fiche pour qu'elle compte dans sa paie.",
     ].join("\n"),
-    components: [row(button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success))],
+    components: [row(button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success), button("pr_sum", "Récap de la quinzaine", "📋", ButtonStyle.Secondary))],
   });
 }
 
@@ -126,6 +217,20 @@ async function handle(i) {
   if (id === "pr_add") return i.showModal(modal());
   if (id.startsWith("pr_rm~")) return rmAsk(i, id.slice(6));
   if (id === "pr_rmno") return done(i, "D'accord, rien n'est annulé.", 4000);
+  // 📋 récap : ◀️ ▶️ change de quinzaine, 📣 l'envoie dans le salon primes
+  if (id === "pr_sum" || id.startsWith("pr_pe_") || id === "pr_post") {
+    if (id === "pr_sum") states.set(i.user.id, {});
+    const st = states.get(i.user.id);
+    if (!st) return done(i, "Ce menu a expiré : reclique sur 📋 Récap de la quinzaine.", 8000);
+    await i.deferUpdate();
+    st.note = "";
+    if (id.startsWith("pr_pe_")) st.period = periodStep(st.period || periodOf(workDay()), Number(id.slice(6)) || 0);
+    else if (id === "pr_post") {
+      const n = await postRecap(st.period || periodOf(workDay())).catch((e) => ({ error: e.message }));
+      st.note = n?.error ? `⚠️ Récap pas envoyé : ${String(n.error).slice(0, 150)}` : `📣 Récap ${periodLabel(st.period)} envoyé dans <#${PRIMES_CHANNEL_ID}>.`;
+    }
+    return showView(i, await sumView(st));
+  }
   if (id.startsWith("pr_rmok~")) {
     await i.deferUpdate();
     const p = await byId(id.slice(8));
@@ -134,4 +239,4 @@ async function handle(i) {
   return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 💸 Primes." });
 }
 
-module.exports = { ctx, open, handle, modal, lineOf, parseAmount, PRIMES_CHANNEL_ID };
+module.exports = { ctx, open, handle, modal, lineOf, parseAmount, PRIMES_CHANNEL_ID, autoRecap, postRecap, recapText };
