@@ -84,18 +84,20 @@ function panelRows(date, slot, { unlinked = 0 } = {}) {
       button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
       button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
       button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
-      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary)
+      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
+      button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary)
     ),
     row(
       button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary),
-      button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary),
-      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
-      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary)
+      button("g_prime", "Primes", "💸", ButtonStyle.Success),
+      button("g_reat", "Réatrib/Ventes", "🔄", ButtonStyle.Primary),
+      button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary)
     ),
     row(
       button(c("g_new"), "Ajouter un chatteur", "➕", ButtonStyle.Success),
       ...(unlinked ? [button(c("g_nd"), `Pas sur Discord (${unlinked})`, "👤", ButtonStyle.Secondary)] : []),
-      button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary),
+      button("g_mod", "Modèles", "💃", ButtonStyle.Secondary),
+      button("g_adm", "Admins", "🛡️", ButtonStyle.Secondary),
       button("g_fire", "Virer un chatteur", "🚫", ButtonStyle.Danger)
     ),
   ];
@@ -392,7 +394,7 @@ async function handle(i) {
   const [id, pDate, pSlot] = i.customId.split("~");
   const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
   const cur = pinned || ctx.currentShift();
-  const needApp = ["g_menu", "g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen"];
+  const needApp = ["g_menu", "g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen", "g_prime", "g_reat"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
@@ -449,6 +451,8 @@ async function handle(i) {
       return ctx.openPlanning(i, cur.date, id === "g_ren" ? "ren" : "mv", { live: id === "g_ren", slot: appSync.SLOT_OF[cur.name] });
     case "g_box": return ctx.openPlanning(i, cur.date, "bx", { live: true, slot: appSync.SLOT_OF[cur.name] });
     case "g_pen": return ctx.openPenalties(i);
+    case "g_prime": return ctx.openPrimes(i);
+    case "g_reat": return ctx.openReattrib(i);
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
