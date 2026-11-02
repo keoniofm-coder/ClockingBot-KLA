@@ -891,7 +891,11 @@ client.once(Events.ClientReady, async () => {
   // changements faits dans l'app -> planning, messages de shift et tableau des day off sur Discord
   setInterval(refreshLive, 60000);
   // récap des pénalités de la quinzaine : le 16 et le 1er à 02h02 (rattrapé au démarrage s'il a été manqué)
-  const recap = () => penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
+  // et celui des primes, dans le salon primes, au même moment
+  const recap = () => {
+    penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
+    primes.autoRecap().then((k) => k && console.log(`Récap des primes ${k} envoyé`)).catch((e) => console.error("Récap primes :", e.message));
+  };
   cron.schedule("2 2 * * *", recap, { timezone: TZ });
   setTimeout(recap, 20000);
   // réattributions faites par l'app à l'import Whysper -> « ✅ Fait dans l'app » sous leur message
@@ -1474,7 +1478,7 @@ Object.assign(chatters.ctx, {
   isAdmin, getData: () => data, saveData, publishMembers, remember, refresh: refreshSoon, SHIFT_OF_SLOT,
 });
 Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
-Object.assign(primes.ctx, { isAdmin, client, nameOf });
+Object.assign(primes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(reattrib.ctx, { isAdmin, client, nameOf });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
