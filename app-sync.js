@@ -82,6 +82,8 @@ async function appChatters(force) {
       name: r.data?.name || "",
       active: r.data?.active !== false,
       discordId: r.data?.discordId ? String(r.data.discordId) : "",
+      // adresse du wallet crypto où il est payé (fiche Discord, onglet Équipe de l'app)
+      wallet: typeof r.data?.wallet === "string" ? r.data.wallet : "",
       // shift habituel { slot, slots, accts, days } : slots = ses shifts (deux pour un double shift), slot = le premier
       shift: r.data?.shift && typeof r.data.shift === "object" ? r.data.shift : null,
     }))
@@ -593,6 +595,31 @@ async function penaltiesIn(month) {
 }
 const addPenalty = ({ id, ...p }) => putDoc("penalties", id, p);
 const delPenalty = (id) => delDoc("penalties", id);
+// Son wallet crypto (vide = l'effacer)
+async function setWallet(cid, wallet) {
+  await mergeDoc("chatters", cid, { wallet: String(wallet || "").trim().slice(0, 200) });
+  chattersCache.at = 0;
+}
+
+// ---------- 💸 Primes (saisies depuis Discord, ajoutées à la paie dans l'app) ----------
+async function primesIn(month) {
+  const rows = await rest("GET", `select=id,data&coll=eq.primes&data->>month=eq.${enc(month)}`);
+  return rows.map((r) => ({ ...(r.data || {}), id: r.id })).filter((p) => p.uid && p.amount != null);
+}
+const addPrime = ({ id, ...p }) => putDoc("primes", id, p);
+const delPrime = (id) => delDoc("primes", id);
+
+// ---------- 🔄 Réattributions de ventes (appliquées par l'app au prochain import Whysper) ----------
+// status : pending (en attente de l'import), applied (faite, sales = les ventes changées), shown : le salon le dit
+async function reattribsWhere(filter = "") {
+  const rows = await rest("GET", `select=id,data&coll=eq.reattrib${filter}`);
+  return rows.map((r) => ({ ...(r.data || {}), id: r.id })).filter((x) => x.fromUid || x.fromId);
+}
+const reattribsIn = (month) => reattribsWhere(`&data->>month=eq.${enc(month)}`);
+const reattribsToShow = () => reattribsWhere(`&data->>status=eq.applied&data->>shown=is.null`);
+const addReattrib = ({ id, ...p }) => putDoc("reattrib", id, p);
+const markReattribShown = (id) => mergeDoc("reattrib", id, { shown: true });
+const delReattrib = (id) => delDoc("reattrib", id);
 
 // ---------- Pointage ----------
 const markKey = (slot, cid) => `${slot}_${cid}`;
@@ -827,6 +854,7 @@ module.exports = {
   onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, closeStaleCoupures, shiftEnd, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, plansBetween, writePlan, planTemplate, fillDays, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
+  setWallet, primesIn, addPrime, delPrime, reattribsIn, reattribsToShow, addReattrib, delReattrib, markReattribShown,
   loadBotState, saveBotState, openClockIns,
   norm, parisParts, parisMs, addDays,
 };

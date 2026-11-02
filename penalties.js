@@ -3,7 +3,8 @@
 // Chaque pénalité est gardée dans l'app (penalties/<id>) et annoncée dans le salon pénalités :
 //   « 1. @chatteur (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | Erreur de chatting » puis « Pénalité ⛔ : -5 € sur le salaire »
 // (le 1. compte les pénalités du jour dans le salon ; le shift et la modèle sont ceux où il travaille)
-// Le numéro compte les fautes du même type ce mois-ci (il repart à 1 chaque mois). Montants en euros.
+// Le numéro compte les fautes du même type ce mois-ci (il repart à 1 chaque mois). Montants en euros ; la fiche laisse
+// choisir les dollars (une pénalité garde sa monnaie, les totaux s'écrivent par monnaie : « -20 € et -2 $ »).
 // Les paies se font par quinzaine : le 16 et le 1er à 2 h, le récap de la quinzaine qui finit part dans le salon
 // (une ligne par chatteur avec son total), et l'onglet Paies de l'app retire ces montants de sa paie.
 // ⚠️ Pénalités (sous le panneau du shift) ouvre une petite fiche : le chatteur (recherche), la faute, et pour une pénalité
@@ -19,7 +20,8 @@ const PENALTY_CHANNEL_ID = (process.env.PENALTY_CHANNEL_ID ?? "15539100442049946
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
-// free : avertissements sans pénalité avant la première ; tiers (retards) : [n-ième retard du mois, montant],
+// free : avertissements sans pénalité avant la première ; every : pénalité tous les N avertissements (2e, 4e…) ;
+// tiers (retards) : [n-ième retard du mois, montant],
 // pénalité seulement à ces retards-là (3e, 5e, 8e…), les autres sont des avertissements ; au-delà du dernier palier, chaque retard au dernier montant
 const FAULTS = [
   { k: "retard", l: "Retard de +5 min", e: "⏰", cat: "Présence", tiers: [[3, 2], [5, 5], [8, 10], [10, 15], [12, 17], [15, 20]] },
@@ -27,6 +29,7 @@ const FAULTS = [
   { k: "coupure", l: "Coupure de courant / internet", e: "🔌", cat: "Présence", amount: 5, free: 2 },
   { k: "erreur", l: "Erreur de chatting", e: "💬", cat: "Chatting", amount: 5, free: 2 },
   { k: "inactif", l: "Ne chatte pas pendant son shift", e: "⏸️", cat: "Chatting", amount: 10, free: 2 },
+  { k: "kyc", l: "Pas de prise de notes (KYC)", e: "📝", cat: "Chatting", amount: 1, every: 2 },
   { k: "manager", l: "N'écoute pas son manager", e: "👤", cat: "Comportement", amount: 5, free: 2 },
   { k: "respect", l: "Manque de respect", e: "🛡️", cat: "Comportement", amount: 20, free: 0 },
   { k: "vip_parle", l: "Parler à un VIP sans autorisation", e: "👑", cat: "VIP", amount: 20, free: 0 },
@@ -41,13 +44,23 @@ function amountFor(f, n) {
     const last = f.tiers[f.tiers.length - 1];
     return n > last[0] ? last[1] : f.tiers.find(([th]) => th === n)?.[1] || 0;
   }
+  if (f.every) return n % f.every === 0 ? f.amount : 0;
   return n > f.free ? f.amount : 0;
 }
 const ruleTxt = (f) =>
   f.tiers
     ? `${f.tiers.map(([th, amt]) => `${th}e -${amt} €`).join(", ")}, les autres en avertissement`
-    : f.free ? `${f.free} avertissements, puis -${f.amount} €` : `-${f.amount} € dès la 1re fois`;
-const euros = (n) => `${Number(n).toLocaleString("fr-FR")} €`;
+    : f.every ? `-${money(f.amount, f.cur)} tous les ${f.every} avertissements`
+    : f.free ? `${f.free} avertissements, puis -${money(f.amount, f.cur)}` : `-${money(f.amount, f.cur)} dès la 1re fois`;
+// « 5 € » ou « 1 $ » (les pénalités sont en euros, sauf celles du barème en dollars)
+const SYM = { EUR: "€", USD: "$" };
+const curOf = (p) => (p?.currency === "USD" ? "USD" : "EUR");
+const money = (n, cur = "EUR") => `${Number(n).toLocaleString("fr-FR")} ${SYM[cur] || "€"}`;
+// totaux par monnaie d'une liste de pénalités : « -5 € et -1 $ », « 0 € » s'il n'y a rien à retirer
+const totals = (l) => l.reduce((t, p) => ((t[curOf(p)] += Number(p.amount) || 0), t), { EUR: 0, USD: 0 });
+const totTxt = (t) => Object.entries(t).filter(([, v]) => v).map(([c, v]) => `-${money(Math.round(v * 100) / 100, c)}`).join(" et ") || "0 €";
+const totVal = (t) => t.EUR + t.USD; // pour trier (ordre de grandeur)
+const penAmt = (p) => `-${money(p.amount, curOf(p))}`;
 
 // Jour de paie d'un instant : jusqu'à 2 h du matin, c'est encore la veille (les quinzaines se coupent le 1er
 // et le 16 à 2 h, comme le shift du soir). Le compteur du mois repart donc le 1er à 2 h.
@@ -83,7 +96,7 @@ const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // Le message du salon : « 1. @Momo (Aprem)🍑 AVERTISSEMENT N°3 ⚠️ | 💬 Erreur de chatting », puis une ligne vide et
 // « Pénalité ⛔ : -5 € sur le salaire » quand il y a une pénalité (k : sa place parmi les pénalités du jour)
-const penTxt = (amount) => `Pénalité ⛔ : **-${euros(amount)}** sur le salaire`;
+const penTxt = (amount, cur) => `Pénalité ⛔ : **-${money(amount, cur)}** sur le salaire`;
 // la faute avec son emoji (celui du barème, ✏️ pour une pénalité perso)
 const faultTxt = (p) => {
   const e = p.e ?? faultOf(p.fault)?.e;
@@ -91,7 +104,7 @@ const faultTxt = (p) => {
 };
 const lineOf = (p) => {
   const l = [`${p.k || 1}. <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}`];
-  if (p.amount) l.push("", penTxt(p.amount));
+  if (p.amount) l.push("", penTxt(p.amount, curOf(p)));
   if (p.note) l.push(...(p.amount ? [] : [""]), `-# ${p.note}`);
   return l.join("\n");
 };
@@ -127,13 +140,13 @@ const VIEWS = {
     const n = f ? list.filter((p) => p.fault === f.k).length + 1 : 0;
     const amount = f ? amountFor(f, n) : 0;
     st.next = f ? { n, amount } : null;
-    const total = list.reduce((a, p) => a + (Number(p.amount) || 0), 0);
+    const tot = totals(list);
     return {
       content: [
         st.note,
         `⚠️ **Pénalités** · ${monthLabel(m)}`,
         "Choisis le chatteur et la faute : le numéro d'avertissement et la pénalité suivent le barème (le compteur repart à 1 chaque mois). Le message part dans le salon pénalités.",
-        st.uid ? `Chatteur : <@${st.uid}> · ce mois-ci : ${list.length ? `${list.length} avertissement${plS(list.length)}${total ? `, -${euros(total)}` : ""}` : "rien"}` : "",
+        st.uid ? `Chatteur : <@${st.uid}> · ce mois-ci : ${list.length ? `${list.length} avertissement${plS(list.length)}${totVal(tot) ? `, ${totTxt(tot)}` : ""}` : "rien"}` : "",
         f ? `\n**AVERTISSEMENT N°${n}** ⚠️ | ${f.e} ${f.l}\n${amount ? penTxt(amount) : "_Avertissement seul, sans pénalité._"}` : "",
       ].filter(Boolean).join("\n"),
       components: [
@@ -159,17 +172,17 @@ const VIEWS = {
     const list = (await periodList(k)).sort((a, b) => b.at - a.at);
     const rows = recapRows(list);
     const del = st.del && list.find((p) => p.id === st.del);
-    const total = rows.reduce((a, r) => a + r.total, 0);
+    const tot = totals(list);
     const sent = ctx.getData?.().penRecaps?.[k];
     return {
       content: [
         st.note,
-        `📋 **Pénalités ${periodLabel(k)}**${total ? ` · -${euros(total)} au total` : ""} · paie du ${payDayLabel(k)}`,
+        `📋 **Pénalités ${periodLabel(k)}**${totVal(tot) ? ` · ${totTxt(tot)} au total` : ""} · paie du ${payDayLabel(k)}`,
         rows.length
-          ? rows.map((r) => `<@${r.uid}> · ${r.l.length} avertissement${plS(r.l.length)} · **${r.total ? `-${euros(r.total)}` : "0 €"}**\n-# ${detail(r.l)}`).join("\n").slice(0, 1800)
+          ? rows.map((r) => `<@${r.uid}> · ${r.l.length} avertissement${plS(r.l.length)} · **${totTxt(r.tot)}**\n-# ${detail(r.l)}`).join("\n").slice(0, 1800)
           : "_Aucune pénalité sur cette quinzaine._",
         sent ? `-# Récap envoyé dans le salon pénalités le ${dayShort(workDay(sent.at + 121 * 60e3))}.` : "",
-        del ? `\n🗑️ Annuler : <@${del.uid}> N°${del.n} ${del.label}${del.amount ? ` (-${euros(del.amount)})` : ""} du ${dayShort(del.date)} ?` : "",
+        del ? `\n🗑️ Annuler : <@${del.uid}> N°${del.n} ${del.label}${del.amount ? ` (${penAmt(del)})` : ""} du ${dayShort(del.date)} ?` : "",
       ].filter(Boolean).join("\n"),
       components: [
         ...(list.length
@@ -180,7 +193,7 @@ const VIEWS = {
                   .setPlaceholder("Annuler une pénalité (erreur de saisie)")
                   .addOptions(
                     list.slice(0, 25).map((p) =>
-                      opt(`${dayShort(p.date)} · ${p.name} · N°${p.n} ${p.label}`, p.id, p.amount ? `-${euros(p.amount)}` : "Avertissement seul", faultOf(p.fault)?.e, p.id === st.del)
+                      opt(`${dayShort(p.date)} · ${p.name} · N°${p.n} ${p.label}`, p.id, p.amount ? penAmt(p) : "Avertissement seul", faultOf(p.fault)?.e, p.id === st.del)
                     )
                   )
               ),
@@ -208,7 +221,8 @@ function recapRows(list) {
   const by = new Map();
   for (const p of list) by.set(p.uid, [...(by.get(p.uid) || []), p]);
   return [...by.entries()]
-    .map(([uid, l]) => ({ uid, l, total: l.reduce((a, p) => a + (Number(p.amount) || 0), 0) }))
+    .map(([uid, l]) => ({ uid, l, tot: totals(l) }))
+    .map((r) => ({ ...r, total: totVal(r.tot) }))
     .sort((a, b) => b.total - a.total || b.l.length - a.l.length);
 }
 function detail(l) {
@@ -219,8 +233,8 @@ function detail(l) {
 // « 📋 Récap des pénalités du 1er au 15 octobre 2026 » : une ligne par @chatteur avec son total, puis le total
 function recapText(k, list) {
   const rows = recapRows(list);
-  const total = rows.reduce((a, r) => a + r.total, 0);
-  const lines = rows.map((r) => `<@${r.uid}> · **${r.total ? `-${euros(r.total)}` : "0 €"}** · ${r.l.length} avertissement${plS(r.l.length)}`);
+  const tot = totals(list);
+  const lines = rows.map((r) => `<@${r.uid}> · **${totTxt(r.tot)}** · ${r.l.length} avertissement${plS(r.l.length)}`);
   let body = lines.join("\n");
   if (body.length > 1700) body = body.slice(0, body.lastIndexOf("\n", 1700)) + "\n…";
   return [
@@ -228,7 +242,7 @@ function recapText(k, list) {
     `-# À retirer de la paie du ${payDayLabel(k)}.`,
     "",
     rows.length ? body : "_Aucune pénalité sur cette quinzaine._ 🎉",
-    ...(rows.length ? ["", `**Total : -${euros(total)}**`] : []),
+    ...(rows.length ? ["", `**Total : ${totTxt(tot)}**`] : []),
   ].join("\n");
 }
 // Envoie le récap d'une quinzaine dans le salon pénalités
@@ -272,8 +286,14 @@ function modal() {
     label("La faute", "Le numéro d'avertissement et la pénalité suivent le barème du mois").setStringSelectMenuComponent(
       new StringSelectMenuBuilder().setCustomId("fault").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(faults)
     ),
-    label("Montant (seulement pour Pénalité perso)", "En euros, ex : 15. Vide pour les autres fautes : le barème calcule tout seul").setTextInputComponent(text("amount", "ex : 15", 6)),
-    label("Raison ou détail", "Le chatteur le verra ; obligatoire pour une Pénalité perso").setTextInputComponent(text("note", "ex : retard de 2 h sans prévenir"))
+    label("Montant (seulement pour Pénalité perso)", "ex : 15. Vide pour les autres fautes : le barème calcule tout seul").setTextInputComponent(text("amount", "ex : 15", 6)),
+    label("Raison ou détail", "Le chatteur le verra ; obligatoire pour une Pénalité perso").setTextInputComponent(text("note", "ex : retard de 2 h sans prévenir")),
+    label("Monnaie", "Euros sauf si tu choisis les dollars").setStringSelectMenuComponent(
+      new StringSelectMenuBuilder().setCustomId("cur").setRequired(false).setMinValues(0).setMaxValues(1).addOptions(
+        { label: "Euros (€)", value: "EUR", emoji: "💶", default: true },
+        { label: "Dollars ($)", value: "USD", emoji: "💵" }
+      )
+    )
   );
 }
 async function open(i) {
@@ -293,6 +313,7 @@ async function submit(i) {
   const u = field(i, "getSelectedUsers", "who")?.first?.();
   const k = (field(i, "getStringSelectValues", "fault") || [])[0];
   const note = String(field(i, "getTextInputValue", "note") || "").trim();
+  const cur = (field(i, "getStringSelectValues", "cur") || [])[0] === "USD" ? "USD" : "EUR";
   await i.deferReply({ flags: EPHEMERAL });
   if (k === "_sum") {
     const st = { view: "sum" };
@@ -306,11 +327,11 @@ async function submit(i) {
     !u && "choisis le chatteur.",
     u?.bot && "choisis un chatteur, pas un bot.",
     !f && "choisis la faute.",
-    f === PERSO && !(raw && Number.isFinite(amount) && amount >= 0 && amount <= 1000) && "écris le montant en euros (ex : 15, 0 pour un avertissement seul).",
+    f === PERSO && !(raw && Number.isFinite(amount) && amount >= 0 && amount <= 1000) && "écris le montant (ex : 15, 0 pour un avertissement seul).",
     f === PERSO && !note && "écris la raison.",
   ].filter(Boolean);
   if (errors.length) return done(i, `⚠️ Rien n'est envoyé : ${errors.join(" ")}`, 30000);
-  const st = { uid: u.id, fault: f.k, ...(f === PERSO ? { custom: { amount, label: note } } : {}) };
+  const st = { uid: u.id, fault: f.k, cur, ...(f === PERSO ? { custom: { amount, label: note } } : {}) };
   await send(i, st, f === PERSO ? "" : note);
   states.set(i.user.id, { view: "sum" });
   return showView(i, {
@@ -332,7 +353,7 @@ async function send(i, st, note) {
   const p = {
     id: `${m}-${appSync.newId()}`, month: m, date, at: Date.now(), by: i.user.id,
     uid: st.uid, chatterId: c?.id || null, name: c?.name || ctx.nameOf(st.uid),
-    fault: f.k, label: custom ? custom.label : f.l, e: f.e, n, amount: custom ? custom.amount : amountFor(f, n), currency: "EUR", note: note || "",
+    fault: f.k, label: custom ? custom.label : f.l, e: f.e, n, amount: custom ? custom.amount : amountFor(f, n), currency: st.cur === "USD" ? "USD" : "EUR", note: note || "",
     k: all.filter((x) => x.date === date).length + 1, where: await whereOf(st.uid, c, date).catch(() => ""),
   };
   let where = "";
@@ -346,7 +367,7 @@ async function send(i, st, note) {
     where = ` ⚠️ Message pas envoyé dans le salon pénalités : ${String(e.message).slice(0, 150)}`;
   }
   await appSync.addPenalty(p);
-  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}${p.amount ? ` · ⛔ -${euros(p.amount)}` : ""}` });
+  Object.assign(st, { fault: null, note: `✅ Envoyé${where} : <@${p.uid}>${p.where ? ` ${p.where}` : ""} **AVERTISSEMENT N°${p.n}** ⚠️ | ${faultTxt(p)}${p.amount ? ` · ⛔ ${penAmt(p)}` : ""}` });
 }
 
 // Annule une pénalité : retirée de l'app (donc de la paie) ; son message du salon reste, barré, sans le bouton 🗑️
@@ -357,7 +378,7 @@ async function cancel(p, by) {
       .fetch(p.msg.channelId)
       .then((ch) => ch.messages.edit(p.msg.id, { content: `${lineOf({ ...p, note: "" }).split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${by}>`, components: [], allowedMentions: { parse: [] } }))
       .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
-  return `🗑️ Annulée : <@${p.uid}> N°${p.n} ${faultTxt(p)}${p.amount ? ` (-${euros(p.amount)})` : ""}. Elle est retirée de sa paie dans l'app.`;
+  return `🗑️ Annulée : <@${p.uid}> N°${p.n} ${faultTxt(p)}${p.amount ? ` (${penAmt(p)})` : ""}. Elle est retirée de sa paie dans l'app.`;
 }
 const byId = async (id) => (await appSync.penaltiesIn(id.slice(0, 7))).find((x) => x.id === id);
 // Les pénalités envoyées avant le bouton 🗑️ le reçoivent, une fois (ce mois-ci et le mois d'avant)
@@ -382,7 +403,7 @@ async function rmAsk(i, pid) {
   const p = await byId(pid);
   if (!p) return done(i, "Cette pénalité est déjà annulée.", 8000);
   return showView(i, {
-    content: `🗑️ Annuler <@${p.uid}> **N°${p.n}** ${faultTxt(p)}${p.amount ? ` (-${euros(p.amount)})` : " (avertissement seul)"} du ${dayShort(p.date)} ?\n-# Elle est retirée de sa paie dans l'app, et son message reste barré dans le salon.`,
+    content: `🗑️ Annuler <@${p.uid}> **N°${p.n}** ${faultTxt(p)}${p.amount ? ` (${penAmt(p)})` : " (avertissement seul)"} du ${dayShort(p.date)} ?\n-# Elle est retirée de sa paie dans l'app, et son message reste barré dans le salon.`,
     components: [row(button(`pn_rmok~${p.id}`, "Oui, annuler", "🗑️", ButtonStyle.Danger), button("pn_rmno", "Non", null, ButtonStyle.Secondary))],
     allowedMentions: { parse: [] },
   });
@@ -439,4 +460,4 @@ async function handle(i) {
   return showView(i, await VIEWS[st.view](st));
 }
 
-module.exports = { ctx, open, handle, modal, addRmButtons, FAULTS, PERSO, amountFor, ruleTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };
+module.exports = { ctx, open, handle, modal, addRmButtons, FAULTS, PERSO, amountFor, ruleTxt, money, totals, totTxt, PENALTY_CHANNEL_ID, states, autoRecap, postRecap, recapText, periodOf, periodStep, workDay };

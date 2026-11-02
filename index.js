@@ -15,6 +15,8 @@ const voice = require("./voice");
 const gestion = require("./gestion");
 const chatters = require("./chatters");
 const penalties = require("./penalties");
+const primes = require("./primes");
+const reattrib = require("./reattrib");
 const shiftModal = require("./shiftmodal");
 const planWatch = require("./planwatch");
 const quickModal = require("./quickmodal");
@@ -892,6 +894,10 @@ client.once(Events.ClientReady, async () => {
   const recap = () => penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
   cron.schedule("2 2 * * *", recap, { timezone: TZ });
   setTimeout(recap, 20000);
+  // réattributions faites par l'app à l'import Whysper -> « ✅ Fait dans l'app » sous leur message
+  const reat = () => reattrib.syncApplied().then((n) => n && console.log(`Réatrib : ${n} faite(s) dans l'app`)).catch((e) => console.error("Réatrib :", e.message));
+  setTimeout(reat, 30000);
+  setInterval(reat, 120000);
   setTimeout(() => penalties.addRmButtons().then((n) => n && console.log(`🗑️ ajouté sous ${n} pénalité(s)`)).catch((e) => console.error("Boutons 🗑️ des pénalités :", e.message)), 25000);
   const board = () => dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
   setTimeout(board, 10000);
@@ -1304,6 +1310,8 @@ async function handleInteraction(i) {
     const cid = i.customId || "";
     if (cid.startsWith("cm_")) return chatters.handle(i);
     if (cid.startsWith("pn_")) return penalties.handle(i);
+    if (cid.startsWith("pr_")) return primes.handle(i);
+    if (cid.startsWith("ra_")) return reattrib.handle(i);
     if (cid.startsWith("pm_")) return shiftModal.handle(i);
     if (cid.startsWith("qm_")) return quickModal.handle(i);
     if (cid.startsWith("cf_")) return fiche.handle(i);
@@ -1437,6 +1445,8 @@ Object.assign(gestion.ctx, {
   openChatters: (i) => chatters.open(i),
   openPlanning: (i, date, view, extra) => planEdit.open(i, date, view, extra),
   openPenalties: (i) => penalties.open(i),
+  openPrimes: (i) => primes.open(i),
+  openReattrib: (i) => reattrib.open(i),
   refreshPanels: refreshSoon,
   heldText: (date, slot, cid) => planEdit.heldText(date, slot, cid),
   dayoffView: (month) => dayoff.boardView(month),
@@ -1464,6 +1474,8 @@ Object.assign(chatters.ctx, {
   isAdmin, getData: () => data, saveData, publishMembers, remember, refresh: refreshSoon, SHIFT_OF_SLOT,
 });
 Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
+Object.assign(primes.ctx, { isAdmin, client, nameOf });
+Object.assign(reattrib.ctx, { isAdmin, client, nameOf });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
   client,

@@ -6,6 +6,7 @@
 // ➕ Ajouter un chatteur : la même fenêtre pour en créer un (Équipe dans l'app, et le planning déjà fait suit) ; elle
 // s'ouvre aussi quand on cherche quelqu'un qui n'est pas encore dans l'app (son nom et son compte déjà remplis).
 // Discord ne remplit pas une fenêtre déjà ouverte : le chatteur se choisit dans la barre, avant d'ouvrir sa fiche.
+// La 5e case : son wallet crypto (l'adresse où il est payé), aussi dans l'onglet Équipe de l'app.
 // Custom ids : cf_save~date~créneau~chatterId~n (sa fiche), cf_new~date~créneau~n (nouveau chatteur), n : ui.fresh()
 const { ModalBuilder, LabelBuilder, UserSelectMenuBuilder, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const appSync = require("./app-sync");
@@ -33,6 +34,11 @@ const acctsPick = (cat, chosen) => {
 const slotsPick = (chosen, min) =>
   new StringSelectMenuBuilder().setCustomId("slots").setRequired(min > 0).setMinValues(min).setMaxValues(2)
     .addOptions(SLOTS.map((s) => ({ label: `${s.l} · ${s.h}`, value: s.k, emoji: s.emoji, default: chosen.includes(s.k) })));
+// son adresse de wallet crypto (facultative)
+const walletInput = (v) => {
+  const t = new TextInputBuilder().setCustomId("wallet").setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200).setPlaceholder("Son adresse de wallet crypto (pour sa paie)");
+  return v ? t.setValue(v) : t;
+};
 const userPick = (uid) => {
   const m = new UserSelectMenuBuilder().setCustomId("uid").setRequired(false).setMinValues(0).setMaxValues(1).setPlaceholder("🔎 Tape son nom");
   return uid ? m.setDefaultUsers(uid) : m;
@@ -68,7 +74,8 @@ async function openFiche(i, { date, slot, cid, uid }) {
           { label: "Pour un soir", value: "day", emoji: "📅", description: `Seulement le ${dayLabel(date)}`.slice(0, 100), default: true },
           { label: "Shift habituel", value: "habit", emoji: "🔁", description: "Enregistré dans Équipe, le planning à venir suit" }
         )
-      )
+      ),
+      label("Wallet crypto", "L'adresse où il est payé (vide = aucune)").setTextInputComponent(walletInput(c.wallet))
     );
   return i.showModal(m);
 }
@@ -100,7 +107,8 @@ async function openNew(i, { date, slot, uid, name: name0 }) {
       label("Nom").setTextInputComponent(name),
       label("Compte Discord", "Pour qu'il puisse clock in").setUserSelectMenuComponent(userPick(uid)),
       label("Modèle(s)").setStringSelectMenuComponent(acctsPick(cat, [])),
-      label("Shift habituel", "Deux = double shift ; le planning déjà fait suit").setStringSelectMenuComponent(slotsPick([slot], 1))
+      label("Shift habituel", "Deux = double shift ; le planning déjà fait suit").setStringSelectMenuComponent(slotsPick([slot], 1)),
+      label("Wallet crypto", "L'adresse où il est payé (facultatif)").setTextInputComponent(walletInput(""))
     );
   return i.showModal(m);
 }
@@ -114,6 +122,11 @@ const field = (i, fn, id) => {
   }
 };
 const vals = (i, id) => field(i, "getStringSelectValues", id) || [];
+// le wallet écrit dans la fenêtre (null : une ancienne fenêtre, sans la case)
+const walletOf = (i) => {
+  const v = field(i, "getTextInputValue", "wallet");
+  return v == null ? null : String(v).replace(/\s+/g, "").slice(0, 200);
+};
 const where = (slots) => slots.map((k) => `${slotOf(k).emoji} ${slotOf(k).l}`).join(" + ");
 const whatOf = (d, mids, bx) => mids.map((m) => `**${(d.cat.models[m]?.name ? withEmoji(d.cat.models[m].name) : m).toLocaleUpperCase("fr")}**${bx?.[m]?.length ? ` · ${boxLabel(bx[m])}` : ""}`).join(" · ");
 
@@ -124,6 +137,7 @@ async function saveFiche(i, date, slot0, cid) {
   const slots = appSync.habSlots({ slots: vals(i, "slots") });
   const keep = (vals(i, "keep")[0] || "day") === "habit";
   const u = field(i, "getSelectedUsers", "uid")?.first?.();
+  const wallet = walletOf(i);
   let d = await planEdit.actions.load(date);
   const c = d.byId[cid];
   if (!c) return done(i, "⚠️ Ce chatteur n'est plus dans l'app.", 60000);
@@ -132,6 +146,11 @@ async function saveFiche(i, date, slot0, cid) {
   if (slots.length && d.off.has(cid)) return done(i, `⛔ Rien n'est changé : ${tag(c)} est en day off ce ${dayLabel(date)}.`, 60000);
   if (u?.bot) return done(i, "⚠️ Rien n'est changé : choisis un chatteur, pas un bot.", 60000);
   const lines = [];
+  // son wallet crypto (enregistré dans Équipe)
+  if (wallet !== null && wallet !== (c.wallet || "")) {
+    await appSync.setWallet(cid, wallet);
+    lines.push(wallet ? `💳 Wallet de **${c.name}** enregistré : \`${wallet}\`` : `💳 Wallet de **${c.name}** effacé.`);
+  }
   // son compte Discord et son shift habituel : comme ➕ Nouveau chatteur / ✏️ Modifier (Équipe dans l'app)
   const uid = u && u.id !== c.discordId ? u.id : null;
   if (keep || uid) {
@@ -185,6 +204,7 @@ async function saveNew(i) {
   const u = field(i, "getSelectedUsers", "uid")?.first?.();
   const accts = vals(i, "acc").filter((x) => x.includes("|"));
   const slots = appSync.habSlots({ slots: vals(i, "slots") });
+  const wallet = walletOf(i);
   const cat = await appSync.appCatalog();
   const mids = midsOf(accts);
   const errors = [
@@ -202,11 +222,13 @@ async function saveNew(i) {
   if (r.exists && u && !r.exists.discordId) {
     // il était déjà dans l'app sans compte Discord : on relie juste ce compte
     await appSync.linkDiscord(u.id, r.exists.id);
+    if (wallet && !r.exists.wallet) await appSync.setWallet(r.exists.id, wallet);
     return done(i, `🔗 **${r.exists.name}** était déjà dans l'app : relié à <@${u.id}>. Le reste (shifts, modèles) se change dans sa fiche : 🔎 Modifs chatteurs.`, 60000);
   }
   if (r.exists) return done(i, `⚠️ Rien n'est créé : **${r.exists.name}** existe déjà dans l'app. Cherche-le dans 🔎 Modifs chatteurs${r.exists.discordId ? "" : " (👤 Pas sur Discord)"}.`, 60000);
   if (!r.ok) return done(i, r.note, 60000);
-  return done(i, `➕ **${name}** créé dans l'app (Équipe) : ${where(slots)} · ${whatOf({ cat }, mids)}${u ? ` · relié à <@${u.id}>` : " · pas relié à Discord"}${r.days ? ` · 📅 planning déjà fait mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}.\n-# Ses box se donnent shift par shift : ✏️ Modif par shift.`, 60000);
+  if (wallet) await appSync.setWallet(r.id, wallet);
+  return done(i, `➕ **${name}** créé dans l'app (Équipe) : ${where(slots)} · ${whatOf({ cat }, mids)}${u ? ` · relié à <@${u.id}>` : " · pas relié à Discord"}${r.days ? ` · 📅 planning déjà fait mis à jour (${r.days} jour${r.days > 1 ? "s" : ""})` : ""}${wallet ? ` · 💳 wallet enregistré` : ""}.\n-# Ses box se donnent shift par shift : ✏️ Modif par shift.`, 60000);
 }
 
 async function handle(i) {
