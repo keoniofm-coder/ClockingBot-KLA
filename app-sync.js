@@ -3,6 +3,7 @@
 //  - Pointage (att/<date>) : présent ou retard au clock in, heure de départ au clock out,
 //    absent si le chatteur n'a pas clock in ABSENT_AFTER_H heures après le début de son shift
 //  - Équipe (chatters/<id>.discordId) : quel compte Discord correspond à quel chatteur
+//  - Wallets (wallets/<id>) : à part, pour que seuls Kéoni et ceux qu'il autorise les voient dans l'app
 //  - config/discord : les membres du bot, pour pouvoir les relier depuis l'app
 //  - Planning (plan/<date>) : pour l'envoyer dans le salon planning
 //  - config/discordPost : demande d'envoi du planning faite depuis l'app
@@ -75,15 +76,16 @@ async function collMap(coll) {
 let chattersCache = { at: 0, list: [] };
 async function appChatters(force) {
   if (!force && Date.now() - chattersCache.at < 60e3) return chattersCache.list;
-  const rows = await rest("GET", "select=id,data&coll=eq.chatters");
+  // les wallets sont à part (wallets/<id>) : dans l'app, seuls Kéoni et ceux qu'il autorise les voient
+  const [rows, wal] = await Promise.all([rest("GET", "select=id,data&coll=eq.chatters"), collMap("wallets").catch(() => ({}))]);
   const list = rows
     .map((r) => ({
       id: r.id,
       name: r.data?.name || "",
       active: r.data?.active !== false,
       discordId: r.data?.discordId ? String(r.data.discordId) : "",
-      // adresse du wallet crypto où il est payé (fiche Discord, onglet Équipe de l'app)
-      wallet: typeof r.data?.wallet === "string" ? r.data.wallet : "",
+      // adresse du wallet crypto où il est payé (wallets/<id> ; avant, dans la fiche du chatteur)
+      wallet: typeof wal[r.id]?.wallet === "string" ? wal[r.id].wallet : typeof r.data?.wallet === "string" ? r.data.wallet : "",
       // shift habituel { slot, slots, accts, days } : slots = ses shifts (deux pour un double shift), slot = le premier
       shift: r.data?.shift && typeof r.data.shift === "object" ? r.data.shift : null,
     }))
@@ -595,9 +597,14 @@ async function penaltiesIn(month) {
 }
 const addPenalty = ({ id, ...p }) => putDoc("penalties", id, p);
 const delPenalty = (id) => delDoc("penalties", id);
-// Son wallet crypto (vide = l'effacer)
+// Son wallet crypto (vide = l'effacer), rangé à part dans wallets/<id> (privé dans l'app)
 async function setWallet(cid, wallet) {
-  await mergeDoc("chatters", cid, { wallet: String(wallet || "").trim().slice(0, 200) });
+  const w = String(wallet || "").trim().slice(0, 200);
+  if (w) await putDoc("wallets", cid, { wallet: w });
+  else await delDoc("wallets", cid);
+  // ancienne place, visible de tous dans l'app : vidée
+  const c = await getDoc("chatters", cid);
+  if (c?.wallet) await mergeDoc("chatters", cid, { wallet: null });
   chattersCache.at = 0;
 }
 
