@@ -13,6 +13,9 @@
 // pour rattraper ce qui serait arrivé pendant un redémarrage du bot.
 // Une clé = une agence Wysper : seules les modèles de ses comptes (GET /accounts) sont remplies par le bot. Les autres
 // modèles Telegram (une autre agence, pas encore branchée) gardent l'import du fichier, même les jours en direct.
+// Plusieurs agences : WYSPER_API_KEY / WYSPER_WEBHOOK_SECRET pour la 1re (KL Agency : Zoé), WYSPER_API_KEY_2 /
+// WYSPER_WEBHOOK_SECRET_2 pour la 2e (Flown : Anna, Axelle), _3… pour d'autres. Même adresse temps réel pour toutes :
+// le bot reconnaît l'agence à sa signature. Une agence qui ne répond pas n'empêche pas les autres d'avancer.
 // Les jours d'avant la mise en route (config/wysper.from) ne sont pas touchés : l'import du fichier reste
 // possible pour eux. config/wysper.on = false (bouton de l'app) met la synchro en pause.
 const appSync = require("./app-sync");
@@ -20,17 +23,26 @@ const appSync = require("./app-sync");
 const http = require("http");
 const crypto = require("crypto");
 
-const KEY = (process.env.WYSPER_API_KEY || "").trim();
-// secret de signature whsec_… de l'adresse « Événements en temps réel » (page Intégrations de Wysper)
-const SECRET = (process.env.WYSPER_WEBHOOK_SECRET || "").trim();
+// agences Wysper : clé d'accès (lecture seule) + secret de signature whsec_… de l'adresse « Événements en temps réel »
+// (page Intégrations de Wysper) ; la 1re sans suffixe, puis _2, _3…
+const envT = (k) => (process.env[k] || "").trim();
+const AGENCIES = [];
+for (let i = 1; i <= 9; i++) {
+  const sfx = i === 1 ? "" : `_${i}`;
+  const key = envT("WYSPER_API_KEY" + sfx), secret = envT("WYSPER_WEBHOOK_SECRET" + sfx);
+  if (key || secret) AGENCIES.push({ id: String(i), key, secret, env: "WYSPER_API_KEY" + sfx });
+}
+const KEYS = AGENCIES.filter((a) => a.key);
+const KEY = KEYS[0]?.key || "";
+const SECRET = AGENCIES.find((a) => a.secret)?.secret || "";
 const BASE = (process.env.WYSPER_API_URL || "https://wysper.io/api/v1").trim().replace(/\/+$/, "");
 // avec le temps réel, la lecture par la clé ne sert plus qu'à rattraper : toutes les 5 minutes
-const EVERY_S = Math.max(30, Number(process.env.WYSPER_POLL_S || (SECRET ? 300 : 60)));
+const EVERY_S = Math.max(30, Number(process.env.WYSPER_POLL_S || (KEYS.length && KEYS.every((a) => a.secret) ? 300 : 60)));
 const TOLERANCE_S = 300; // anti-rejeu : une requête signée il y a plus de 5 minutes est refusée
 const OVERLAP_MS = 5 * 60e3; // on relit toujours les 5 dernières minutes : rien ne passe entre deux lectures
 const LINK_DAYS = 45; // relier un nom refait au plus les 45 derniers jours
 
-const enabled = () => !!(KEY || SECRET) && appSync.enabled();
+const enabled = () => AGENCIES.length > 0 && appSync.enabled();
 const { addDays, parisParts, parisMs } = appSync;
 // même normalisation que l'import de l'app (impNorm)
 const norm = (s) => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -43,11 +55,11 @@ const slotOfHour = (h) => (h < 2 ? "soir" : h < 8 ? "nuit" : h < 14 ? "matin" : 
 
 // ---------- API Wysper ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function api(path, params = {}) {
+async function api(path, params = {}, key = KEY) {
   const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null && v !== "")).toString();
   for (let k = 0; ; k++) {
     const res = await fetch(`${BASE}${path}${q ? "?" + q : ""}`, {
-      headers: { Authorization: `Bearer ${KEY}`, Accept: "application/json", "User-Agent": "KL-Agency-bot" },
+      headers: { Authorization: `Bearer ${key}`, Accept: "application/json", "User-Agent": "KL-Agency-bot" },
       signal: AbortSignal.timeout(20000),
     });
     if ((res.status === 429 || res.status === 503) && k < 3) {
@@ -66,11 +78,11 @@ async function api(path, params = {}) {
   }
 }
 // Tous les paiements modifiés depuis since (triés par updated_at), page par page
-async function paymentsSince(since) {
+async function paymentsSince(since, key = KEY) {
   const out = [];
   let cursor = "";
   for (let n = 0; n < 200; n++) {
-    const r = await api("/payments", { since, limit: 200, cursor });
+    const r = await api("/payments", { since, limit: 200, cursor }, key);
     out.push(...(r.data || []));
     if (!r.has_more || !r.next_cursor) break;
     cursor = r.next_cursor;
@@ -81,17 +93,31 @@ async function paymentsSince(since) {
 // ---------- Noms des fans (contacts du CRM), pour les réattributions ----------
 // GET /contacts compte par compte, puis seulement ce qui a changé ; gardé en mémoire
 const contacts = { names: new Map(), since: {}, at: 0 };
-async function loadContacts(accountIds) {
+// clés à essayer pour un compte : celle de son agence si on la connaît, sinon toutes
+const keysFor = (acc, accAg = {}) => {
+  const a = KEYS.find((x) => x.id === accAg[acc]);
+  return a ? [a.key] : KEYS.map((x) => x.key);
+};
+async function loadContacts(accountIds, accAg = {}) {
   if (Date.now() - contacts.at < 5 * 60e3) return;
   for (const acc of accountIds) {
     const since = contacts.since[acc] || "";
     const started = new Date().toISOString();
-    let cursor = "";
-    for (let n = 0; n < 300; n++) {
-      const r = await api("/contacts", { account: acc, limit: 200, cursor, since });
-      for (const c of r.data || []) if (c?.telegram_id) contacts.names.set(`${acc}|${c.telegram_id}`, c.name || c.telegram_username || "");
-      if (!r.has_more || !r.next_cursor) break;
-      cursor = r.next_cursor;
+    const keys = keysFor(acc, accAg);
+    for (let k = 0; k < keys.length; k++) {
+      try {
+        let cursor = "";
+        for (let n = 0; n < 300; n++) {
+          const r = await api("/contacts", { account: acc, limit: 200, cursor, since }, keys[k]);
+          for (const c of r.data || []) if (c?.telegram_id) contacts.names.set(`${acc}|${c.telegram_id}`, c.name || c.telegram_username || "");
+          if (!r.has_more || !r.next_cursor) break;
+          cursor = r.next_cursor;
+        }
+        break;
+      } catch (e) {
+        // compte d'une autre agence : on essaie la clé suivante
+        if (k === keys.length - 1 || ![400, 403, 404].includes(e.status)) throw e;
+      }
     }
     contacts.since[acc] = started;
   }
@@ -236,7 +262,7 @@ async function applyReattribs(ctx, raList, from, touched) {
   const days = [...new Set(pending.flatMap((r) => [-1, 0, 1].map((k) => addDays(r.date, k))))].filter((d) => d >= from);
   const docs = Object.fromEntries(await Promise.all(days.map(async (d) => [d, (await appSync.getDoc("wysper", d))?.p || {}])));
   const accs = [...new Set(Object.values(docs).flatMap((p) => Object.values(p).map((x) => x.acc)).filter(Boolean))];
-  await loadContacts(accs).catch((e) => console.warn("Wysper contacts :", e.message));
+  await loadContacts(accs, ctx.accAg).catch((e) => console.warn("Wysper contacts :", e.message));
   const used = new Set(Object.values(docs).flatMap((p) => Object.entries(p).filter(([, x]) => x.ra).map(([id]) => id)));
   let done = 0;
   for (const r of pending.sort((a, b) => (a.at || 0) - (b.at || 0))) {
@@ -290,7 +316,14 @@ function serial(fn) {
   return p;
 }
 const tick = (o = {}) => (enabled() ? serial(() => run(o)) : Promise.resolve(null));
-async function run({ now = Date.now(), force = false, incoming = null } = {}) {
+const andL = (l) => (l.length < 2 ? l.join("") : `${l.slice(0, -1).join(", ")} et ${l[l.length - 1]}`);
+// nom d'une agence pour les messages : ses modèles (« Anna et Axelle »), sinon « Agence 2 »
+const agLabel = (ag, ctx, accts, accAg) => {
+  const names = [...new Set(Object.entries(accAg || {}).filter(([, a]) => a === ag.id).map(([acc]) => linkOf(ctx.links.m, ctx.models, accts[acc])).filter((m) => m && m !== "-"))]
+    .map((m) => ctx.models[m]?.name).filter(Boolean).sort((a, b) => a.localeCompare(b, "fr"));
+  return names.length ? andL(names) : `Agence ${ag.id}`;
+};
+async function run({ now = Date.now(), force = false, incoming = null, ag = "" } = {}) {
   const [cfg0, st0] = await Promise.all([appSync.getDoc("config", "wysper").catch(() => null), appSync.getDoc("config", "wysperState").catch(() => null)]);
   const cfg = cfg0 || {}, st = st0 || {};
   const save = (patch) => appSync.putDoc("config", "wysperState", { ...st, ...patch });
@@ -305,30 +338,63 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
     }
     const ctx = await appCtx(st.accts || {});
     if (!ctx.pid) throw new Error("plateforme Telegram introuvable dans l'app");
-    // comptes modèles de l'agence : GET /accounts toutes les heures, plus ceux vus dans les paiements
+    // comptes modèles des agences (et l'agence de chaque compte) : GET /accounts toutes les heures, plus ceux vus dans les paiements
     const accts = { ...(st.accts || {}) };
-    let acctsAt = st.acctsAt || 0;
-    if (KEY && now - acctsAt > 3600e3) {
-      try {
-        const r = await api("/accounts");
-        for (const a of r.data || []) if (a?.telegram_id != null) accts[String(a.telegram_id)] = a.name || accts[String(a.telegram_id)] || "";
-        acctsAt = now;
-      } catch (e) {
-        console.warn("Wysper comptes :", e.message);
-      }
-    }
+    const accAg = { ...(st.accAg || {}) };
+    ctx.accAg = accAg;
+    // état de chaque agence : dernière lecture (since), comptes relus (acctsAt), erreur ; la 1re reprend l'ancien état
+    const ags = Object.fromEntries(AGENCIES.map((a) => [a.id, { ...(st.ags?.[a.id] || (a.id === "1" ? { since: st.since, acctsAt: st.acctsAt } : {})) }]));
     const fromMs = parisMs(from, 0);
-    const keep = st.since && st.from === from;
-    const since = new Date(keep ? Math.max(Date.parse(st.since) - OVERLAP_MS, 0) : fromMs).toISOString();
-    // paiements reçus en temps réel, sinon lus avec la clé depuis la dernière fois
-    const list = incoming || (KEY ? await paymentsSince(since) : []);
+    const errs = [];
+    let list = [];
+    if (incoming) {
+      list = incoming;
+      if (ag && ags[ag]) {
+        ags[ag].lastEvent = now;
+        for (const x of incoming) if (x?.account?.telegram_id != null) accAg[String(x.account.telegram_id)] = ag;
+      }
+    } else {
+      // paiements lus avec la clé de chaque agence depuis sa dernière lecture
+      for (const a of KEYS) {
+        const g = ags[a.id];
+        if (now - (g.acctsAt || 0) > 3600e3) {
+          try {
+            const r = await api("/accounts", {}, a.key);
+            for (const x of r.data || []) if (x?.telegram_id != null) {
+              const acc = String(x.telegram_id);
+              accts[acc] = x.name || accts[acc] || "";
+              accAg[acc] = a.id;
+            }
+            g.acctsAt = now;
+          } catch (e) {
+            console.warn(`Wysper comptes (agence ${a.id}) :`, e.message);
+          }
+        }
+        const keep = g.since && st.from === from;
+        const since = new Date(keep ? Math.max(Date.parse(g.since) - OVERLAP_MS, 0) : fromMs).toISOString();
+        try {
+          const l = await paymentsSince(since, a.key);
+          let maxU = keep ? Date.parse(g.since) : 0;
+          for (const x of l) {
+            maxU = Math.max(maxU, Date.parse(x?.updated_at) || Date.parse(x?.paid_at) || 0);
+            if (x?.account?.telegram_id != null) accAg[String(x.account.telegram_id)] = a.id;
+          }
+          g.since = new Date(Math.min(maxU || fromMs, now)).toISOString();
+          Object.assign(g, { lastOk: now, lastN: l.length, err: null });
+          list.push(...l);
+        } catch (e) {
+          Object.assign(g, { err: String(e.message).slice(0, 200), errAt: now });
+          errs.push(a);
+        }
+      }
+      // aucune agence n'a répondu : erreur (rien n'avance)
+      if (KEYS.length && errs.length === KEYS.length) throw new Error(ags[errs[0].id].err);
+    }
     // rangés par jour de Paris (heure de paiement) ; seulement la version la plus récente de chaque paiement
     const byDay = {};
-    let maxU = keep ? Date.parse(st.since) : 0;
     for (const x of list) {
       if (!x?.payment_id || !x.paid_at) continue;
       const p = slim(x);
-      if (!incoming) maxU = Math.max(maxU, p.u || 0);
       if (p.acc && !p.test && p.an) accts[p.acc] = p.an;
       const d = parisParts(p.at).date;
       if (d < from) continue;
@@ -381,11 +447,14 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
       }
     const raIds = {};
     for (const r of raList) if (r.status === "applied" && r.appliedBy === "wysper" && r.date) raIds[r.id] = r.date;
+    // une agence en erreur (les autres ont avancé) : affichée dans l'app à côté de « En direct »
+    const agErr = errs.map((a) => `${agLabel(a, ctx, accts, accAg)} : ${ags[a.id].err}`).join(" · ");
+    for (const a of AGENCIES) ags[a.id].models = [...new Set(Object.entries(accAg).filter(([, x]) => x === a.id).map(([acc]) => linkOf(ctx.links.m, ctx.models, accts[acc])).filter((m) => m && m !== "-"))].sort();
     await save({
-      from, since: new Date(Math.min(maxU || fromMs, now)).toISOString(), sig, lastErr: null,
-      ...(incoming ? { lastEvent: now } : { lastOk: now, lastN: list.length }),
-      live: !!SECRET, key: !!KEY, fullAt: full ? now : st.fullAt, unknown, raIds,
-      accts, acctsAt, models: [...ctx.covered].sort(),
+      from, since: ags["1"]?.since ?? st.since ?? null, sig, lastErr: null,
+      ...(incoming ? { lastEvent: now } : { lastOk: now, lastN: list.length, agErr: agErr || null, agErrAt: agErr ? now : null }),
+      live: AGENCIES.some((a) => a.secret), key: KEYS.length > 0, fullAt: full ? now : st.fullAt, unknown, raIds,
+      accts, acctsAt: ags["1"]?.acctsAt ?? st.acctsAt ?? 0, accAg, ags, models: [...ctx.covered].sort(),
     });
     return { payments: list.length, days: touched.size, lines, reattribs: nRa };
   } catch (e) {
@@ -437,18 +506,28 @@ async function dayTotals(d, ctx) {
   t.mods = [...cov].map((id) => ctx.models[id]?.name).filter(Boolean).sort((a, b) => a.localeCompare(b, "fr"));
   return t;
 }
+// total de toutes les agences branchées
 async function wysperDay(d) {
-  if (!KEY) return null;
-  const r = await api("/stats/sales", { from: d, to: d, tz: "Europe/Paris" });
-  return { w: r2(num(r.brut_cents) / 100), wn: num(r.unlocks) };
+  if (!KEYS.length) return null;
+  let w = 0, wn = 0;
+  for (const a of KEYS) {
+    const r = await api("/stats/sales", { from: d, to: d, tz: "Europe/Paris" }, a.key);
+    w += num(r.brut_cents) / 100;
+    wn += num(r.unlocks);
+  }
+  return { w: r2(w), wn };
 }
-// une journée relue en entier chez Wysper (paiements modifiés depuis son début)
+// une journée relue en entier chez Wysper (paiements modifiés depuis son début), agence par agence
 async function refetchDay(d, now) {
-  const list = (await paymentsSince(new Date(parisMs(d, 0)).toISOString())).filter((x) => x?.paid_at && parisParts(Date.parse(x.paid_at)).date === d);
-  return run({ now, incoming: list });
+  let last = null;
+  for (const a of KEYS) {
+    const list = (await paymentsSince(new Date(parisMs(d, 0)).toISOString(), a.key)).filter((x) => x?.paid_at && parisParts(Date.parse(x.paid_at)).date === d);
+    last = await run({ now, incoming: list, ag: a.id });
+  }
+  return last;
 }
 function checkText(d, c) {
-  const who = c.mods?.length ? ` ${/^[aeiouyhàâéèêîïôûü]/i.test(c.mods[0]) ? "d'" : "de "}${c.mods.join(" et ")}`.replace("d' ", "d'") : "";
+  const who = c.mods?.length ? ` ${/^[aeiouyhàâéèêîïôûü]/i.test(c.mods[0]) ? "d'" : "de "}${andL(c.mods)}` : "";
   const head = c.ok
     ? `✅ **Ventes Telegram${who} · ${dayLong(d)}** : ${eur(c.w ?? c.l)} dans Wysper = ${eur(c.y)} dans l'app${c.wn != null ? ` · ${c.wn} vente${c.wn > 1 ? "s" : ""}` : ""}`
     : `⚠️ **Ventes Telegram${who} · ${dayLong(d)}** : ${c.w != null ? `${eur(c.w)} dans Wysper` : `${eur(c.l)} reçus de Wysper`} · ${eur(c.y)} dans l'app · écart ${c.y - (c.w ?? c.l) > 0 ? "+" : "−"}${eur(Math.abs(c.y - (c.w ?? c.l)))}`;
@@ -509,18 +588,28 @@ function verify(headers, raw, secret = SECRET, now = Date.now()) {
   });
   return ok ? true : 401;
 }
+// plusieurs agences : la signature dit de quelle agence vient l'envoi ({ ag }) ; 400 / 401 sinon
+function verifyAny(headers, raw, now = Date.now()) {
+  for (const a of AGENCIES) {
+    if (!a.secret) continue;
+    const v = verify(headers, raw, a.secret, now);
+    if (v === true) return { ag: a.id };
+    if (v === 400) return 400;
+  }
+  return 401;
+}
 const seen = new Set();
-async function handleEvent(ev, now = Date.now()) {
+async function handleEvent(ev, now = Date.now(), ag = "") {
   if (!ev?.id || seen.has(ev.id)) return null;
   seen.add(ev.id);
   if (seen.size > 5000) seen.delete(seen.values().next().value);
   // événement de test (bouton « Tester » de Wysper) : rien n'est compté, on note juste qu'il est bien arrivé
   if (ev.livemode === false || /^test_/.test(ev.data?.payment_id || "")) {
-    await patchState({ lastTest: now, lastTestType: ev.type || "" });
+    await patchState({ lastTest: now, lastTestType: ev.type || "", lastTestAg: ag || null });
     return { test: true };
   }
   if (!/^payment\./.test(ev.type || "") || !ev.data?.payment_id) return null; // premiers messages : pas utilisés ici
-  return tick({ now, incoming: [ev.data] });
+  return tick({ now, incoming: [ev.data], ag });
 }
 function webhookServer(port = Number(process.env.PORT || 8080)) {
   const srv = http.createServer((req, res) => {
@@ -542,8 +631,8 @@ function webhookServer(port = Number(process.env.PORT || 8080)) {
     });
     req.on("end", () => {
       const raw = Buffer.concat(chunks);
-      const v = verify(req.headers, raw);
-      if (v !== true) {
+      const v = verifyAny(req.headers, raw);
+      if (typeof v === "number") {
         res.writeHead(v);
         return res.end();
       }
@@ -557,7 +646,7 @@ function webhookServer(port = Number(process.env.PORT || 8080)) {
       // répondre d'abord (Wysper attend une réponse en moins de 10 s), traiter ensuite
       res.writeHead(200);
       res.end();
-      handleEvent(ev).catch((e) => console.error("Wysper (temps réel) :", e.message));
+      handleEvent(ev, Date.now(), v.ag).catch((e) => console.error("Wysper (temps réel) :", e.message));
     });
   });
   srv.listen(port, () => console.log(`Wysper : adresse temps réel ouverte (POST /wysper, port ${port}).`));
@@ -566,8 +655,9 @@ function webhookServer(port = Number(process.env.PORT || 8080)) {
 
 function start({ client } = {}) {
   ctxDiscord.client = client;
-  if (!KEY && !SECRET) return console.log("Wysper : ni WYSPER_API_KEY ni WYSPER_WEBHOOK_SECRET, ventes Telegram en direct désactivées.");
+  if (!AGENCIES.length) return console.log("Wysper : ni WYSPER_API_KEY ni WYSPER_WEBHOOK_SECRET, ventes Telegram en direct désactivées.");
   if (!appSync.enabled()) return console.log("Wysper : lien avec l'app désactivé (Supabase), rien à faire.");
+  console.log(`Wysper : ${AGENCIES.length} agence${AGENCIES.length > 1 ? "s" : ""} (${AGENCIES.map((a) => `${a.id} : ${[a.key && "clé", a.secret && "temps réel"].filter(Boolean).join(" + ")}`).join(" · ")}).`);
   if (SECRET) webhookServer();
   if (!KEY) return console.log("Wysper : pas de WYSPER_API_KEY, pas de rattrapage ni de réattribution par nom de fan.");
   console.log(`Wysper : rattrapage des paiements toutes les ${EVERY_S} s.`);
@@ -590,4 +680,6 @@ function start({ client } = {}) {
   cron.schedule("0 6 * * *", async () => (await on()) && ver(addDays(today(), -1), "changed"), { timezone: "Europe/Paris" });
 }
 
-module.exports = { start, tick, check, verify, handleEvent, webhookServer, recomputeDay, slim, counted, norm, enabled, api, _contacts: contacts };
+// clés des agences, pour les stats (wystats.js)
+const keys = () => KEYS.map((a) => ({ id: a.id, key: a.key }));
+module.exports = { start, tick, check, verify, verifyAny, handleEvent, webhookServer, recomputeDay, slim, counted, norm, enabled, api, keys, _contacts: contacts };
