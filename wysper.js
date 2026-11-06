@@ -403,8 +403,9 @@ const patchState = (patch) => serial(async () => {
 // ---------- Vérification avec le tableau de bord Wysper ----------
 // Total brut du jour chez Wysper (GET /stats/sales, mêmes règles : payé, ni remboursé ni en litige, jour de Paris)
 // comparé au total Telegram du jour dans l'app. Écart : on relit toute la journée chez Wysper, puis on recompare.
-// Résultat gardé dans config/wysperState.checks[jour] (✅ / ⚠️ dans l'app) ; récap posté dans le salon ventes.
-const VENTES_CHANNEL_ID = (process.env.VENTES_CHANNEL_ID || "").trim();
+// Résultat gardé dans config/wysperState.checks[jour] (✅ / ⚠️ dans l'app) ; récap posté dans le salon Wysper (WYSPER_CHANNEL_ID).
+// salon du récap Wysper (vérif du jour) : son propre salon, choisi par Kéoni ; WYSPER_CHANNEL_ID pour en changer
+const WYSPER_CHANNEL_ID = (process.env.WYSPER_CHANNEL_ID ?? "1568083317759418390").trim();
 const ctxDiscord = {};
 const eur = (v) => `${Number(r2(v)).toLocaleString("fr-FR", { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 })} €`;
 const dayLong = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
@@ -478,9 +479,9 @@ async function check(d, { now = Date.now(), post = false } = {}) {
   const st = (await appSync.getDoc("config", "wysperState")) || {};
   const prev = st.checks?.[d];
   let posted = prev?.posted || "";
-  if (ctxDiscord.client && VENTES_CHANNEL_ID && (post === true || (post === "changed" && posted !== sig))) {
+  if (ctxDiscord.client && WYSPER_CHANNEL_ID && (post === true || (post === "changed" && posted !== sig))) {
     try {
-      const ch = await ctxDiscord.client.channels.fetch(VENTES_CHANNEL_ID);
+      const ch = await ctxDiscord.client.channels.fetch(WYSPER_CHANNEL_ID);
       await ch.send({ content: post === "changed" ? `${text}\n-# Mis à jour à ${new Date(now).toLocaleTimeString("fr-FR", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit" })}` : text, allowedMentions: { parse: [] } });
       posted = sig;
     } catch (e) {
@@ -574,7 +575,7 @@ function start({ client } = {}) {
   setTimeout(go, 5000);
   setInterval(go, EVERY_S * 1000);
   // vérifications avec le tableau de bord Wysper : toutes les heures (sans rien poster), récap de la veille à 00h20
-  // dans le salon ventes, dernière vérif de la veille à 06h00 (postée seulement si le résultat a changé)
+  // dans le salon Wysper, dernière vérif de la veille à 06h00 (postée seulement si le résultat a changé)
   const cron = require("node-cron");
   const today = () => parisParts(Date.now()).date;
   const ver = (d, post) => check(d, { post }).catch((e) => console.error("Wysper (vérif) :", e.message));
