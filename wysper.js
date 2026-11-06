@@ -151,7 +151,7 @@ async function recomputeDay(d, ctx, unknown, raMap) {
     const mid = linkOf(ctx.links.m, ctx.models, p.an);
     // réattribution faite (et pas annulée depuis)
     const ra = p.ra && raMap[p.ra] && raMap[p.ra].status === "applied" ? p.to : "";
-    const cid = ra && ctx.chatters[ra] ? ra : linkOf(ctx.links.c, ctx.chatters, p.un);
+    const cid = ra && ctx.chatters[ra] ? ra : linkOf(ctx.links.c, ctx.chatters, p.un || "(sans membre)");
     if (mid === "-" || cid === "-") continue;
     if (!mid || !cid) {
       const kind = !mid ? "m" : "c";
@@ -238,7 +238,7 @@ async function applyReattribs(ctx, raList, from, touched) {
       const d = addDays(r.date, k);
       for (const [id, p] of Object.entries(docs[d] || {})) {
         if (used.has(id) || !counted(p)) continue;
-        const seller = linkOf(ctx.links.c, ctx.chatters, p.un);
+        const seller = linkOf(ctx.links.c, ctx.chatters, p.un || "(sans membre)");
         if (fromC ? seller !== fromC : !raSame(p.un, r.fromName)) continue;
         if (![fanName(p), p.bu].some((f) => raSame(f, r.fan))) continue;
         cand.push({ id, d, p, v: counted(p) });
@@ -391,7 +391,7 @@ async function dayTotals(d, ctx) {
     if (!v) continue;
     t.l += v;
     t.ln++;
-    const mid = linkOf(ctx.links.m, ctx.models, p.an), cid = p.to && ctx.chatters[p.to] ? p.to : linkOf(ctx.links.c, ctx.chatters, p.un);
+    const mid = linkOf(ctx.links.m, ctx.models, p.an), cid = p.to && ctx.chatters[p.to] ? p.to : linkOf(ctx.links.c, ctx.chatters, p.un || "(sans membre)");
     if (mid === "-" || cid === "-") { const k = mid === "-" ? p.an : p.un; t.i[k] = r2((t.i[k] || 0) + v); }
     else if (!mid || !cid) { const k = !mid ? p.an : p.un || "(sans membre)"; t.u[k] = r2((t.u[k] || 0) + v); }
   }
@@ -560,4 +560,4 @@ function start({ client } = {}) {
   cron.schedule("0 6 * * *", async () => (await on()) && ver(addDays(today(), -1), "changed"), { timezone: "Europe/Paris" });
 }
 
-module.exports = { start, tick, check, verify, handleEvent, webhookServer, recomputeDay, slim, counted, norm, enabled, _contacts: contacts };
+module.exports = { start, tick, check, verify, handleEvent, webhookServer, recomputeDay, slim, counted, norm, enabled, api, _contacts: contacts };

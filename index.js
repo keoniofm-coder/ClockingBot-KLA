@@ -909,6 +909,8 @@ client.once(Events.ClientReady, async () => {
   setInterval(board, 120000);
   // ventes Telegram en direct depuis l'API Wysper (WYSPER_API_KEY), chaque minute
   wysper.start({ client });
+  // chiffres du tableau de bord Wysper (onglet Telegram de l'app), toutes les 15 minutes
+  require("./wystats").start();
 });
 
 // Clock in en cours oubliés (bot redémarré sans sa mémoire) : retrouvés d'après le pointage de l'app (arrivée
