@@ -864,4 +864,6 @@ module.exports = {
   setWallet, primesIn, addPrime, delPrime, reattribsIn, reattribsToShow, addReattrib, delReattrib, markReattribShown,
   loadBotState, saveBotState, openClockIns,
   norm, parisParts, parisMs, addDays,
+  // lecture et écriture directes (synchro Wysper)
+  getDoc, putDoc, mergeDoc, collMap, reattribsWhere,
 };
