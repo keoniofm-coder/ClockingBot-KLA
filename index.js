@@ -17,6 +17,7 @@ const chatters = require("./chatters");
 const penalties = require("./penalties");
 const primes = require("./primes");
 const reattrib = require("./reattrib");
+const wysper = require("./wysper");
 const shiftModal = require("./shiftmodal");
 const planWatch = require("./planwatch");
 const quickModal = require("./quickmodal");
@@ -906,6 +907,10 @@ client.once(Events.ClientReady, async () => {
   const board = () => dayoff.refreshBoard().catch((e) => console.error("Tableau day off :", e.message));
   setTimeout(board, 10000);
   setInterval(board, 120000);
+  // ventes Telegram en direct depuis l'API Wysper (WYSPER_API_KEY), chaque minute
+  wysper.start({ client });
+  // chiffres du tableau de bord Wysper (onglet Telegram de l'app), toutes les 15 minutes
+  require("./wystats").start();
 });
 
 // Clock in en cours oubliés (bot redémarré sans sa mémoire) : retrouvés d'après le pointage de l'app (arrivée

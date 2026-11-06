@@ -8,6 +8,7 @@
 // 🗑️ sous chaque réattribution (admins) : l'annuler (le message reste, barré).
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
+const wysper = require("./wysper");
 const { money, workDay } = require("./penalties");
 const { parseAmount } = require("./primes");
 const { reply, done, showView, row, button, EPHEMERAL } = require("./ui");
@@ -24,9 +25,10 @@ const who = (uid, name) => (uid ? `<@${uid}>` : `**${name || "?"}**`);
 function statusTxt(r) {
   if (r.status === "applied") {
     const n = r.sales?.length || 0;
-    return `✅ Fait dans l'app${r.appliedFile ? ` (import du ${dayShort(r.appliedFile)})` : ""}${n > 1 ? ` · ${n} ventes` : ""}`;
+    const how = r.appliedBy === "wysper" ? " (vente retrouvée dans Wysper)" : r.appliedFile ? ` (import du ${dayShort(r.appliedFile)})` : "";
+    return `✅ Fait dans l'app${how}${n > 1 ? ` · ${n} ventes` : ""}`;
   }
-  return "⏳ En attente du prochain import Whysper";
+  return wysper.enabled() ? "⏳ En attente de la vente dans Wysper" : "⏳ En attente du prochain import Whysper";
 }
 const lineOf = (r) =>
   [
@@ -108,7 +110,9 @@ async function submit(i) {
   return showView(i, {
     content: [
       `✅ Envoyé${where} : ventes de <@${r.fromUid}> → <@${r.toUid}> · **${money(amount, "EUR")}** · fan ${fan} (${dayShort(date)})`,
-      "-# L'app la fera toute seule au prochain import Whysper (et te le dira dans l'aperçu).",
+      wysper.enabled()
+        ? "-# Le bot la fait tout seul dès que la vente est retrouvée dans Wysper (en général dans la minute)."
+        : "-# L'app la fera toute seule au prochain import Whysper (et te le dira dans l'aperçu).",
       miss.length ? `-# ⚠️ Pas relié à un chatteur de l'app : ${miss.join(", ")}. Relie son compte Discord dans sa fiche, sinon l'app cherchera par son nom.` : "",
     ].filter(Boolean).join("\n"),
     components: [row(button("ra_add", "Nouvelle réatrib", "🔄", ButtonStyle.Primary))],
