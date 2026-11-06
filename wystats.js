@@ -104,13 +104,27 @@ async function dayStats(d, now = Date.now()) {
 // ---------- Passages ----------
 let busy = false;
 let finDays = null; // jours déjà relus une fois finis (config/wystatsState.fin)
+// noms Wysper vus dans les stats, pour la liste Équipe › Noms des plateformes de l'app :
+// { u: { idMembre: [nom, dernier jour vu] }, a: { idCompte: [nom, dernier jour vu] } }
+let names = null;
+function addNames(doc) {
+  let ch = false;
+  for (const k of ["u", "a"])
+    for (const [id, nm] of Object.entries(doc[k] || {})) {
+      const cur = names[k][id];
+      if (!nm || (cur && cur[1] > doc.date)) continue;
+      if (!cur || cur[0] !== nm || cur[1] < doc.date) { names[k][id] = [nm, doc.date]; ch = true; }
+    }
+  return ch;
+}
 async function saveDay(d, now) {
   const doc = await dayStats(d, now);
   await appSync.putDoc("wystats", d, doc);
-  if (doc.fin) {
-    finDays[d] = now;
+  const ch = addNames(doc);
+  if (doc.fin) finDays[d] = now;
+  if (doc.fin || ch) {
     const keep = Object.fromEntries(Object.entries(finDays).filter(([k]) => k >= addDays(d, -400)));
-    await appSync.putDoc("config", "wystatsState", { fin: keep, at: now });
+    await appSync.putDoc("config", "wystatsState", { fin: keep, names, at: now });
   }
   return doc;
 }
@@ -119,7 +133,11 @@ async function run({ now = Date.now(), back = PER_RUN } = {}) {
   busy = true;
   const done = [];
   try {
-    if (!finDays) finDays = (await appSync.getDoc("config", "wystatsState").catch(() => null))?.fin || {};
+    if (!finDays) {
+      const st = await appSync.getDoc("config", "wystatsState").catch(() => null);
+      finDays = st?.fin || {};
+      names = { u: { ...(st?.names?.u || {}) }, a: { ...(st?.names?.a || {}) } };
+    }
     const p = parisParts(now);
     const today = p.date;
     const days = [today];
@@ -154,4 +172,4 @@ function start() {
   console.log("Wysper stats : relevé toutes les 15 minutes.");
 }
 
-module.exports = { start, run, dayStats, _reset: () => { finDays = null; busy = false; } };
+module.exports = { start, run, dayStats, _reset: () => { finDays = null; names = null; busy = false; } };
