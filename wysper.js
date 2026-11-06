@@ -11,6 +11,8 @@
 // Temps réel : avec WYSPER_WEBHOOK_SECRET, le bot ouvre une adresse (POST /wysper sur le port PORT de Railway) où Wysper
 // envoie chaque paiement dans la seconde, signé (HMAC-SHA256). La lecture par la clé passe alors à toutes les 5 minutes,
 // pour rattraper ce qui serait arrivé pendant un redémarrage du bot.
+// Une clé = une agence Wysper : seules les modèles de ses comptes (GET /accounts) sont remplies par le bot. Les autres
+// modèles Telegram (une autre agence, pas encore branchée) gardent l'import du fichier, même les jours en direct.
 // Les jours d'avant la mise en route (config/wysper.from) ne sont pas touchés : l'import du fichier reste
 // possible pour eux. config/wysper.on = false (bouton de l'app) met la synchro en pause.
 const appSync = require("./app-sync");
@@ -116,12 +118,18 @@ function slim(x) {
 const counted = (p) => (p.test || p.s !== "paid" ? 0 : (p.pr ?? p.g) / 100);
 
 // ---------- Contexte de l'app (liens, chatteurs, plateforme) ----------
-async function appCtx() {
-  const [imp, chatters, cat] = await Promise.all([appSync.getDoc("config", "import"), appSync.collMap("chatters"), appSync.appCatalog()]);
+// Modèles suivies par cette clé : celles reliées à un compte de l'agence Wysper (GET /accounts, ou vu dans un paiement).
+// Les autres modèles Telegram (gérées dans une autre agence Wysper) restent à l'import du fichier : le bot n'y touche pas.
+const coveredOf = (ctx, accts) => new Set(Object.values(accts || {}).map((n) => linkOf(ctx.links.m, ctx.models, n)).filter((m) => m && m !== "-"));
+async function appCtx(accts) {
+  const [imp, chatters, cat, st] = await Promise.all([appSync.getDoc("config", "import"), appSync.collMap("chatters"), appSync.appCatalog(),
+    accts ? null : appSync.getDoc("config", "wysperState").catch(() => null)]);
   const w = imp?.whysper || {};
   const pid = (w.platformId && cat.platforms[w.platformId] && w.platformId) ||
     Object.keys(cat.platforms).find((k) => /telegram/i.test(cat.platforms[k].name || "")) || "";
-  return { links: { c: w.chatters || {}, m: w.models || {} }, chatters, models: cat.models, platforms: cat.platforms, pid };
+  const ctx = { links: { c: w.chatters || {}, m: w.models || {} }, chatters, models: cat.models, platforms: cat.platforms, pid };
+  ctx.covered = coveredOf(ctx, accts || st?.accts);
+  return ctx;
 }
 // nom Wysper -> chatteur (ou modèle) : lien de l'import, sinon un chatteur qui porte exactement ce nom
 function linkOf(map, all, raw) {
@@ -174,7 +182,9 @@ async function recomputeDay(d, ctx, unknown, raMap) {
   const prev = day?.entries || {};
   const plat = ctx.platforms[ctx.pid] || {};
   const patch = {};
-  const owned = Object.entries(prev).filter(([, e]) => e && e.platformId === ctx.pid && (e.src === "whysper" || e.src === "wysper"));
+  // lignes du bot ou de l'import, seulement pour les modèles de cette agence Wysper (les autres restent à l'import)
+  const cov = new Set([...(ctx.covered || []), ...Object.values(groups).map((g) => g.m)]);
+  const owned = Object.entries(prev).filter(([, e]) => e && e.platformId === ctx.pid && (e.src === "whysper" || e.src === "wysper") && cov.has(e.modelId));
   const keepOf = (e) => Object.fromEntries(Object.entries(e?.parts || {}).filter(([f, v]) => v && KEEP.has(f)));
   const nulls = (e) => Object.fromEntries(Object.keys(e?.parts || {}).filter((f) => !KEEP.has(f)).map((f) => [f, null]));
   for (const [key, e] of owned) {
@@ -293,8 +303,20 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
       from = today;
       await appSync.mergeDoc("config", "wysper", { from, on: true }, { from, on: true });
     }
-    const ctx = await appCtx();
+    const ctx = await appCtx(st.accts || {});
     if (!ctx.pid) throw new Error("plateforme Telegram introuvable dans l'app");
+    // comptes modèles de l'agence : GET /accounts toutes les heures, plus ceux vus dans les paiements
+    const accts = { ...(st.accts || {}) };
+    let acctsAt = st.acctsAt || 0;
+    if (KEY && now - acctsAt > 3600e3) {
+      try {
+        const r = await api("/accounts");
+        for (const a of r.data || []) if (a?.telegram_id != null) accts[String(a.telegram_id)] = a.name || accts[String(a.telegram_id)] || "";
+        acctsAt = now;
+      } catch (e) {
+        console.warn("Wysper comptes :", e.message);
+      }
+    }
     const fromMs = parisMs(from, 0);
     const keep = st.since && st.from === from;
     const since = new Date(keep ? Math.max(Date.parse(st.since) - OVERLAP_MS, 0) : fromMs).toISOString();
@@ -307,6 +329,7 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
       if (!x?.payment_id || !x.paid_at) continue;
       const p = slim(x);
       if (!incoming) maxU = Math.max(maxU, p.u || 0);
+      if (p.acc && !p.test && p.an) accts[p.acc] = p.an;
       const d = parisParts(p.at).date;
       if (d < from) continue;
       const o = (byDay[d] ||= {})[x.payment_id];
@@ -328,7 +351,8 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
       }
     }
     // noms reliés ou changés dans l'app : on refait les jours récents
-    const sig = JSON.stringify(stable([ctx.links, ctx.pid]));
+    ctx.covered = coveredOf(ctx, accts);
+    const sig = JSON.stringify(stable([ctx.links, ctx.pid, [...ctx.covered].sort()]));
     const lo = [from, addDays(today, -LINK_DAYS)].sort()[1];
     if ((st.sig && st.sig !== sig) || force || st.from !== from) for (let d = lo; d <= today; d = addDays(d, 1)) touched.add(d);
     // toutes les 10 minutes, aujourd'hui et hier sont refaits (planning changé entre-temps)
@@ -361,6 +385,7 @@ async function run({ now = Date.now(), force = false, incoming = null } = {}) {
       from, since: new Date(Math.min(maxU || fromMs, now)).toISOString(), sig, lastErr: null,
       ...(incoming ? { lastEvent: now } : { lastOk: now, lastN: list.length }),
       live: !!SECRET, key: !!KEY, fullAt: full ? now : st.fullAt, unknown, raIds,
+      accts, acctsAt, models: [...ctx.covered].sort(),
     });
     return { payments: list.length, days: touched.size, lines, reattribs: nRa };
   } catch (e) {
@@ -386,17 +411,19 @@ const dayLong = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("fr-FR", { 
 async function dayTotals(d, ctx) {
   const [wd, day] = await Promise.all([appSync.getDoc("wysper", d), appSync.getDoc("days", d)]);
   const t = { l: 0, ln: 0, a: 0, j: 0, m: 0, f: 0, y: 0, u: {}, i: {} };
+  const cov = new Set(ctx.covered || []);
   for (const p of Object.values(wd?.p || {})) {
     const v = counted(p);
     if (!v) continue;
     t.l += v;
     t.ln++;
     const mid = linkOf(ctx.links.m, ctx.models, p.an), cid = p.to && ctx.chatters[p.to] ? p.to : linkOf(ctx.links.c, ctx.chatters, p.un || "(sans membre)");
+    if (mid && mid !== "-") cov.add(mid);
     if (mid === "-" || cid === "-") { const k = mid === "-" ? p.an : p.un; t.i[k] = r2((t.i[k] || 0) + v); }
     else if (!mid || !cid) { const k = !mid ? p.an : p.un || "(sans membre)"; t.u[k] = r2((t.u[k] || 0) + v); }
   }
   for (const e of Object.values(day?.entries || {})) {
-    if (!e || e.platformId !== ctx.pid) continue;
+    if (!e || e.platformId !== ctx.pid || !cov.has(e.modelId)) continue;
     t.y += num(e.sales) + num(e.tips);
     const parts = e.parts && Object.values(e.parts).some(Boolean) ? e.parts : { manuel: [num(e.sales), num(e.tips)] };
     for (const [f, v] of Object.entries(parts)) {
@@ -406,6 +433,7 @@ async function dayTotals(d, ctx) {
     }
   }
   for (const k of ["l", "a", "j", "m", "f", "y"]) t[k] = r2(t[k]);
+  t.mods = [...cov].map((id) => ctx.models[id]?.name).filter(Boolean).sort((a, b) => a.localeCompare(b, "fr"));
   return t;
 }
 async function wysperDay(d) {
@@ -419,9 +447,10 @@ async function refetchDay(d, now) {
   return run({ now, incoming: list });
 }
 function checkText(d, c) {
+  const who = c.mods?.length ? ` ${/^[aeiouyhàâéèêîïôûü]/i.test(c.mods[0]) ? "d'" : "de "}${c.mods.join(" et ")}`.replace("d' ", "d'") : "";
   const head = c.ok
-    ? `✅ **Ventes Telegram · ${dayLong(d)}** : ${eur(c.w ?? c.l)} dans Wysper = ${eur(c.y)} dans l'app${c.wn != null ? ` · ${c.wn} vente${c.wn > 1 ? "s" : ""}` : ""}`
-    : `⚠️ **Ventes Telegram · ${dayLong(d)}** : ${c.w != null ? `${eur(c.w)} dans Wysper` : `${eur(c.l)} reçus de Wysper`} · ${eur(c.y)} dans l'app · écart ${c.y - (c.w ?? c.l) > 0 ? "+" : "−"}${eur(Math.abs(c.y - (c.w ?? c.l)))}`;
+    ? `✅ **Ventes Telegram${who} · ${dayLong(d)}** : ${eur(c.w ?? c.l)} dans Wysper = ${eur(c.y)} dans l'app${c.wn != null ? ` · ${c.wn} vente${c.wn > 1 ? "s" : ""}` : ""}`
+    : `⚠️ **Ventes Telegram${who} · ${dayLong(d)}** : ${c.w != null ? `${eur(c.w)} dans Wysper` : `${eur(c.l)} reçus de Wysper`} · ${eur(c.y)} dans l'app · écart ${c.y - (c.w ?? c.l) > 0 ? "+" : "−"}${eur(Math.abs(c.y - (c.w ?? c.l)))}`;
   const why = [];
   const list = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} (${eur(v)})`).join(", ");
   if (Object.keys(c.u).length) why.push(`-# 🔗 À relier dans l'app (Ventes) : ${list(c.u)}`);
@@ -461,7 +490,7 @@ async function check(d, { now = Date.now(), post = false } = {}) {
   await serial(async () => {
     const st2 = (await appSync.getDoc("config", "wysperState")) || {};
     const checks = Object.fromEntries(Object.entries(st2.checks || {}).filter(([k]) => k >= addDays(d, -40)));
-    checks[d] = { at: now, ok: c.ok, w: c.w ?? null, wn: c.wn ?? null, l: c.l, y: c.y, u: c.u, i: c.i, j: c.j, m: c.m, f: c.f, posted };
+    checks[d] = { at: now, ok: c.ok, w: c.w ?? null, wn: c.wn ?? null, l: c.l, y: c.y, u: c.u, i: c.i, j: c.j, m: c.m, f: c.f, mods: c.mods || [], posted };
     await appSync.putDoc("config", "wysperState", { ...st2, checks });
   });
   return { ...c, text };
