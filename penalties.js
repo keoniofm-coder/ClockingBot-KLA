@@ -21,38 +21,43 @@ const PENALTY_CHANNEL_ID = (process.env.PENALTY_CHANNEL_ID ?? "15539100442049946
 const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
-// free : avertissements sans pénalité avant la première ; every : pénalité tous les N avertissements (2e, 4e…) ;
-// tiers (retards) : [n-ième retard du mois, montant],
-// pénalité seulement à ces retards-là (3e, 5e, 8e…), les autres sont des avertissements ; au-delà du dernier palier, chaque retard au dernier montant
+// steps : montant de la 1re, 2e, 3e… faute du mois (0 = avertissement seul) ; au-delà, le dernier montant à chaque fois.
+// Barème de Kéoni du 11 nov. 2026 (le compteur repart à 1 chaque mois).
+const UP_TO = (n) => Array.from({ length: n }, (_, k) => k + 1); // 1, 2, 3… n
 const FAULTS = [
-  { k: "retard", l: "Retard de +5 min", e: "⏰", cat: "Présence", tiers: [[3, 2], [5, 5], [8, 10], [10, 15], [12, 17], [15, 20]] },
-  { k: "absence", l: "Absence non prévenue ou injustifiée", e: "📅", cat: "Présence", amount: 10, free: 0 },
-  { k: "coupure", l: "Coupure de courant / internet", e: "🔌", cat: "Présence", amount: 5, free: 2 },
-  { k: "erreur", l: "Erreur de chatting", e: "💬", cat: "Chatting", amount: 5, free: 2 },
-  { k: "inactif", l: "Ne chatte pas pendant son shift", e: "⏸️", cat: "Chatting", amount: 10, free: 2 },
-  { k: "kyc", l: "Pas de prise de notes (KYC)", e: "📝", cat: "Chatting", amount: 1, every: 2 },
-  { k: "manager", l: "N'écoute pas son manager", e: "👤", cat: "Comportement", amount: 5, free: 2 },
-  { k: "respect", l: "Manque de respect", e: "🛡️", cat: "Comportement", amount: 20, free: 0 },
-  { k: "vip_parle", l: "Parler à un VIP sans autorisation", e: "👑", cat: "VIP", amount: 20, free: 0 },
-  { k: "vip_paye", l: "Faire payer un VIP sans autorisation", e: "💲", cat: "VIP", amount: 30, free: 0 },
+  { k: "retard", l: "Retard de +5 min (non justifié)", e: "⏰", cat: "Présence", steps: UP_TO(15) },
+  { k: "absence", l: "Absence non prévenue ou injustifiée", e: "📅", cat: "Présence", steps: [10] },
+  { k: "coupure", l: "Coupure de courant / internet", e: "🔌", cat: "Présence", steps: [0, 0, 5] },
+  { k: "erreur", l: "Erreur de chatting", e: "💬", cat: "Chatting", steps: [0, 2, 5] },
+  { k: "inactif", l: "Ne chatte pas pendant son shift", e: "⏸️", cat: "Chatting", steps: [1, 2, 5, 8] },
+  { k: "dort", l: "Dort pendant son shift", e: "😴", cat: "Chatting", steps: [5, 10, 15] },
+  { k: "kyc", l: "Pas de prise de notes (KYC)", e: "📝", cat: "Chatting", steps: [1, 1, 1, 1, 5] },
+  { k: "manager", l: "N'écoute pas son manager", e: "👤", cat: "Comportement", steps: [0, 3, 5, 10] },
+  { k: "respect", l: "Manque de respect", e: "🛡️", cat: "Comportement", steps: [20] },
+  { k: "vip_parle", l: "Parler à un VIP sans autorisation", e: "👑", cat: "VIP", steps: [20] },
+  { k: "vip_paye", l: "Faire payer un VIP sans autorisation", e: "💲", cat: "VIP", steps: [30] },
 ];
 // Pénalité personnalisée : montant et raison écrits à la main (numéro compté parmi ses personnalisées du mois)
 const PERSO = { k: "perso", l: "Pénalité perso", e: "✏️", cat: "Autre" };
 const faultOf = (k) => FAULTS.find((f) => f.k === k) || (k === PERSO.k ? PERSO : null);
 // montant de la n-ième faute du mois (0 = avertissement seul)
-function amountFor(f, n) {
-  if (f.tiers) {
-    const last = f.tiers[f.tiers.length - 1];
-    return n > last[0] ? last[1] : f.tiers.find(([th]) => th === n)?.[1] || 0;
+const amountFor = (f, n) => f.steps[Math.min(Math.max(1, n), f.steps.length) - 1] || 0;
+// la règle en clair : « 1re : avertissement, 2e : -2 €, 3e et + : -5 € », « -10 € à chaque fois »,
+// « -1 € le 1er, -2 € le 2e… jusqu'à -15 € (15e et +) » pour une montée de 1 en 1
+function ruleTxt(f) {
+  const s = f.steps, c = (v) => (v ? `-${money(v)}` : "avertissement"), nth = (i) => (i === 1 ? "1re" : `${i}e`);
+  if (s.length === 1) return `${c(s[0])} à chaque fois`;
+  if (s.length > 5 && s.every((v, i) => v === (i + 1) * s[0])) return `${c(s[0])} le 1er, ${c(s[1])} le 2e… jusqu'à ${c(s.at(-1))} (${s.length}e et +)`;
+  const parts = [];
+  for (let i = 0; i < s.length; ) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[i]) j++;
+    const who = j === s.length - 1 ? `${nth(i + 1)} et +` : i === j ? nth(i + 1) : j === i + 1 ? `${nth(i + 1)} et ${nth(j + 1)}` : `${nth(i + 1)} à ${nth(j + 1)}`;
+    parts.push(`${who} : ${c(s[i])}`);
+    i = j + 1;
   }
-  if (f.every) return n % f.every === 0 ? f.amount : 0;
-  return n > f.free ? f.amount : 0;
+  return parts.join(", ");
 }
-const ruleTxt = (f) =>
-  f.tiers
-    ? `${f.tiers.map(([th, amt]) => `${th}e -${amt} €`).join(", ")}, les autres en avertissement`
-    : f.every ? `-${money(f.amount, f.cur)} tous les ${f.every} avertissements`
-    : f.free ? `${f.free} avertissements, puis -${money(f.amount, f.cur)}` : `-${money(f.amount, f.cur)} dès la 1re fois`;
 // « 5 € » ou « 1 $ » (les pénalités sont en euros, sauf celles du barème en dollars)
 const SYM = { EUR: "€", USD: "$" };
 const curOf = (p) => (p?.currency === "USD" ? "USD" : "EUR");
