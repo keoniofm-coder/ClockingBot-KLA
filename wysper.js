@@ -504,7 +504,37 @@ async function dayTotals(d, ctx) {
   }
   for (const k of ["l", "a", "j", "m", "f", "y"]) t[k] = r2(t[k]);
   t.mods = [...cov].map((id) => ctx.models[id]?.name).filter(Boolean).sort((a, b) => a.localeCompare(b, "fr"));
+  t.man = manualTotals(day, ctx);
   return t;
+}
+// Twizz, Uncove… (tapées dans l'app ou par 💰 Ventes sur Discord) : net et brut du jour par plateforme, comme l'app (calc)
+const CRM = [/only ?fans|^of$/i, /telegram|^tg$/i];
+function manualTotals(day, ctx) {
+  const by = {};
+  for (const e of Object.values(day?.entries || {})) {
+    if (!e || e.platformId === ctx.pid) continue;
+    const plat = ctx.platforms?.[e.platformId];
+    const name = plat?.name || String(e.platformId || "").replace(/^p-/, "");
+    if (!name || CRM.some((re) => re.test(name))) continue;
+    const amt = num(e.sales) + num(e.tips);
+    if (!amt) continue;
+    const fee = num(e.fee ?? plat?.fee ?? 20), isN = e.inp === "net";
+    const net = isN ? amt : amt * (1 - fee / 100), brut = isN && fee < 100 ? amt / (1 - fee / 100) : amt;
+    const cur = (e.cur || plat?.currency) === "USD" ? "USD" : "EUR";
+    const g = (by[`${e.platformId}|${cur}`] ??= { name, cur, net: 0, brut: 0, mods: {} });
+    const m = ctx.models?.[e.modelId]?.name || e.modelId;
+    g.net += net; g.brut += brut; g.mods[m] = (g.mods[m] || 0) + net;
+  }
+  return Object.values(by).filter((g) => g.net >= 0.01 || g.brut >= 0.01).sort((a, b) => a.name.localeCompare(b.name, "fr"));
+}
+const PLAT_E = (n) => (/twizz/i.test(n) ? "🟣" : /uncove/i.test(n) ? "🔴" : "💰");
+function manualText(d, man) {
+  return (man || []).map((g) => {
+    const $ = (v) => (g.cur === "USD" ? `${Number(r2(v)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} $` : eur(v));
+    const mods = Object.entries(g.mods).sort((a, b) => b[1] - a[1]);
+    const who = mods.length > 1 ? mods.map(([m, v]) => `${m} ${$(v)}`).join(", ") : mods[0]?.[0] || "";
+    return `${PLAT_E(g.name)} **Ventes ${g.name} · ${dayLong(d)}** : **${$(g.net)} net**${Math.abs(g.brut - g.net) >= 0.01 ? ` (${$(g.brut)} brut)` : ""}${who ? ` · ${who}` : ""}`;
+  });
 }
 // total de toutes les agences branchées
 async function wysperDay(d) {
@@ -539,7 +569,7 @@ function checkText(d, c) {
   if (c.m >= 0.01) why.push(`-# ✍️ Tapé à la main dans l'app : ${eur(c.m)}`);
   if (c.f >= 0.01) why.push(`-# 📄 Venu d'un import de fichier : ${eur(c.f)}`);
   if (c.w != null && Math.abs(c.w - c.l) >= 0.01) why.push(`-# ❓ ${eur(Math.abs(c.w - c.l))} ${c.w > c.l ? "comptés par Wysper mais pas reçus par le bot" : "reçus par le bot mais plus comptés par Wysper"}`);
-  return [head, ...why].join("\n");
+  return [head, ...why, ...manualText(d, c.man)].join("\n");
 }
 // post : false (silencieux), true (toujours), "changed" (seulement si le résultat a changé depuis le dernier envoi)
 async function check(d, { now = Date.now(), post = false } = {}) {
@@ -664,7 +694,7 @@ function start({ client } = {}) {
   const go = () => tick().then((r) => r?.lines && console.log("Wysper :", JSON.stringify(r))).catch((e) => console.error("Wysper :", e.message));
   setTimeout(go, 5000);
   setInterval(go, EVERY_S * 1000);
-  // vérifications avec le tableau de bord Wysper : toutes les heures (sans rien poster), récap de la veille à 00h20
+  // vérifications avec le tableau de bord Wysper : toutes les heures (sans rien poster), récap de la veille à 00h05 (avec Twizz, Uncove…)
   // dans le salon Wysper, dernière vérif de la veille à 06h00 (postée seulement si le résultat a changé)
   const cron = require("node-cron");
   const today = () => parisParts(Date.now()).date;
@@ -676,7 +706,7 @@ function start({ client } = {}) {
     if (h !== 0) await ver(today(), false);
     if (h > 0 && h < 6) await ver(addDays(today(), -1), false);
   }, { timezone: "Europe/Paris" });
-  cron.schedule("20 0 * * *", async () => (await on()) && ver(addDays(today(), -1), true), { timezone: "Europe/Paris" });
+  cron.schedule("5 0 * * *", async () => (await on()) && ver(addDays(today(), -1), true), { timezone: "Europe/Paris" });
   cron.schedule("0 6 * * *", async () => (await on()) && ver(addDays(today(), -1), "changed"), { timezone: "Europe/Paris" });
 }
 

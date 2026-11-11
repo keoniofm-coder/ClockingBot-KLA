@@ -90,7 +90,8 @@ function panelRows(date, slot, { unlinked = 0 } = {}) {
     row(
       button("g_pen", "Pénalités", "⚠️", ButtonStyle.Primary),
       button("g_prime", "Primes", "💸", ButtonStyle.Success),
-      button("g_reat", "Réatrib/Ventes", "🔄", ButtonStyle.Primary),
+      button("g_reat", "Réatrib", "🔄", ButtonStyle.Primary),
+      button("g_vente", "Ventes", "💰", ButtonStyle.Success),
       button(c("g_plan"), "Planning", "📅", ButtonStyle.Primary)
     ),
     row(
@@ -394,7 +395,7 @@ async function handle(i) {
   const [id, pDate, pSlot] = i.customId.split("~");
   const pinned = pDate && appSync.START_OF[pSlot] != null ? { date: pDate, slot: pSlot, name: ctx.shiftOfSlot(pSlot) } : null;
   const cur = pinned || ctx.currentShift();
-  const needApp = ["g_menu", "g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen", "g_prime", "g_reat"];
+  const needApp = ["g_menu", "g_who", "g_find", "g_new", "g_nd", "g_ndp", "g_plan", "g_rep", "g_mv", "g_ren", "g_box", "g_send", "g_back", "g_off", "g_fire", "g_att", "g_chat", "g_pen", "g_prime", "g_reat", "g_vente"];
   if (needApp.includes(id) && !appSync.enabled())
     return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
   // boutons du panneau
@@ -453,6 +454,7 @@ async function handle(i) {
     case "g_pen": return ctx.openPenalties(i);
     case "g_prime": return ctx.openPrimes(i);
     case "g_reat": return ctx.openReattrib(i);
+    case "g_vente": return ctx.openVentes(i);
     case "g_off":
       await i.deferReply({ flags: EPHEMERAL });
       return i.editReply(await ctx.dayoffView(today().slice(0, 7)));
