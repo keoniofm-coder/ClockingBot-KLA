@@ -28,14 +28,12 @@ const FAULTS = [
   { k: "retard", l: "Retard de +5 min (non justifié)", e: "⏰", cat: "Présence", steps: UP_TO(15) },
   { k: "absence", l: "Absence non prévenue ou injustifiée", e: "📅", cat: "Présence", steps: [10] },
   { k: "coupure", l: "Coupure de courant / internet", e: "🔌", cat: "Présence", steps: [0, 0, 5] },
-  { k: "erreur", l: "Erreur de chatting", e: "💬", cat: "Chatting", steps: [0, 2, 5] },
+  { k: "erreur", l: "Erreur de chatting", e: "💬", cat: "Chatting", steps: [0, 2, 3, 5] },
   { k: "inactif", l: "Ne chatte pas pendant son shift", e: "⏸️", cat: "Chatting", steps: [1, 2, 5, 8] },
-  { k: "dort", l: "Dort pendant son shift", e: "😴", cat: "Chatting", steps: [5, 10, 15] },
+  { k: "dort", l: "Dort pendant son shift", e: "😴", cat: "Chatting", steps: [0, 3, 5, 10] },
   { k: "kyc", l: "Pas de prise de notes (KYC)", e: "📝", cat: "Chatting", steps: [1, 1, 1, 1, 5] },
   { k: "manager", l: "N'écoute pas son manager", e: "👤", cat: "Comportement", steps: [0, 3, 5, 10] },
   { k: "respect", l: "Manque de respect", e: "🛡️", cat: "Comportement", steps: [20] },
-  { k: "vip_parle", l: "Parler à un VIP sans autorisation", e: "👑", cat: "VIP", steps: [20] },
-  { k: "vip_paye", l: "Faire payer un VIP sans autorisation", e: "💲", cat: "VIP", steps: [30] },
 ];
 // Pénalité personnalisée : montant et raison écrits à la main (numéro compté parmi ses personnalisées du mois)
 const PERSO = { k: "perso", l: "Pénalité perso", e: "✏️", cat: "Autre" };
@@ -209,7 +207,7 @@ const VIEWS = {
                   .setPlaceholder("Annuler une pénalité (erreur de saisie)")
                   .addOptions(
                     list.slice(0, 25).map((p) =>
-                      opt(`${dayShort(p.date)} · ${p.name} · N°${p.n} ${p.label}`, p.id, p.amount ? penAmt(p) : "Avertissement seul", faultOf(p.fault)?.e, p.id === st.del)
+                      opt(`${dayShort(p.date)} · ${p.name} · N°${p.n} ${p.label}`, p.id, p.amount ? penAmt(p) : "Avertissement seul", p.e ?? faultOf(p.fault)?.e, p.id === st.del)
                     )
                   )
               ),
