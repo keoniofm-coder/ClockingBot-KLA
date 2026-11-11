@@ -1,5 +1,5 @@
 // ================== 🔄 RÉATTRIBUTION DE VENTES ==================
-// 🛠️ Admin › 🔄 Réatrib/Ventes ouvre une petite fiche : le chatteur qui a la vente (dans Whysper), celui à qui la
+// 🛠️ Admin › 🔄 Réatrib ouvre une petite fiche : le chatteur qui a la vente (dans Whysper), celui à qui la
 // donner, le montant, le fan (acheteur) et le jour de la vente. Elle est gardée dans l'app (reattrib/<id>, en attente)
 // et annoncée dans le salon réatrib :
 //   « Ventes de @Samuel | Montant : **100 €** » puis « Réatribuer à @Moise » et « -# Fan : Jean · vente du 2 nov. · ⏳ »
@@ -46,7 +46,7 @@ function modal() {
   const d0 = workDay();
   const days = [0, 1, 2].map((k) => appSync.addDays(d0, -k));
   const names = ["Aujourd'hui", "Hier", "Avant-hier"];
-  return new ModalBuilder().setCustomId("ra_new").setTitle("🔄 Réatrib / Ventes").addLabelComponents(
+  return new ModalBuilder().setCustomId("ra_new").setTitle("🔄 Réatrib").addLabelComponents(
     label("Vendu par", "Le chatteur qui a la vente dans Whysper").setUserSelectMenuComponent(users("from", "🔎 Tape son nom")),
     label("À réattribuer à", "Celui qui doit avoir la vente").setUserSelectMenuComponent(users("to", "🔎 Tape son nom")),
     label("Montant", "En euros, comme dans Whysper (ex : 100). Plusieurs ventes au même fan : le total").setTextInputComponent(text("amount", "ex : 100", 10)),
@@ -171,7 +171,7 @@ async function handle(i) {
     const r = await byId(id.slice(8));
     return done(i, r ? await cancel(r, i.user.id) : "Cette réattribution est déjà annulée.", 15000);
   }
-  return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 🔄 Réatrib/Ventes." });
+  return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 🔄 Réatrib." });
 }
 
 module.exports = { ctx, open, handle, modal, lineOf, syncApplied, REATTRIB_CHANNEL_ID };

@@ -17,6 +17,7 @@ const chatters = require("./chatters");
 const penalties = require("./penalties");
 const primes = require("./primes");
 const reattrib = require("./reattrib");
+const ventes = require("./ventes");
 const wysper = require("./wysper");
 const shiftModal = require("./shiftmodal");
 const planWatch = require("./planwatch");
@@ -1321,6 +1322,7 @@ async function handleInteraction(i) {
     if (cid.startsWith("pn_")) return penalties.handle(i);
     if (cid.startsWith("pr_")) return primes.handle(i);
     if (cid.startsWith("ra_")) return reattrib.handle(i);
+    if (cid.startsWith("vt_")) return ventes.handle(i);
     if (cid.startsWith("pm_")) return shiftModal.handle(i);
     if (cid.startsWith("qm_")) return quickModal.handle(i);
     if (cid.startsWith("cf_")) return fiche.handle(i);
@@ -1456,6 +1458,7 @@ Object.assign(gestion.ctx, {
   openPenalties: (i) => penalties.open(i),
   openPrimes: (i) => primes.open(i),
   openReattrib: (i) => reattrib.open(i),
+  openVentes: (i) => ventes.open(i),
   refreshPanels: refreshSoon,
   heldText: (date, slot, cid) => planEdit.heldText(date, slot, cid),
   dayoffView: (month) => dayoff.boardView(month),
@@ -1485,6 +1488,7 @@ Object.assign(chatters.ctx, {
 Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(primes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(reattrib.ctx, { isAdmin, client, nameOf });
+Object.assign(ventes.ctx, { isAdmin, client, nameOf });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
   client,
