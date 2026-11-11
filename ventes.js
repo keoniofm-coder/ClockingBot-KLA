@@ -5,8 +5,9 @@
 // comme si elle était tapée là ; Paies, Tableau de bord et Revenu perso suivent.
 // Le shift est celui où il travaillait ce jour-là (planning, sinon son shift habituel).
 // Une ligne déjà là garde sa façon de compter : une vente en brut sur une ligne en net est convertie avec les
-// frais de la plateforme (et l'inverse). ↩️ sous la confirmation retire la vente si tu t'es trompé.
-const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle } = require("discord.js");
+// frais de la plateforme (et l'inverse). Chaque vente est postée dans le salon ventes (message normal) ;
+// 🗑️ au bout de sa ligne la retire de l'app si tu t'es trompé.
+const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle, ButtonBuilder, SectionBuilder, TextDisplayBuilder, MessageFlags } = require("discord.js");
 const appSync = require("./app-sync");
 const { money, workDay } = require("./penalties");
 const { parseAmount } = require("./primes");
@@ -127,25 +128,48 @@ async function addSale({ c, mid, pid, amount, inp, date, slot }) {
   await appSync.mergeDoc("days", date, { entries: { [key]: e } }, { date, entries: {} });
   return { key, prev, e, add, lineNet, fee, plat };
 }
-// ↩️ Annuler cette vente : on retire ce qui a été ajouté (la ligne disparaît si elle n'existait pas avant)
-const undos = new Map(); // jeton -> { date, key, add, created, at }
+// 🗑️ Retirer une vente : on retire ce qui a été ajouté (la ligne disparaît si elle n'existait pas avant)
 async function undo(u) {
   const day = await appSync.getDoc("days", u.date);
   const e = day?.entries?.[u.key];
-  if (!e) return "Cette ligne n'existe plus dans l'app : rien à retirer.";
+  if (!e) return null;
   const sales = r2(num(e.sales) - u.add);
   const gone = u.created && sales <= 0.004 && !num(e.tips);
   const ne = gone ? null : { ...e, sales: Math.max(0, sales), at: Date.now() };
   if (ne && e.parts) ne.parts = { ...e.parts, adj: [r2(num(e.parts.adj?.[0]) - u.add), num(e.parts.adj?.[1])] };
   await appSync.mergeDoc("days", u.date, { entries: { [u.key]: ne } }, { date: u.date, entries: {} });
-  return gone ? "↩️ Vente retirée : la ligne n'est plus dans l'app." : `↩️ Vente retirée : la ligne est revenue à ${money(ne.sales, e.cur === "USD" ? "USD" : "EUR")}${e.inp === "net" ? " net" : ""}.`;
+  return gone ? "la ligne n'est plus dans l'app" : `la ligne est revenue à ${money(ne.sales, e.cur === "USD" ? "USD" : "EUR")}${e.inp === "net" ? " net" : " brut"}`;
+}
+// les ventes postées (pour 🗑️) : gardées 40 jours dans les données du bot, sinon en mémoire
+const mem = {};
+const store = () => {
+  const d = ctx.getData?.();
+  return d ? (d.ventes ??= {}) : mem;
+};
+const save = () => ctx.saveData?.();
+function keep(tok, rec) {
+  const s = store();
+  s[tok] = rec;
+  for (const [k, u] of Object.entries(s)) if (Date.now() - u.at > 40 * 864e5) delete s[k];
+  save();
 }
 
-// La fiche envoyée : la vente part dans l'app
+// Le salon où chaque vente est postée (message normal, visible de tous) : le salon ventes du récap Wysper
+const SALES_CHANNEL_ID = (process.env.SALES_CHANNEL_ID ?? process.env.WYSPER_CHANNEL_ID ?? "1568083317759418390").trim();
+const V2 = MessageFlags.IsComponentsV2;
+const rmBtn = (tok) => new ButtonBuilder().setCustomId(`vt_rm~${tok}`).setEmoji("🗑️").setStyle(ButtonStyle.Secondary);
+const postOf = (text, tok) => ({
+  flags: V2,
+  components: [new SectionBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(text)).setButtonAccessory(rmBtn(tok))],
+  allowedMentions: { parse: [] },
+});
+
+// La fiche envoyée : la vente part dans l'app, puis dans le salon ventes
 async function submit(i) {
   const who = field(i, "getSelectedUsers", "who")?.first?.();
   const acct = (field(i, "getStringSelectValues", "acct") || [])[0] || "";
-  const inp = (field(i, "getStringSelectValues", "inp") || [])[0] === "net" ? "net" : (field(i, "getStringSelectValues", "inp") || [])[0] === "gross" ? "gross" : "";
+  const inpRaw = (field(i, "getStringSelectValues", "inp") || [])[0];
+  const inp = inpRaw === "net" || inpRaw === "gross" ? inpRaw : "";
   const amount = parseAmount(field(i, "getTextInputValue", "amount"));
   const pickedDay = (field(i, "getStringSelectValues", "day") || [])[0];
   const date = /^\d{4}-\d{2}-\d{2}$/.test(pickedDay || "") ? pickedDay : workDay();
@@ -168,24 +192,63 @@ async function submit(i) {
   const acc = cat.accounts.find((a) => a.key === acct);
   const cur = r.e.cur === "USD" ? "USD" : "EUR";
   const mode = (net) => (net ? "net" : "brut");
-  const tok = appSync.newId();
-  undos.set(tok, { date, key: r.key, add: r.add, created: !r.prev, at: Date.now() });
-  for (const [k, u] of undos) if (Date.now() - u.at > 24 * 3600e3) undos.delete(k);
   const where = slot ? `${SLOT_L[slot]} du ${dayShort(date)}` : `hors planning, ${dayShort(date)}`;
+  const head = `✅ Vente ajoutée dans l'app : <@${who.id}> · ${acc ? `${acc.model} · ${acc.platform}` : acct} · **${money(amount, cur)} ${mode(inp === "net")}** · ${where}`;
+  const text = [
+    head,
+    r.add !== amount || r.lineNet !== (inp === "net")
+      ? `-# Sa ligne est comptée en ${mode(r.lineNet)} : ajouté ${money(r.add, cur)} ${mode(r.lineNet)} (frais ${acc?.platform || "de la plateforme"} ${r.fee} %).`
+      : "",
+    `-# Ventes/Import › sa ligne ${slot ? SLOT_L[slot] : "hors planning"} est à **${money(r.e.sales, cur)} ${mode(r.lineNet)}**${r.prev ? "" : " (nouvelle)"} · par <@${i.user.id}>`,
+    how === "habit" ? `-# Pas au planning ce jour-là : rangée sur son shift habituel. Tu peux la déplacer dans l'app.` : "",
+    how === "hour" ? `-# Pas au planning aujourd'hui : rangée sur le shift en cours. Tu peux la déplacer dans l'app.` : "",
+    how === "none" ? `-# Pas au planning ce jour-là : rangée en « hors planning ». Tu peux la déplacer dans l'app.` : "",
+  ].filter(Boolean).join("\n").replace(/ {2,}/g, " ");
+  const tok = appSync.newId();
+  const rec = { date, key: r.key, add: r.add, created: !r.prev, at: Date.now(), head };
+  // message normal dans le salon ventes, avec 🗑️ au bout de la ligne
+  const msg = SALES_CHANNEL_ID
+    ? await ctx.client?.channels.fetch(SALES_CHANNEL_ID).then((ch) => ch.send(postOf(text, tok))).catch((e) => (console.error("Ventes (salon) :", e.message), null))
+    : null;
+  if (msg) rec.msg = { channelId: msg.channelId || SALES_CHANNEL_ID, id: msg.id };
+  keep(tok, rec);
+  const again = button("vt_add", "Nouvelle vente", "💰", ButtonStyle.Success);
+  if (msg) {
+    await showView(i, { content: `✅ Vente postée dans <#${rec.msg.channelId}>. 🗑️ au bout de sa ligne pour la retirer.`, components: [row(again)] });
+    setTimeout(() => i.deleteReply().catch(() => {}), 60000);
+    return;
+  }
+  // salon introuvable : la vente est quand même dans l'app, on la montre ici
   return showView(i, {
-    content: [
-      `✅ Vente ajoutée dans l'app : <@${who.id}> · ${acc ? `${acc.model} · ${acc.platform}` : acct} · **${money(amount, cur)} ${mode(inp === "net")}** · ${where}`,
-      r.add !== amount || r.lineNet !== (inp === "net")
-        ? `-# Sa ligne est comptée en ${mode(r.lineNet)} : ajouté ${money(r.add, cur)} ${mode(r.lineNet)} (frais ${acc?.platform || "de la plateforme"} ${r.fee} %).`
-        : "",
-      `-# Ventes/Import › ${dayShort(date)} : sa ligne ${acc ? `${acc.model} · ${acc.platform} ` : ""}${slot ? `(${SLOT_L[slot]}) ` : ""}est à **${money(r.e.sales, cur)} ${mode(r.lineNet)}**${r.prev ? "" : " (nouvelle ligne)"}.`,
-      how === "habit" ? `-# Pas au planning ce jour-là : rangée sur son shift habituel. Tu peux la déplacer dans l'app.` : "",
-      how === "hour" ? `-# Pas au planning aujourd'hui : rangée sur le shift en cours. Tu peux la déplacer dans l'app.` : "",
-      how === "none" ? `-# Pas au planning ce jour-là : rangée en « hors planning ». Tu peux la déplacer dans l'app.` : "",
-    ].filter(Boolean).join("\n").replace(/ {2,}/g, " "),
-    components: [row(button("vt_add", "Nouvelle vente", "💰", ButtonStyle.Success), button(`vt_undo~${tok}`, "Annuler cette vente", "↩️", ButtonStyle.Secondary))],
+    content: `${text}\n-# ⚠️ Pas pu la poster dans le salon ventes (salon introuvable ou bot sans accès).`,
+    components: [row(again, button(`vt_rm~${tok}`, "Retirer cette vente", "🗑️", ButtonStyle.Secondary))],
     allowedMentions: { parse: [] },
   });
+}
+// 🗑️ : « Retirer … ? » puis Oui, retirer ; le message du salon reste, barré
+async function rmAsk(i, tok) {
+  const u = store()[tok];
+  if (!u) return reply(i, { content: "Trop vieille pour la retirer d'ici (ou déjà retirée) : corrige le montant dans l'app (Ventes/Import)." });
+  return reply(i, {
+    content: `🗑️ Retirer cette vente de l'app ?\n${u.head.replace(/^✅ Vente ajoutée dans l'app : /, "")}\n-# Elle est retirée de sa ligne dans Ventes/Import (et donc de sa paie) ; son message reste barré dans le salon.`,
+    components: [row(button(`vt_rmok~${tok}`, "Oui, retirer", "🗑️", ButtonStyle.Danger), button("vt_no", "Non", null, ButtonStyle.Secondary))],
+  });
+}
+async function rmOk(i, tok) {
+  await i.deferUpdate();
+  const u = store()[tok];
+  if (!u) return done(i, "Cette vente est déjà retirée.", 8000);
+  const res = await undo(u).catch((e) => `⚠️ ${String(e.message).slice(0, 150)}`);
+  if (res === null) return done(i, "Sa ligne n'existe plus dans l'app (déplacée ou effacée) : rien à retirer, corrige dans l'app si besoin.", 15000);
+  if (res.startsWith("⚠️")) return done(i, `${res}. Rien n'est retiré, corrige-la dans l'app.`, 15000);
+  delete store()[tok];
+  save();
+  if (u.msg)
+    await ctx.client?.channels
+      .fetch(u.msg.channelId)
+      .then((ch) => ch.messages.edit(u.msg.id, { flags: V2, components: [new TextDisplayBuilder().setContent(`~~${u.head}~~\n-# 🗑️ Retirée par <@${i.user.id}> : ${res}.`)], allowedMentions: { parse: [] } }))
+      .catch((e) => console.warn("Vente retirée (message) :", e.message));
+  return done(i, `🗑️ Vente retirée : ${res}.`, 12000);
 }
 
 // ---------- Interactions vt_… ----------
@@ -194,14 +257,10 @@ async function handle(i) {
   const id = i.customId;
   if (id === "vt_new") return submit(i);
   if (id === "vt_add") return open(i);
-  if (id.startsWith("vt_undo~")) {
-    const u = undos.get(id.slice(8));
-    if (!u) return done(i, "Trop tard pour l'annuler d'ici : corrige le montant dans l'app (Ventes/Import).", 12000);
-    await i.deferUpdate();
-    undos.delete(id.slice(8));
-    return done(i, await undo(u).catch((e) => `⚠️ Pas retirée : ${String(e.message).slice(0, 150)}. Corrige-la dans l'app.`), 15000);
-  }
+  if (id.startsWith("vt_rm~")) return rmAsk(i, id.slice(6));
+  if (id.startsWith("vt_rmok~")) return rmOk(i, id.slice(8));
+  if (id === "vt_no") return done(i, "D'accord, rien n'est retiré.", 4000);
   return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 💰 Ventes." });
 }
 
-module.exports = { ctx, open, handle, modal, slotFor, addSale, undo };
+module.exports = { ctx, open, handle, modal, slotFor, addSale, undo, SALES_CHANNEL_ID };

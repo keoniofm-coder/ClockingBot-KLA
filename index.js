@@ -1488,7 +1488,7 @@ Object.assign(chatters.ctx, {
 Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(primes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(reattrib.ctx, { isAdmin, client, nameOf });
-Object.assign(ventes.ctx, { isAdmin, client, nameOf });
+Object.assign(ventes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
 Object.assign(voice.ctx, {
   client,
