@@ -136,7 +136,12 @@ async function undo(u) {
   const sales = r2(num(e.sales) - u.add);
   const gone = u.created && sales <= 0.004 && !num(e.tips);
   const ne = gone ? null : { ...e, sales: Math.max(0, sales), at: Date.now() };
-  if (ne && e.parts) ne.parts = { ...e.parts, adj: [r2(num(e.parts.adj?.[0]) - u.add), num(e.parts.adj?.[1])] };
+  if (ne && e.parts) {
+    // la correction (adj) baisse d'autant, sans faire passer la ligne sous 0
+    const rest = Object.entries(e.parts).filter(([f, v]) => v && f !== "adj").reduce((x, [, v]) => x + num(v[0]), 0);
+    ne.parts = { ...e.parts, adj: [r2(Math.max(-rest, num(e.parts.adj?.[0]) - u.add)), num(e.parts.adj?.[1])] };
+    ne.sales = r2(Math.max(0, rest + ne.parts.adj[0]));
+  }
   await appSync.mergeDoc("days", u.date, { entries: { [u.key]: ne } }, { date: u.date, entries: {} });
   return gone ? "la ligne n'est plus dans l'app" : `la ligne est revenue à ${money(ne.sales, e.cur === "USD" ? "USD" : "EUR")}${e.inp === "net" ? " net" : " brut"}`;
 }

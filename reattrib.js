@@ -127,6 +127,9 @@ async function cancel(r, by) {
       .fetch(r.msg.channelId)
       .then((ch) => ch.messages.edit(r.msg.id, { content: `${lineOf(r).split("\n").map((l) => `~~${l}~~`).join("\n")}\n-# Annulée par <@${by}>`, components: [], allowedMentions: { parse: [] } }))
       .catch((e) => console.warn("Réatrib annulée (message) :", e.message));
+  // faite par Wysper en direct : le bot refait le jour, la vente revient chez le vendeur
+  if (r.status === "applied" && r.appliedBy === "wysper")
+    return `🗑️ Annulée : la vente revient chez ${who(r.fromUid, r.fromName)} dans l'app (Wysper en direct), d'ici quelques minutes.\n-# Si tu l'avais déjà changée à la main dans Ventes, remets la ligne comme avant pour ne pas la compter deux fois.`;
   return r.status === "applied"
     ? `🗑️ Annulée. ⚠️ L'app l'avait déjà faite : la vente reste chez ${who(r.toUid, r.toName)}, change-la à la main dans Ventes/Import si besoin.`
     : `🗑️ Annulée : l'app ne la fera pas à l'import.`;
