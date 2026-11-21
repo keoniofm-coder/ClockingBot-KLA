@@ -175,6 +175,17 @@ const KEEP = new Set(["manuel", "adj"]);
 // comparaison sans tenir compte de l'ordre des clés (la base les range à sa façon)
 const stable = (v) => (Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v);
 const same = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
+// somme des parts d'une ligne (les parts retirées sont à null)
+const partSum = (parts) => Object.values(parts || {}).filter(Boolean).reduce((x, v) => [x[0] + num(v[0]), x[1] + num(v[1])], [0, 0]);
+// jamais de ligne négative dans Ventes : une correction à la main (adj) qui ferait passer la ligne sous 0
+// (vente déplacée à la main puis réattribuée sur Discord) est réduite d'autant, la ligne tombe à 0
+function noNeg(parts) {
+  const [s, t] = partSum(parts);
+  if (s >= -0.004 && t >= -0.004) return parts;
+  const a = parts.adj || [0, 0];
+  const na = [r2(num(a[0]) - Math.min(0, s)), r2(num(a[1]) - Math.min(0, t))];
+  return { ...parts, adj: na[0] || na[1] ? na : null };
+}
 async function recomputeDay(d, ctx, unknown, raMap) {
   const [wd, day, plan] = await Promise.all([appSync.getDoc("wysper", d), appSync.getDoc("days", d), appSync.planOf(d)]);
   const pays = Object.values(wd?.p || {});
@@ -215,9 +226,10 @@ async function recomputeDay(d, ctx, unknown, raMap) {
   const nulls = (e) => Object.fromEntries(Object.keys(e?.parts || {}).filter((f) => !KEEP.has(f)).map((f) => [f, null]));
   for (const [key, e] of owned) {
     if (groups[key]) continue;
-    const keep = keepOf(e);
-    if (!Object.keys(keep).length) { patch[key] = null; continue; }
-    const s = Object.values(keep).reduce((x, v) => [x[0] + num(v[0]), x[1] + num(v[1])], [0, 0]);
+    const keep = noNeg(keepOf(e));
+    const s = partSum(keep);
+    // plus aucune vente et rien qui reste à la main : la ligne s'en va
+    if (!Object.values(keep).some(Boolean) || (Math.abs(s[0]) < 0.005 && Math.abs(s[1]) < 0.005)) { patch[key] = null; continue; }
     const ne = { ...e, sales: r2(s[0]), tips: r2(s[1]), parts: { ...nulls(e), ...keep }, at: Date.now() };
     if (!same([e.sales, e.tips, e.parts], [ne.sales, ne.tips, ne.parts])) patch[key] = ne;
   }
@@ -225,8 +237,8 @@ async function recomputeDay(d, ctx, unknown, raMap) {
     const e = prev[key];
     // une ligne tapée à la main (sans src) sur le même chatteur : elle reste à côté, comme avec l'import
     const keep = e && (e.src === "whysper" || e.src === "wysper") ? keepOf(e) : {};
-    const parts = { ...(e?.parts ? nulls(e) : {}), ...keep, api: [r2(g.sales), 0] };
-    const tot = Object.values(parts).filter(Boolean).reduce((x, v) => [x[0] + num(v[0]), x[1] + num(v[1])], [0, 0]);
+    const parts = noNeg({ ...(e?.parts ? nulls(e) : {}), ...keep, api: [r2(g.sales), 0] });
+    const tot = partSum(parts);
     const ne = {
       slot: g.slot, chatterId: g.c, modelId: g.m, platformId: ctx.pid, sales: r2(tot[0]), tips: r2(tot[1]), parts,
       ra: e?.ra ?? null, rate: e?.rate ?? num(ctx.chatters[g.c]?.rate ?? 10), fee: e?.fee ?? num(plat.fee ?? 20),
