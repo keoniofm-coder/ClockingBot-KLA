@@ -22,7 +22,7 @@ const ctx = {};
 const states = new Map(); // userId -> état du menu en cours
 
 // steps : montant de la 1re, 2e, 3e… faute du mois (0 = avertissement seul) ; au-delà, le dernier montant à chaque fois.
-// Barème de Kéoni du 11 nov. 2026 (le compteur repart à 1 chaque mois).
+// Barème de Kéoni du 11 nov. 2026, plus « Pas de relance script » le 21 nov. (le compteur repart à 1 chaque mois).
 const UP_TO = (n) => Array.from({ length: n }, (_, k) => k + 1); // 1, 2, 3… n
 const FAULTS = [
   { k: "retard", l: "Retard de +5 min (non justifié)", e: "⏰", cat: "Présence", steps: UP_TO(15) },
@@ -32,6 +32,7 @@ const FAULTS = [
   { k: "inactif", l: "Ne chatte pas pendant son shift", e: "⏸️", cat: "Chatting", steps: [1, 2, 5, 8] },
   { k: "dort", l: "Dort pendant son shift", e: "😴", cat: "Chatting", steps: [0, 3, 5, 10] },
   { k: "kyc", l: "Pas de prise de notes (KYC)", e: "📝", cat: "Chatting", steps: [1, 1, 1, 1, 5] },
+  { k: "relance", l: "Pas de relance script", e: "📜", cat: "Chatting", steps: [0, 0.5, 0.5, 0.5, 1] },
   { k: "manager", l: "N'écoute pas son manager", e: "👤", cat: "Comportement", steps: [0, 3, 5, 10] },
   { k: "respect", l: "Manque de respect", e: "🛡️", cat: "Comportement", steps: [20] },
 ];
@@ -59,7 +60,8 @@ function ruleTxt(f) {
 // « 5 € » ou « 1 $ » (les pénalités sont en euros, sauf celles du barème en dollars)
 const SYM = { EUR: "€", USD: "$" };
 const curOf = (p) => (p?.currency === "USD" ? "USD" : "EUR");
-const money = (n, cur = "EUR") => `${Number(n).toLocaleString("fr-FR")} ${SYM[cur] || "€"}`;
+// les centimes s'écrivent en entier : « 0,50 € », « 1 € »
+const money = (n, cur = "EUR") => `${Number(n).toLocaleString("fr-FR", Number.isInteger(Number(n)) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${SYM[cur] || "€"}`;
 // totaux par monnaie d'une liste de pénalités : « -5 € et -1 $ », « 0 € » s'il n'y a rien à retirer
 const totals = (l) => l.reduce((t, p) => ((t[curOf(p)] += Number(p.amount) || 0), t), { EUR: 0, USD: 0 });
 const totTxt = (t) => Object.entries(t).filter(([, v]) => v).map(([c, v]) => `-${money(Math.round(v * 100) / 100, c)}`).join(" et ") || "0 €";
