@@ -5,13 +5,16 @@
 // Les primes se paient en fin de mois : l'onglet Paies de l'app les ajoute à la paie du 1er du mois suivant
 // (mois du jour de la prime, coupé à 2 h comme les pénalités).
 // 🗑️ sous chaque prime du salon (admins) : l'annuler sur place, en deux clics (le message reste, barré).
-// Le 1er à 2 h (pas le 16 : seules les pénalités ont un récap à la quinzaine), le récap des primes du mois qui finit
-// part dans le salon primes (une ligne par chatteur avec son total et ses raisons) ; rien n'est posté s'il n'y en a eu aucune.
-// 📋 Récap du mois (après une prime) : voir les autres mois et envoyer le récap à la main.
+// Le 1er à 10 h (pas le 16 : seules les pénalités ont un récap à la quinzaine), les primes du barème du mois qui finit
+// sont calculées et ajoutées (primesauto.js), puis le récap part dans le salon primes (une ligne par chatteur avec son
+// total et ses raisons) ; rien n'est posté s'il n'y en a eu aucune.
+// 📋 Récap du mois (après une prime) : voir les autres mois, annuler une prime, envoyer le récap à la main.
+// En bas du salon primes, un message garde le barème et deux boutons (admins) : 📊 Primes en cours, 💸 Nouvelle prime.
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require("discord.js");
 const appSync = require("./app-sync");
 const { money, workDay } = require("./penalties");
-const { reply, done, showView, row, button, plS, EPHEMERAL } = require("./ui");
+const { reply, done, showView, row, button, plS, opt, EPHEMERAL } = require("./ui");
+const auto = require("./primesauto");
 
 const PRIMES_CHANNEL_ID = (process.env.PRIMES_CHANNEL_ID ?? "1548285118026878996").trim();
 // Fourni par index.js : isAdmin(i), client, nameOf(uid), getData(), saveData()
@@ -31,8 +34,10 @@ const payDayLabel = (m) => `1er ${monthLabel(periodStep(m, 1)).split(" ")[0]}`;
 const dayShort = (date) => new Date(date + "T12:00:00Z").toLocaleDateString("fr-FR", { day: "numeric", month: "short", timeZone: "UTC" });
 const curOf = (p) => (p?.currency === "USD" ? "USD" : "EUR");
 
-// Le message du salon
-const lineOf = (p) => `<@${p.uid}> Bien joué 💸 Prime de **${money(p.amount, curOf(p))}** | ${p.reason}`;
+// Le message du salon ; un chatteur sans compte Discord relié (prime calculée) : son nom en gras
+const who = (p) => (/^\d+$/.test(String(p.uid)) ? `<@${p.uid}>` : `**${p.name || "?"}**`);
+const mentions = (list) => [...new Set(list.map((p) => String(p.uid)).filter((u) => /^\d+$/.test(u)))].slice(0, 100);
+const lineOf = (p) => `${who(p)} Bien joué 💸 Prime de **${money(p.amount, curOf(p))}** | ${p.reason}`;
 const rmRow = (p) => row(new ButtonBuilder().setCustomId(`pr_rm~${p.id}`).setEmoji("🗑️").setStyle(ButtonStyle.Secondary));
 
 // ---------- Récap d'un mois ----------
@@ -51,9 +56,9 @@ function recapRows(list) {
     .map(([uid, l]) => ({ uid, l, tot: totals(l) }))
     .sort((a, b) => totVal(b.tot) - totVal(a.tot) || b.l.length - a.l.length);
 }
-const rowTxt = (r) => `<@${r.uid}> · **${totTxt(r.tot)}** · ${r.l.length} prime${plS(r.l.length)}\n-# ${r.l.map((p) => p.reason).join(" · ").slice(0, 300)}`;
+const rowTxt = (r) => `${who(r.l[0])} · **${totTxt(r.tot)}** · ${r.l.length} prime${plS(r.l.length)}\n-# ${r.l.map((p) => p.reason).join(" · ").slice(0, 300)}`;
 // « 📋 Récap des primes de novembre 2026 » : une ligne par @chatteur avec son total et ses raisons, puis le total
-function recapText(k, list) {
+function recapText(k, list, short = []) {
   const rows = recapRows(list);
   let body = rows.map(rowTxt).join("\n");
   if (body.length > 1700) body = body.slice(0, body.lastIndexOf("\n", 1700)) + "\n…";
@@ -63,14 +68,16 @@ function recapText(k, list) {
     "",
     rows.length ? body : "_Aucune prime ce mois-ci._",
     ...(rows.length ? ["", `**Total : ${totTxt(totals(list))}** 💸`] : []),
+    ...(short.length ? [`-# 🗓️ Moins de ${auto.CFG.minDays} jours travaillés, pas de primes du barème : ${short.map((r) => `${r.name} (${r.days} j)`).join(", ")}`] : []),
   ].join("\n");
 }
 // Envoie le récap d'un mois dans le salon primes
-async function postRecap(k, t = Date.now(), list = null) {
+async function postRecap(k, t = Date.now(), list = null, short = []) {
   list ||= await periodList(k);
   const ch = await ctx.client.channels.fetch(PRIMES_CHANNEL_ID);
-  const msg = await ch.send({ content: recapText(k, list), allowedMentions: { users: [...new Set(list.map((p) => p.uid))].slice(0, 100) } });
+  const msg = await ch.send({ content: recapText(k, list, short), allowedMentions: { users: mentions(list) } });
   markSent(k, { channelId: ch.id, id: msg.id, at: t });
+  await ensurePanel(true).catch((e) => console.warn("Primes (barème) :", e.message));
   return list.length;
 }
 function markSent(k, v) {
@@ -80,20 +87,23 @@ function markSent(k, v) {
   for (const x of Object.keys(data.primeRecaps)) if (x < periodStep(k, -6)) delete data.primeRecaps[x];
   ctx.saveData();
 }
-// Le 1er à 2 h (et au démarrage, si le bot était éteint à ce moment-là) : récap du mois qui vient de finir
+// Le 1er à 10 h (et au démarrage, si le bot était éteint à ce moment-là) : les primes du barème du mois qui vient de
+// finir sont ajoutées dans l'app, puis le récap part dans le salon primes
+const RECAP_HOUR = 10;
 async function autoRecap(t = Date.now()) {
   if (!appSync.enabled() || !PRIMES_CHANNEL_ID || !ctx.getData) return null;
-  const d = workDay(t);
-  const cur = periodOf(d);
-  const prev = periodStep(cur, -1);
-  const since = Number(d.slice(8, 10)) - 1; // jours depuis la fin du mois
+  const { date: d, h } = appSync.parisParts(t);
+  const day = Number(d.slice(8, 10));
+  if (day === 1 && h < RECAP_HOUR) return null;
+  const prev = periodStep(periodOf(d), -1);
   // déjà fait après la fin du mois (un envoi à la main avant la fin ne compte pas : il en manquait peut-être)
   const sent = ctx.getData().primeRecaps?.[prev];
-  if ((sent && periodOf(workDay(sent.at)) > prev) || since > 2) return null;
+  if ((sent && periodOf(workDay(sent.at)) > prev) || day - 1 > 2) return null;
+  const st = await auto.writeMonth(prev, t);
   const list = await periodList(prev);
   // aucune prime : rien à poster, c'est noté pour ne pas revenir dessus
   if (!list.length) return markSent(prev, { at: t, empty: true }), null;
-  await postRecap(prev, t, list);
+  await postRecap(prev, t, list, st.rows.filter((r) => !r.elig && r.total));
   return prev;
 }
 // Le récap dans Discord (visible seulement par l'admin) : changer de mois, l'envoyer dans le salon
@@ -111,11 +121,22 @@ async function sumView(st) {
       sent && !sent.empty ? `-# Récap envoyé dans le salon primes le ${dayShort(workDay(sent.at + 121 * 60e3))}.` : "",
     ].filter(Boolean).join("\n"),
     components: [
+      ...(list.length
+        ? [
+            row(
+              new StringSelectMenuBuilder()
+                .setCustomId("pr_del")
+                .setPlaceholder("🗑️ Annuler une prime…")
+                .addOptions(list.slice(-25).map((p) => opt(`${p.name || "?"} · ${money(p.amount, curOf(p))}`, p.id, p.reason, null)))
+            ),
+          ]
+        : []),
       row(
         button("pr_pe_-1", "Mois d'avant", "◀️", ButtonStyle.Secondary),
         button("pr_pe_1", "Mois d'après", "▶️", ButtonStyle.Secondary, k >= periodOf(workDay())),
         button("pr_post", "Envoyer le récap", "📣", ButtonStyle.Secondary, !rows.length),
-        button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success)
+        button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success),
+        button("pa_live", "Primes en cours", "📊", ButtonStyle.Secondary)
       ),
     ],
     allowedMentions: { parse: [] },
@@ -124,18 +145,25 @@ async function sumView(st) {
 
 // ---------- La petite fiche ----------
 const label = (l, d) => (d ? new LabelBuilder().setLabel(l).setDescription(d) : new LabelBuilder().setLabel(l));
-const text = (id, placeholder, max) => new TextInputBuilder().setCustomId(id).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(max).setPlaceholder(placeholder);
+const text = (id, placeholder, max, required = true) => new TextInputBuilder().setCustomId(id).setStyle(TextInputStyle.Short).setRequired(required).setMaxLength(max).setPlaceholder(placeholder);
+const C = auto.CANDIDATURE;
 function modal() {
   return new ModalBuilder().setCustomId("pr_new").setTitle("💸 Prime").addLabelComponents(
     label("Chatteur").setUserSelectMenuComponent(new UserSelectMenuBuilder().setCustomId("who").setRequired(true).setMinValues(1).setMaxValues(1).setPlaceholder("🔎 Tape son nom")),
-    label("Montant", "ex : 20 (ajouté à sa paie dans l'app)").setTextInputComponent(text("amount", "ex : 20", 8)),
+    label("Prime").setStringSelectMenuComponent(
+      new StringSelectMenuBuilder().setCustomId("kind").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(
+        { label: `${C.l} : ${money(C.amount)}`, value: C.k, emoji: C.e, description: "Montant et raison remplis tout seuls" },
+        { label: "Autre prime", value: "other", emoji: "✏️", description: "Écris le montant et la raison ci-dessous", default: true }
+      )
+    ),
+    label("Montant (pour une autre prime)", "ex : 20 (ajouté à sa paie dans l'app)").setTextInputComponent(text("amount", "ex : 20", 8, false)),
     label("Monnaie").setStringSelectMenuComponent(
       new StringSelectMenuBuilder().setCustomId("cur").setRequired(true).setMinValues(1).setMaxValues(1).addOptions(
         { label: "Euros (€)", value: "EUR", emoji: "💶", default: true },
         { label: "Dollars ($)", value: "USD", emoji: "💵" }
       )
     ),
-    label("Raison", "Elle s'affiche dans le salon primes").setTextInputComponent(text("reason", "ex : A ramené un bon chatteur", 200))
+    label("Raison (pour une autre prime)", "Elle s'affiche dans le salon primes").setTextInputComponent(text("reason", "ex : Meilleur chatteur de la semaine", 200, false))
   );
 }
 async function open(i) {
@@ -159,9 +187,11 @@ const parseAmount = (v) => {
 // La fiche envoyée : la prime part dans le salon primes et dans l'app
 async function submit(i) {
   const u = field(i, "getSelectedUsers", "who")?.first?.();
-  const amount = parseAmount(field(i, "getTextInputValue", "amount"));
-  const currency = (field(i, "getStringSelectValues", "cur") || [])[0] === "USD" ? "USD" : "EUR";
-  const reason = String(field(i, "getTextInputValue", "reason") || "").replace(/\s+/g, " ").trim();
+  // 📨 candidature confirmée : montant et raison du barème
+  const cand = (field(i, "getStringSelectValues", "kind") || [])[0] === C.k;
+  const amount = cand ? C.amount : parseAmount(field(i, "getTextInputValue", "amount"));
+  const currency = !cand && (field(i, "getStringSelectValues", "cur") || [])[0] === "USD" ? "USD" : "EUR";
+  const reason = cand ? `${C.e} ${C.l}` : String(field(i, "getTextInputValue", "reason") || "").replace(/\s+/g, " ").trim();
   await i.deferReply({ flags: EPHEMERAL });
   const errors = [
     !u && "choisis le chatteur.",
@@ -176,6 +206,7 @@ async function submit(i) {
   const p = {
     id: `${m}-${appSync.newId()}`, month: m, date, at: Date.now(), by: i.user.id,
     uid: u.id, chatterId: c?.id || null, name: c?.name || ctx.nameOf?.(u.id) || u.username, amount, currency, reason,
+    ...(cand ? { kind: C.k } : {}),
   };
   let where = "";
   try {
@@ -183,6 +214,7 @@ async function submit(i) {
     const msg = await ch.send({ content: lineOf(p), components: [rmRow(p)], allowedMentions: { users: [p.uid] } });
     p.msg = { channelId: ch.id, id: msg.id };
     where = ` dans <#${ch.id}>`;
+    ensurePanel(true).catch((e) => console.warn("Primes (barème) :", e.message));
   } catch (e) {
     console.error("Prime (salon) :", e.message);
     where = ` ⚠️ Message pas envoyé dans le salon primes : ${String(e.message).slice(0, 150)}`;
@@ -219,6 +251,35 @@ async function rmAsk(i, pid) {
   });
 }
 
+// ---------- En bas du salon primes : le barème et les boutons (admins) ----------
+function panel() {
+  return {
+    content: [
+      "💸 **Primes du mois**",
+      auto.baremeTxt(),
+      `-# Calculées toutes seules avec le pointage et Wysper, ajoutées à la paie et récapitulées ici le 1er du mois à ${RECAP_HOUR} h.`,
+    ].join("\n"),
+    components: [row(button("pa_live", "Primes en cours", "📊", ButtonStyle.Secondary), button("pr_add", "Nouvelle prime", "💸", ButtonStyle.Success))],
+    allowedMentions: { parse: [] },
+  };
+}
+// bump : le reposter tout en bas (après un récap ou une prime) ; sinon le remettre seulement s'il a disparu
+async function ensurePanel(bump = false) {
+  if (!PRIMES_CHANNEL_ID || !ctx.getData) return null;
+  const data = ctx.getData();
+  const ch = await ctx.client.channels.fetch(PRIMES_CHANNEL_ID);
+  const old = data.primesPanel?.id ? await ch.messages.fetch(data.primesPanel.id).catch(() => null) : null;
+  if (old && !bump) {
+    if (old.content !== panel().content) await old.edit(panel());
+    return old.id;
+  }
+  if (old) await old.delete().catch(() => {});
+  const msg = await ch.send(panel());
+  data.primesPanel = { channelId: ch.id, id: msg.id };
+  ctx.saveData();
+  return msg.id;
+}
+
 // ---------- Interactions pr_… ----------
 async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
@@ -226,6 +287,7 @@ async function handle(i) {
   if (id === "pr_new") return submit(i);
   if (id === "pr_add") return i.showModal(modal());
   if (id.startsWith("pr_rm~")) return rmAsk(i, id.slice(6));
+  if (id === "pr_del") return rmAsk(i, i.values?.[0] || "");
   if (id === "pr_rmno") return done(i, "D'accord, rien n'est annulé.", 4000);
   // 📋 récap : ◀️ ▶️ change de mois, 📣 l'envoie dans le salon primes
   if (id === "pr_sum" || id.startsWith("pr_pe_") || id === "pr_post") {
@@ -249,4 +311,4 @@ async function handle(i) {
   return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 💸 Primes." });
 }
 
-module.exports = { ctx, open, handle, modal, lineOf, parseAmount, PRIMES_CHANNEL_ID, autoRecap, postRecap, recapText };
+module.exports = { ctx, open, handle, modal, lineOf, parseAmount, PRIMES_CHANNEL_ID, autoRecap, postRecap, recapText, ensurePanel, panel, RECAP_HOUR };

@@ -16,6 +16,7 @@ const gestion = require("./gestion");
 const chatters = require("./chatters");
 const penalties = require("./penalties");
 const primes = require("./primes");
+const primesAuto = require("./primesauto");
 const reattrib = require("./reattrib");
 const ventes = require("./ventes");
 const wysper = require("./wysper");
@@ -893,13 +894,18 @@ client.once(Events.ClientReady, async () => {
   // changements faits dans l'app -> planning, messages de shift et tableau des day off sur Discord
   setInterval(refreshLive, 60000);
   // récap des pénalités de la quinzaine : le 16 et le 1er à 02h02 (rattrapé au démarrage s'il a été manqué)
-  // et celui des primes, dans le salon primes, au même moment
-  const recap = () => {
-    penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
-    primes.autoRecap().then((k) => k && console.log(`Récap des primes ${k} envoyé`)).catch((e) => console.error("Récap primes :", e.message));
-  };
+  const recap = () => penalties.autoRecap().then((k) => k && console.log(`Récap des pénalités ${k} envoyé`)).catch((e) => console.error("Récap pénalités :", e.message));
   cron.schedule("2 2 * * *", recap, { timezone: TZ });
   setTimeout(recap, 20000);
+  // primes : le 1er à 10h, celles du barème sont calculées et ajoutées, puis le récap part dans le salon primes
+  // (rattrapé au démarrage) ; le barème reste en bas du salon ; les chiffres du mois en cours vont dans l'app toutes les 30 min
+  const primeRecap = () => primes.autoRecap().then((k) => k && console.log(`Récap des primes ${k} envoyé`)).catch((e) => console.error("Récap primes :", e.message));
+  cron.schedule("0 10 * * *", primeRecap, { timezone: TZ });
+  setTimeout(primeRecap, 25000);
+  setTimeout(() => primes.ensurePanel().catch((e) => console.error("Primes (barème) :", e.message)), 12000);
+  const primesLive = () => primesAuto.refreshLive().catch((e) => console.error("Primes en cours :", e.message));
+  cron.schedule("*/30 * * * *", primesLive, { timezone: TZ });
+  setTimeout(primesLive, 40000);
   // réattributions faites par l'app à l'import Whysper -> « ✅ Fait dans l'app » sous leur message
   const reat = () => reattrib.syncApplied().then((n) => n && console.log(`Réatrib : ${n} faite(s) dans l'app`)).catch((e) => console.error("Réatrib :", e.message));
   setTimeout(reat, 30000);
@@ -1321,6 +1327,7 @@ async function handleInteraction(i) {
     if (cid.startsWith("cm_")) return chatters.handle(i);
     if (cid.startsWith("pn_")) return penalties.handle(i);
     if (cid.startsWith("pr_")) return primes.handle(i);
+    if (cid.startsWith("pa_")) return primesAuto.handle(i);
     if (cid.startsWith("ra_")) return reattrib.handle(i);
     if (cid.startsWith("vt_")) return ventes.handle(i);
     if (cid.startsWith("pm_")) return shiftModal.handle(i);
@@ -1487,6 +1494,7 @@ Object.assign(chatters.ctx, {
 });
 Object.assign(penalties.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(primes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
+Object.assign(primesAuto.ctx, { isAdmin });
 Object.assign(reattrib.ctx, { isAdmin, client, nameOf });
 Object.assign(ventes.ctx, { isAdmin, client, nameOf, getData: () => data, saveData });
 Object.assign(dayoff.ctx, { isAdmin, client, getData: () => data, saveData, refreshPlanning: refreshSoon });
