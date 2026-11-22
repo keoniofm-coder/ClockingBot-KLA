@@ -147,9 +147,12 @@ const slim = (r) => ({
   rate: r.rate == null ? null : Math.round(r.rate * 10) / 10, rt: r.rt == null ? null : Math.round(r.rt), ok: r.ok, total: r.total,
   elig: r.elig, reach: r.reach,
 });
+// une fois les primes du mois écrites (le 1er à 10 h), le document est figé (writtenAt) : l'app compte alors les primes
+// écrites dans Paies, et plus celles en cours
 async function saveLive(st) {
+  if (!st.writtenAt && (await appSync.getDoc("primesLive", st.month).catch(() => null))?.writtenAt) return;
   await appSync.putDoc("primesLive", st.month, {
-    month: st.month, at: st.at, upTo: st.upTo, done: st.done, minDays: st.minDays,
+    month: st.month, at: st.at, upTo: st.upTo, done: st.done, minDays: st.minDays, ...(st.writtenAt ? { writtenAt: st.writtenAt } : {}),
     bareme: [...BAREME.map(({ k, e, l, short, rule, amount, tiers }) => ({ k, e, l, short, rule, amount, ...(tiers ? { tiers } : {}) })), { ...CANDIDATURE, manual: true }],
     rows: Object.fromEntries(st.rows.map((r) => [r.cid, slim(r)])),
   });
@@ -167,7 +170,6 @@ async function refreshLive(t = Date.now()) {
 const autoId = (m, cid, k) => `${m}-auto-${cid}-${k}`;
 async function writeMonth(m, t = Date.now()) {
   const st = await monthStats(m, t);
-  await saveLive(st).catch((e) => console.warn("Primes (app) :", e.message));
   const have = new Set((await appSync.primesIn(m)).filter((p) => p.auto).map((p) => p.id));
   let n = 0;
   for (const r of st.rows.filter((x) => x.elig))
@@ -180,6 +182,7 @@ async function writeMonth(m, t = Date.now()) {
       });
       n++;
     }
+  await saveLive({ ...st, writtenAt: t }).catch((e) => console.warn("Primes (app) :", e.message));
   return { ...st, written: n };
 }
 
