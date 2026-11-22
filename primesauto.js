@@ -1,10 +1,10 @@
 // ================== 💸 PRIMES DU MOIS, CALCULÉES TOUTES SEULES ==================
-// Barème de Kéoni (22 nov. 2026), d'après les chiffres de l'app pour le mois :
-//   📅 1 absence max dans le mois : 3,50 €        (Pointage : absences, sauf les jours de day off)
-//   🔓 25 % d'unlock PPV ou plus : 3,50 €           (Wysper : PPV payés sur PPV envoyés, tous ses comptes Wysper)
-//   💬 Temps de réponse sous 2 min : 2,50 €         (Wysper : médiane du jour, moyenne du mois pondérée par les réponses)
+// Barème de Kéoni (22 nov. 2026, revu à 3 h 39), d'après les chiffres de l'app pour le mois :
+//   📅 0 absence dans le mois : 3 €                 (Pointage : absences, sauf les jours de day off)
+//   🔓 25/30 % d'unlock PPV ou plus : 1,50 €/2,50 € (Wysper : PPV payés sur PPV envoyés, tous ses comptes Wysper)
+//   💬 Temps de réponse sous 1 min 30 : 2 €         (Wysper : médiane du jour, moyenne du mois pondérée par les réponses)
 //   🔌 Moins de 5 coupures : 2 €                    (Pointage : shifts avec une coupure)
-//   ⏰ Moins de 3 retards : 1,50 €                  (Pointage : retards, aussi ceux d'un shift passé ensuite en coupure)
+//   ⏰ Moins de 2 retards : 1,50 €                  (Pointage : retards, aussi ceux d'un shift passé ensuite en coupure)
 //   📨 Apport de candidature confirmé : 2 €        (à la main : 🛠️ Admin › 💸 Primes, choix « Candidature confirmée »)
 // Comptent : les chatteurs actifs qui ont au moins un shift pointé dans le mois (présent, retard ou coupure).
 // Pour les toucher, il faut avoir travaillé au moins 20 jours dans le mois (jours avec un shift pointé ; PRIMES_MIN_DAYS).
@@ -23,18 +23,24 @@ const states = new Map(); // userId -> { month }
 const { addDays, parisParts } = appSync;
 const num = (v) => Number(v) || 0;
 
+// rule : la règle en court pour l'app ; tiers : paliers [minimum, montant] (le plus haut atteint compte)
 const BAREME = [
-  { k: "abs", e: "📅", l: "1 absence max dans le mois", short: "Max 1 absence", amount: 3.5, ok: (s) => s.abs <= 1 },
-  { k: "unlock", e: "🔓", l: "25 % d'unlock PPV ou plus", short: "Unlock PPV 25 %+", amount: 3.5, ok: (s) => s.rate != null && s.rate >= 25 },
-  { k: "rt", e: "💬", l: "Temps de réponse sous 2 min", short: "Réponse sous 2 min", amount: 2.5, ok: (s) => s.rt != null && s.rt < 120 },
-  { k: "cut", e: "🔌", l: "Moins de 5 coupures", short: "Moins de 5 coupures", amount: 2, ok: (s) => s.cut < 5 },
-  { k: "ret", e: "⏰", l: "Moins de 3 retards", short: "Moins de 3 retards", amount: 1.5, ok: (s) => s.ret < 3 },
+  { k: "abs", e: "📅", l: "0 absence dans le mois", short: "0 absence", rule: "0 absence", amount: 3, ok: (s) => s.abs === 0 },
+  { k: "unlock", e: "🔓", l: "25/30 % d'unlock PPV ou plus", short: "Unlock PPV 25/30 %", rule: "25 % ou plus", amount: 2.5, tiers: [[25, 1.5], [30, 2.5]], ok: (s) => s.rate != null && s.rate >= 25 },
+  { k: "rt", e: "💬", l: "Temps de réponse sous 1 min 30", short: "Réponse sous 1 min 30", rule: "sous 1 min 30", amount: 2, ok: (s) => s.rt != null && s.rt < 90 },
+  { k: "cut", e: "🔌", l: "Moins de 5 coupures", short: "Moins de 5 coupures", rule: "moins de 5", amount: 2, ok: (s) => s.cut < 5 },
+  { k: "ret", e: "⏰", l: "Moins de 2 retards", short: "Moins de 2 retards", rule: "moins de 2", amount: 1.5, ok: (s) => s.ret < 2 },
 ];
+// montant d'un critère pour un chatteur (palier le plus haut atteint) et son libellé court
+const tierOf = (b, s) => (b.tiers ? [...b.tiers].reverse().find(([m]) => num(s.rate) >= m) : null);
+const amtOf = (b, s) => (b.tiers ? tierOf(b, s)?.[1] ?? 0 : b.amount);
+const shortOf = (b, s) => (b.tiers ? `Unlock PPV ${tierOf(b, s)?.[0] ?? b.tiers[0][0]} %+` : b.short);
+const amtTxt = (b) => (b.tiers ? b.tiers.map(([, a]) => money(a)).join(" / ") : money(b.amount));
 // prime donnée à la main, au choix dans la fiche 💸
 const CANDIDATURE = { k: "candidature", e: "📨", l: "Apport de candidature confirmé", amount: 2 };
 // minimum de jours travaillés dans le mois (Kéoni, 22 nov. 2026 : 20 jours)
 const CFG = { minDays: Number(process.env.PRIMES_MIN_DAYS) || 20 };
-const baremeTxt = () => [...BAREME, CANDIDATURE].map((b) => `${b.e} ${b.l} : **${money(b.amount)}**`).join("\n") +
+const baremeTxt = () => [...BAREME, CANDIDATURE].map((b) => `${b.e} ${b.l} : **${amtTxt(b)}**`).join("\n") +
   `\n-# 🗓️ Il faut au moins ${CFG.minDays} jours travaillés dans le mois pour toucher les primes du barème.`;
 
 // jour de travail (coupé à 2 h), mois, dernier jour d'un mois
@@ -124,7 +130,7 @@ async function monthStats(m, t = Date.now()) {
       const c = byId[x.cid];
       const s = { ...x, days: dates.size, name: c.name, uid: c.discordId || "", rate: x.sends ? (x.unl / x.sends) * 100 : null, rt: x.rtN ? x.rtS / x.rtN : null };
       s.ok = BAREME.filter((b) => b.ok(s)).map((b) => b.k);
-      s.total = Math.round(BAREME.filter((b) => s.ok.includes(b.k)).reduce((a, b) => a + b.amount, 0) * 100) / 100;
+      s.total = Math.round(BAREME.filter((b) => s.ok.includes(b.k)).reduce((a, b) => a + amtOf(b, s), 0) * 100) / 100;
       // elig : assez de jours ; reach : peut encore les avoir d'ici la fin du mois
       s.elig = s.days >= CFG.minDays;
       s.reach = s.elig || s.days + after + (done || dates.has(upTo) ? 0 : 1) >= CFG.minDays;
@@ -141,10 +147,13 @@ const slim = (r) => ({
   rate: r.rate == null ? null : Math.round(r.rate * 10) / 10, rt: r.rt == null ? null : Math.round(r.rt), ok: r.ok, total: r.total,
   elig: r.elig, reach: r.reach,
 });
+// une fois les primes du mois écrites (le 1er à 10 h), le document est figé (writtenAt) : l'app compte alors les primes
+// écrites dans Paies, et plus celles en cours
 async function saveLive(st) {
+  if (!st.writtenAt && (await appSync.getDoc("primesLive", st.month).catch(() => null))?.writtenAt) return;
   await appSync.putDoc("primesLive", st.month, {
-    month: st.month, at: st.at, upTo: st.upTo, done: st.done, minDays: st.minDays,
-    bareme: [...BAREME.map(({ k, e, l, short, amount }) => ({ k, e, l, short, amount })), { ...CANDIDATURE, manual: true }],
+    month: st.month, at: st.at, upTo: st.upTo, done: st.done, minDays: st.minDays, ...(st.writtenAt ? { writtenAt: st.writtenAt } : {}),
+    bareme: [...BAREME.map(({ k, e, l, short, rule, amount, tiers }) => ({ k, e, l, short, rule, amount, ...(tiers ? { tiers } : {}) })), { ...CANDIDATURE, manual: true }],
     rows: Object.fromEntries(st.rows.map((r) => [r.cid, slim(r)])),
   });
 }
@@ -161,7 +170,6 @@ async function refreshLive(t = Date.now()) {
 const autoId = (m, cid, k) => `${m}-auto-${cid}-${k}`;
 async function writeMonth(m, t = Date.now()) {
   const st = await monthStats(m, t);
-  await saveLive(st).catch((e) => console.warn("Primes (app) :", e.message));
   const have = new Set((await appSync.primesIn(m)).filter((p) => p.auto).map((p) => p.id));
   let n = 0;
   for (const r of st.rows.filter((x) => x.elig))
@@ -170,10 +178,11 @@ async function writeMonth(m, t = Date.now()) {
       if (!r.ok.includes(b.k) || have.has(id)) continue;
       await appSync.addPrime({
         id, month: m, date: st.end, at: t, by: "auto", auto: b.k,
-        uid: r.uid || `app:${r.cid}`, chatterId: r.cid, name: r.name, amount: b.amount, currency: "EUR", reason: `${b.e} ${b.short}`,
+        uid: r.uid || `app:${r.cid}`, chatterId: r.cid, name: r.name, amount: amtOf(b, r), currency: "EUR", reason: `${b.e} ${shortOf(b, r)}`,
       });
       n++;
     }
+  await saveLive({ ...st, writtenAt: t }).catch((e) => console.warn("Primes (app) :", e.message));
   return { ...st, written: n };
 }
 
@@ -244,4 +253,4 @@ async function handle(i) {
   return done(i, "Ce bouton a expiré.", 5000);
 }
 
-module.exports = { ctx, CFG, BAREME, CANDIDATURE, baremeTxt, monthStats, writeMonth, refreshLive, saveLive, handle, liveView, lastDay, monthStep, workDay };
+module.exports = { ctx, CFG, BAREME, CANDIDATURE, baremeTxt, amtOf, monthStats, writeMonth, refreshLive, saveLive, handle, liveView, lastDay, monthStep, workDay };
