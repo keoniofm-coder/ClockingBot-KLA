@@ -184,7 +184,8 @@ const daysTxt = (r, min) => `🗓️ ${r.elig ? `${r.days} jours ✅` : `${r.day
 function lineOf(r, manual, min = CFG.minDays) {
   const has = (k) => r.ok.includes(k);
   const extra = manual?.length ? ` · 📨 +${money(manual.reduce((a, p) => a + num(p.amount), 0))}` : "";
-  const tot = r.reach ? `**${money(r.total)}**` : `~~${money(r.total)}~~`;
+  // en gras : à payer ; normal : si les jours sont atteints d'ici la fin du mois ; barré : trop tard
+  const tot = r.elig ? `**${money(r.total)}**` : r.reach ? money(r.total) : `~~${money(r.total)}~~`;
   return [
     `**${r.name}** · ${tot}${extra} · ${daysTxt(r, min)}`,
     `-# 📅 ${r.abs} ${mark(has("abs"))} · ⏰ ${r.ret} ${mark(has("ret"))} · 🔌 ${r.cut} ${mark(has("cut"))} · 🔓 ${r.rate == null ? "pas de PPV" : pct(r.rate)} ${mark(has("unlock"))} · 💬 ${r.rt == null ? "pas de chiffres" : dur(r.rt)} ${mark(has("rt"))}`,
@@ -198,7 +199,10 @@ async function liveView(st) {
   saveLive(s).catch((e) => console.warn("Primes (app) :", e.message));
   const manual = primes.filter((p) => !p.auto);
   const manBy = (r) => manual.filter((p) => p.chatterId === r.cid);
-  const auto = s.rows.reduce((a, r) => a + (r.reach ? r.total : 0), 0);
+  // à payer : ceux qui ont leurs jours ; possible : tout le monde, sans la règle des jours
+  const auto = s.rows.reduce((a, r) => a + (r.elig ? r.total : 0), 0);
+  const all = s.rows.reduce((a, r) => a + r.total, 0);
+  const r2 = (v) => Math.round(v * 100) / 100;
   const man = manual.reduce((a, p) => a + (p.currency === "USD" ? 0 : num(p.amount)), 0);
   const lines = s.rows.map((r) => lineOf(r, manBy(r)));
   let desc = lines.join("\n");
@@ -208,7 +212,7 @@ async function liveView(st) {
     .setTitle(`📊 Primes ${ofMonth(m)}${s.done ? "" : ` · en cours, jusqu'au ${dayShort(s.upTo)}`}`)
     .setDescription(desc || "_Personne n'a encore de shift pointé ce mois-ci._")
     .addFields({ name: "Barème", value: baremeTxt() })
-    .setFooter({ text: `Total : ${money(Math.round((auto + man) * 100) / 100)}${man ? ` (dont ${money(man)} à la main)` : ""} · 🗓️ jours travaillés (${s.minDays} minimum, ⏳ encore possible) · 📅 absences · ⏰ retards · 🔌 coupures · 🔓 unlock PPV · 💬 temps de réponse` });
+    .setFooter({ text: `À payer : ${money(r2(auto + man))}${man ? ` (dont ${money(man)} à la main)` : ""}${all !== auto ? ` · possible sans la règle des ${s.minDays} jours : ${money(r2(all + man))}` : ""} · 🗓️ jours travaillés (${s.minDays} minimum, ⏳ encore possible) · 📅 absences · ⏰ retards · 🔌 coupures · 🔓 unlock PPV · 💬 temps de réponse` });
   return {
     content: st.note || "",
     embeds: [embed],
