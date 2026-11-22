@@ -67,6 +67,11 @@ async function mergeDoc(coll, id, patch, base) {
 async function delDoc(coll, id) {
   await rest("DELETE", `coll=eq.${enc(coll)}&id=eq.${enc(id)}`);
 }
+// documents d'une collection dont l'id (un jour « 2026-11-03 ») est entre deux jours, bornes comprises
+async function docsBetween(coll, from, to) {
+  const rows = await rest("GET", `select=id,data&coll=eq.${enc(coll)}&id=gte.${enc(from)}&id=lte.${enc(to)}`);
+  return Object.fromEntries(rows.map((r) => [r.id, r.data || {}]));
+}
 async function collMap(coll) {
   const rows = await rest("GET", `select=id,data&coll=eq.${enc(coll)}`);
   return Object.fromEntries(rows.map((r) => [r.id, r.data || {}]));
@@ -865,5 +870,5 @@ module.exports = {
   loadBotState, saveBotState, openClockIns,
   norm, parisParts, parisMs, addDays,
   // lecture et écriture directes (synchro Wysper)
-  getDoc, putDoc, mergeDoc, collMap, reattribsWhere,
+  getDoc, putDoc, mergeDoc, collMap, reattribsWhere, docsBetween,
 };

@@ -724,4 +724,4 @@ function start({ client } = {}) {
 
 // clés des agences, pour les stats (wystats.js)
 const keys = () => KEYS.map((a) => ({ id: a.id, key: a.key }));
-module.exports = { start, tick, check, verify, verifyAny, handleEvent, webhookServer, recomputeDay, slim, counted, norm, enabled, api, keys, _contacts: contacts };
+module.exports = { start, tick, check, verify, verifyAny, handleEvent, webhookServer, recomputeDay, slim, counted, norm, linkOf, enabled, api, keys, _contacts: contacts };
