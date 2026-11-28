@@ -329,7 +329,7 @@ async function twSubmit(i) {
   const mode = (net) => (net ? "net" : "brut");
   const where = slot ? SLOT_L[slot] : "hors planning";
   const head = `<@${who.id}> Ventes ${ddmm(date)} : **${money(amount, cur)}** sur ${acc ? `${acc.model} ${acc.platform}` : "Twizz"}`;
-  const text = `${head}\n-# Net · ${where} · ajoutée par <@${i.user.id}>`;
+  const text = `${head}\n-# ✅ Ajoutée dans l'app (Ventes › ${where}, en net) · par <@${i.user.id}>`;
   const tok = appSync.newId();
   const rec = { date, key: r.key, add: r.add, created: !r.prev, at: Date.now(), head, kind: "tw" };
   const msg = TWIZZ_CHANNEL_ID
