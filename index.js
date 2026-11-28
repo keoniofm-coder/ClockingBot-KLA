@@ -68,7 +68,7 @@ const DEFAULT_DATA = {
   membres: {}, // userId -> { name, username } : noms affichés dans les menus et dans l'app
   planningMsgs: {}, // ancien planning du salon (date -> { channelId, ids }) : supprimé au premier message du salon box
   shiftMsgs: {}, // ancien panneau du salon clocking (« date|SHIFT » -> { channelId, ids }) : supprimé au démarrage
-  boxMsg: null, // { channelId, id, key: « date|SHIFT », hash } : le message du salon box (en direct)
+  boxMsg: null, // { channelId, id, ids, key: « date|SHIFT », hash, hashes } : le message du salon box (en direct ; deux pour un grand shift)
   boxNotes: [], // [{ channelId, id }] : annonces de box du shift, supprimées avec son message
   effMsgs: {}, // « date|shift » -> { channelId, id, hash } : récap de l'effectif (mis à jour en direct)
   penRecaps: {}, // quinzaine « 2026-10-A » -> { channelId, id, at } : récap des pénalités envoyé
@@ -335,6 +335,21 @@ async function dropClockingPanels() {
 // direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. 🛠️ Admin (la gestion du shift, pour
 // l'admin seul) en haut à droite ; en bas Clock In / Clock Out et ✏️ Modifier le shift (la fenêtre avec toutes les modèles). Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
 // ceux faits dans l'app) s'écrivent dans ce salon et partent avec son message, au shift suivant.
+// À droite de chaque chatteur : ⚡ Coupure (noté tout de suite), qui devient 🔙 Retour de coupure tant qu'elle dure.
+// Pour un admin, ou pour le chatteur lui-même. Sous le message : ⚡ J'ai une coupure / 🔙 Retour de coupure (chatteurs).
+const openCut = (m) => m?.status === "coupure" && !!m.cutAt && !m.cutEnd;
+const cutRow = () =>
+  row(button("cb_me_cut", "J'ai une coupure", "⚡", ButtonStyle.Secondary), button("cb_me_back", "Retour de coupure", "🔙", ButtonStyle.Secondary));
+// Lignes de texte qui se suivent sans bouton : un seul bloc (Discord compte 40 éléments par message)
+function mergeTexts(items) {
+  const out = [];
+  for (const it of items) {
+    const last = out.at(-1);
+    if (last && !last.sep && !last.button && !last.keep && !it.sep && !it.button && !it.keep && last.cont === it.cont) last.text += `\n${it.text}`;
+    else out.push({ ...it });
+  }
+  return out;
+}
 async function boxView(name, date) {
   const sh = SHIFTS[name];
   const slot = appSync.SLOT_OF[name];
@@ -347,6 +362,17 @@ async function boxView(name, date) {
     const t = timesOf(p, k);
     return `${k === "off" ? "🏖️" : ST[k].e} ${whoOf(x.c)}${t ? ` ${t}` : ""}`;
   };
+  // une ligne « Box : 1️⃣ ✅ @Jean ✔️ 19h57 » et son bouton (pas pour un chatteur en day off)
+  let seq = 0;
+  const line = (label, x) => {
+    const p = byId[x.id] || { ...x.c, off: x.off };
+    const text = `${label} ${who(x)}`;
+    if (b.stOf(p) === "off") return { text };
+    const back = openCut(p.mark);
+    const id = `cb~${date}~${slot}~${x.id}~${(seq++).toString(36)}`;
+    return { text, button: back ? button(id, "Retour de coupure", "🔙", ButtonStyle.Success) : button(id, "Coupure", "⚡", ButtonStyle.Secondary) };
+  };
+  const withBox = new Set(groups.flatMap((g) => g.people.filter((x) => x.boxes.length).map((x) => x.id)));
   const { head, extra, done, due } = boardLines(b);
   const top = [
     `## 📦 Box · ${sh.emoji} ${name} · ${sh.label}`,
@@ -363,39 +389,54 @@ async function boxView(name, date) {
       for (const k of x.boxes) held.set(k, [...(held.get(k) || []), x]);
     }
     const n = Math.max(Number(b.day.nbox?.[`${slot}|${g.mid}`]) || 0, ...[...held.keys()].filter(planning.isNum).map(Number), 0);
-    const lines = [];
-    if (held.has("all")) lines.push(`### Box : ${planning.boxesE(["all"])} ${held.get("all").map(who).join(" · ")}`);
+    const head = `## ${planning.modelHead(g)}`;
+    const add = (it) => items.push({ ...it, cont: head });
+    const box = (k, label) => (held.get(k) || []).forEach((x) => add(line(`### Box : ${label}`, x)));
+    items.push({ sep: true }, { text: head, keep: true });
+    if (held.has("all")) box("all", planning.boxesE(["all"]));
     for (let k = 1; k <= n; k++) {
-      const hs = held.get(String(k)) || [];
-      lines.push(`### Box : ${planning.boxesE([String(k)])} ${hs.length ? hs.map(who).join(" · ") : "⬜ libre"}`);
+      if (held.get(String(k))?.length) box(String(k), planning.boxesE([String(k)]));
+      else add({ text: `### Box : ${planning.boxesE([String(k)])} ⬜ libre` });
     }
-    if (held.has("vip")) lines.push(`### Box : ${planning.VIP} ${held.get("vip").map(who).join(" · ")}`);
-    if (none.length) lines.push(`-# Sans box : ${none.map(who).join(", ")}`);
-    items.push({ sep: true }, { text: `## ${planning.modelHead(g)}`, keep: true }, { text: lines.join("\n") });
+    if (held.has("vip")) box("vip", planning.VIP);
+    // sans box : celui qui en a une ailleurs sur ce shift reste en petit (son bouton est sur sa ligne de box), les autres ont la leur
+    for (const x of none.filter((x) => !withBox.has(x.id))) add(line("### Sans box :", x));
+    const here = none.filter((x) => withBox.has(x.id));
+    if (here.length) add({ text: `-# Sans box ici : ${here.map(who).join(", ")}` });
   }
   if (extra.length) items.push({ sep: true }, { text: `➕ En plus (pas au planning) : ${extra.map((u) => `<@${u}>`).join(", ")}` });
-  const rows = [clockInRow(name, button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary))];
-  // un seul message : s'il déborde (très rare), la fin est coupée
-  const [view, ...more] = v2Messages(items, { color: sh.color, rows });
-  if (more.length) view.components.push(...rows);
-  return { view, count };
+  const rows = [clockInRow(name, button(`pm_open~${date}~${slot}`, "Modifier le shift", "✏️", ButtonStyle.Primary)), cutRow()];
+  // 40 éléments par message Discord : un grand shift (un bouton par chatteur) part sur deux messages, l'un sous l'autre
+  const list = mergeTexts(items);
+  // chaque modèle reste entière dans un message (son titre porte le poids de sa liste)
+  list.forEach((it, k) => {
+    if (!it.keep) return;
+    let c = 1;
+    for (let j = k + 1; j < list.length && !list[j].sep && !list[j].keep; j++) c += list[j].button ? 3 : 1;
+    it.grpCost = c;
+  });
+  const views = v2Messages(list, { color: sh.color, rows });
+  return { views, count };
 }
-async function postBoxBoard(name, t = Date.now()) {
+async function postBoxBoard(name, t = Date.now(), at = null) {
   if (!appSync.enabled()) return null;
-  const date = appSync.shiftDay(appSync.SLOT_OF[name], t + 15 * 60e3).date;
-  const { view, count } = await boxView(name, date);
+  const date = at || appSync.shiftDay(appSync.SLOT_OF[name], t + 15 * 60e3).date;
+  const { views, count } = await boxView(name, date);
   const ch = await client.channels.fetch(BOX_CHANNEL_ID);
-  const msg = await ch.send(view);
+  const msgs = [];
+  for (const v of views) msgs.push(await ch.send(v));
+  const ids = msgs.map((m) => m.id);
   const old = data.boxMsg;
   const key = `${date}|${name}`;
-  if (old?.id && old.id !== msg.id) await delAll(old.channelId, [old.id]);
+  if (old) await delAll(old.channelId, idsOf(old).filter((id) => !ids.includes(id)));
   // les annonces du shift d'avant partent avec lui (renvoyé pour le même shift : elles restent) ; l'ancien planning aussi
   const next = old?.key !== key;
   if (next) for (const x of data.boxNotes || []) await delAll(x.channelId, [x.id]);
   for (const p of Object.values(data.planningMsgs || {})) await delAll(p.channelId, p.ids || []);
-  Object.assign(data, { planningMsgs: {}, boxNotes: next ? [] : data.boxNotes || [], boxMsg: { channelId: ch.id, id: msg.id, key, hash: hashOf([view]) } });
+  const hold = !next && old?.hold ? { hold: old.hold } : {};
+  Object.assign(data, { planningMsgs: {}, boxNotes: next ? [] : data.boxNotes || [], boxMsg: { channelId: ch.id, id: ids[0], ids, key, hash: hashOf(views), hashes: views.map((v) => hashOf([v])), ...hold } });
   saveData();
-  return { url: msg.url, count };
+  return { url: msgs[0].url, count };
 }
 // Un seul envoi à la fois (l'heure du shift et la vérification de chaque minute peuvent tomber ensemble)
 let boxBusy = Promise.resolve();
@@ -444,13 +485,17 @@ async function fillAhead() {
 async function refreshBox(date) {
   const m = data.boxMsg;
   if (!m?.id || m.key.slice(0, 10) !== date || !SHIFTS[m.key.slice(11)]) return;
-  const { view } = await boxView(m.key.slice(11), date);
-  const hash = hashOf([view]);
+  const { views } = await boxView(m.key.slice(11), date);
+  const hash = hashOf(views);
   if (hash === m.hash) return;
+  const ids = idsOf(m);
   try {
+    // un message de plus ou de moins (chatteurs ajoutés ou retirés) : le tableau est renvoyé en bas du salon
+    if (views.length !== ids.length) return void (await postBoxBoard(m.key.slice(11), Date.now(), date));
     const ch = await client.channels.fetch(m.channelId);
-    await ch.messages.edit(m.id, view);
-    m.hash = hash;
+    const hs = views.map((v) => hashOf([v]));
+    for (const [k, v] of views.entries()) if (hs[k] !== m.hashes?.[k]) await ch.messages.edit(ids[k], v);
+    Object.assign(m, { hash, hashes: hs });
   } catch (e) {
     console.warn("Salon box à mettre à jour :", e.message);
     if (/unknown message/i.test(e.message)) data.boxMsg = null; // supprimé à la main : renvoyé dans la minute
@@ -1337,6 +1382,10 @@ async function handleInteraction(i) {
     if (cid.startsWith("do_")) return dayoff.handle(i);
     if (cid.startsWith("vc_")) return voice.handle(i);
     if (cid.startsWith("g_")) return gestion.handle(i);
+    // salon box : ⚡ / 🔙 à droite de chaque chatteur, ⚡ J'ai une coupure / 🔙 Retour de coupure sous le message
+    if (cid.startsWith("cb~")) return cutLine(i);
+    if (cid === "cb_me_cut") return selfCut(i);
+    if (cid === "cb_me_back") return selfBack(i);
     if (cid === "ga_models" || cid === "ga_admins") {
       if (!isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
       return cid === "ga_models" ? saveModels(i) : saveAdmins(i);
@@ -1687,6 +1736,90 @@ async function noteCoupure(m, { min, raison, shift: forced } = {}) {
   refreshSoon(date);
   return { date, shift, ok, text: [`⚡ Coupure pour <@${m.id}> · ${SHIFTS[shift].emoji} ${shift} du ${planning.dayLabel(date)}${min ? ` · ${min} min` : ""}`, point, sent].join("\n") };
 }
+// Coupure d'un chatteur de l'app sur un shift donné (bouton à droite de sa ligne, ⚡ J'ai une coupure) : pointage de
+// l'app + une ligne dans le salon box. Avant le début du shift, elle compte à partir du début (⚡ dès 20:00).
+// by : qui a cliqué (le chatteur n'est mentionné que si c'est un admin qui l'a mis en coupure)
+async function cutChatter({ cid, slot, date, t = Date.now(), by }) {
+  const r = await appSync.markCoupure({ cid, slot, date, t });
+  if (r.skipped) return r;
+  const shift = SHIFT_OF_SLOT[slot];
+  const tag = r.discordId ? `<@${r.discordId}>` : `**${r.name}**`;
+  const when = r.pre ? `dès le début du shift (${fmtTime(r.cutAt)}), déclarée à ${fmtTime(t)}` : fmtTime(r.cutAt);
+  const line = [`⚡ ${tag} **Coupure** ${when}`, `${SHIFTS[shift].emoji} ${shift}`].join(" · ");
+  await boxNote({ content: line, allowedMentions: { users: r.discordId && r.discordId !== by ? [r.discordId] : [] } }).catch((e) => console.error("Coupure (salon box) :", e.message));
+  refreshSoon(date);
+  return r;
+}
+// Bouton à droite d'une ligne du salon box : ⚡ Coupure tout de suite, ou 🔙 Retour de coupure si elle est en cours
+async function cutLine(i) {
+  const [, date, slot, cid] = i.customId.split("~");
+  if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+  if (!SHIFT_OF_SLOT[slot] || !/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return reply(i, { content: "Ce bouton a expiré." });
+  const c = (await appSync.appChatters()).find((x) => x.id === cid);
+  if (!c) return reply(i, { content: "❌ Ce chatteur n'est plus dans l'app." });
+  if (!isAdmin(i) && c.discordId !== i.user.id)
+    return reply(i, { content: "⛔ Seul un admin peut mettre un autre chatteur en coupure. Pour toi : ⚡ **J'ai une coupure**, sous le message." });
+  await i.deferUpdate();
+  const m = (await appSync.readMarks(date))[`${slot}_${cid}`];
+  let warn = "";
+  try {
+    if (openCut(m)) {
+      const r = await retourText({ cid });
+      if (r.startsWith("⚠️")) warn = r;
+    } else {
+      const r = await cutChatter({ cid, slot, date, by: i.user.id });
+      if (r.skipped) warn = "⚠️ Pas noté : lien avec l'app désactivé.";
+    }
+  } catch (e) {
+    console.error("Coupure (bouton du salon box) :", e.message);
+    warn = `⚠️ Pas noté : ${String(e.message || e).slice(0, 200)}`;
+  }
+  // le bouton change tout de suite (⚡ Coupure <-> 🔙 Retour de coupure)
+  await refreshDate(date).catch((e) => console.error("Salon box :", e.message));
+  if (warn) await i.followUp({ content: warn, flags: EPHEMERAL, allowedMentions: { parse: [] } }).catch(() => {});
+}
+// ⚡ J'ai une coupure (le chatteur lui-même) : sur le shift où il est clock in, sinon celui où il est prévu (jusqu'à
+// 3 h avant son début : il est déjà affiché ⚡ quand le shift commence)
+const SELF_CUT_BEFORE_MIN = 180;
+async function selfCut(i) {
+  const uid = i.user.id;
+  await i.deferReply({ flags: EPHEMERAL });
+  if (!appSync.enabled()) return done(i, "⚠️ Lien avec l'app désactivé : préviens un admin.");
+  const names = namesOf(i), t = Date.now();
+  const c = await appSync.chatterOf(uid, names, false).catch(() => null);
+  if (!c) return done(i, "❌ Ton compte Discord n'est relié à aucun chatteur de l'app : préviens un admin.");
+  const s = data.sessions[uid];
+  let slot, date;
+  if (s) {
+    const shift = liveShift(s, t);
+    slot = appSync.SLOT_OF[shift];
+    date = appSync.shiftDay(slot, s.shift === shift ? s.clockIn : t).date;
+  } else {
+    const p = await appSync.plannedSlotAt(uid, names, t, SELF_CUT_BEFORE_MIN);
+    if (!p) return done(i, "Tu n'as pas de shift en cours ni dans les 3 prochaines heures : rien n'est noté.", 30000);
+    ({ slot, date } = p);
+  }
+  const shift = SHIFT_OF_SLOT[slot];
+  const m = (await appSync.readMarks(date))[`${slot}_${c.id}`];
+  if (openCut(m))
+    return done(i, `⚡ Tu es déjà en coupure ${m.cutAt > t ? `dès le début de ton shift (${fmtTime(m.cutAt)})` : `depuis ${fmtTime(m.cutAt)}`}. Quand tu reprends : 🔙 **Retour de coupure**, sous le message.`, 30000);
+  const r = await cutChatter({ cid: c.id, slot, date, t, by: uid });
+  if (r.skipped) return done(i, "⚠️ Pas noté : préviens un admin.");
+  return done(
+    i,
+    `⚡ Coupure notée sur ton shift ${SHIFTS[shift].emoji} ${shift}${r.pre ? `, à partir de son début (${fmtTime(r.cutAt)})` : ` à ${fmtTime(r.cutAt)}`}.\nQuand tu reprends : 🔙 **Retour de coupure**, sous le message${s ? "" : " (ça fait aussi ton clock in)"}.`,
+    30000
+  );
+}
+// 🔙 Retour de coupure (le chatteur lui-même). Pas clock in et son shift a commencé : son retour est son clock in.
+async function selfBack(i) {
+  const uid = i.user.id;
+  if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : préviens un admin." });
+  const open = (await appSync.openCoupures().catch(() => [])).find((c) => c.discordId === uid);
+  if (!open) return reply(i, { content: "Tu n'as pas de coupure en cours. Pour en noter une : ⚡ **J'ai une coupure**." });
+  if (!data.sessions[uid] && open.since <= Date.now()) return startClockIn(i);
+  return retourCoupure(i, { uid, names: namesOf(i) });
+}
 // Retour de coupure : temps réel compté au pointage (comme un retard) et une ligne dans le salon box
 // target : { uid, names } (compte Discord) ou { cid } (chatteur de l'app)
 // giveBack : il reprend les box qu'il avait avant d'être remplacé (retirées à celui qui les a)
@@ -1710,6 +1843,13 @@ async function retourText({ uid, cid, names = [] }, { giveBack = true } = {}) {
   if (r.skipped === "unlinked") return `⚠️ <@${uid}> n'est relié à aucun chatteur de l'app (Équipe › Comptes Discord).`;
   if (r.notCut) return `⚠️ ${tag} n'a pas de coupure en cours (lance d'abord une coupure).`;
   const shift = SHIFT_OF_SLOT[r.slot];
+  if (r.cancelled) {
+    // il reprend avant le début de son shift : la coupure n'a pas commencé, rien n'est compté
+    const sh = shift ? ` · ${SHIFTS[shift].emoji} ${shift} de ${fmtTime(r.since)}` : "";
+    await boxNote({ content: `🔙 ${tag} **n'a plus de coupure**${sh}`, allowedMentions: { parse: [] } }).catch((e) => console.error("Coupure retirée (salon box) :", e.message));
+    refreshSoon(r.date);
+    return `🔙 ${tag} n'a plus de coupure : son shift n'avait pas commencé (début à ${fmtTime(r.since)}), rien n'est compté.`;
+  }
   const back = giveBack ? await planEdit.giveBack(r.date, r.slot, r.chatterId).catch((e) => (console.error("Box rendues :", e.message), "")) : "";
   const line = [
     `🔙 ${tag} **Retour de coupure** ${fmtTime(t)}`,
@@ -1795,9 +1935,14 @@ async function startClockIn(i) {
     const s = (data.sessions[uid] = { shift, clockIn: t, modeles });
     saveData();
 
-    const { late, isLate } = appSync.lateness(appSync.SLOT_OF[shift], t);
-    await boxNote({ content: clockLine("in", uid, s, t, isLate ? late : 0), allowedMentions: { parse: [] } }).catch((e) => console.error("Clock in (salon box) :", e.message));
-    const note = await syncClockIn(i, shift, t);
+    const { late, isLate: isLate0 } = appSync.lateness(appSync.SLOT_OF[shift], t);
+    const { note, r } = await syncClockIn(i, shift, t);
+    // il était en coupure : son clock in est son retour (pas de retard : la coupure couvrait l'heure)
+    const cb = r?.cutBack;
+    const isLate = isLate0 && !cb;
+    const back = cb ? await planEdit.giveBack(r.date, r.slot, r.chatterId).catch((e) => (console.error("Box rendues :", e.message), "")) : "";
+    const cbTxt = cb ? `🔙 retour de coupure (${cb.took} min${cb.total > cb.took ? `, ${cb.total} min sur le shift` : ""})` : "";
+    await boxNote({ content: [clockLine("in", uid, s, t, isLate ? late : 0), cbTxt, back].filter(Boolean).join(" · "), allowedMentions: { parse: [] } }).catch((e) => console.error("Clock in (salon box) :", e.message));
     refreshSoon(data.sessions[uid]?.app?.date || appSync.shiftDay(appSync.SLOT_OF[shift], t).date);
     const models = appSync.enabled() && Object.keys(boxes).length ? (await appSync.appCatalog()).models : {};
     const tag = planning.boxTag(boxes, (mid) => models[mid]?.name || mid);
@@ -1807,6 +1952,7 @@ async function startClockIn(i) {
         `✅ Clock in à **${fmtTime(t)}** · ${shiftTxt(shift)}`,
         modeles.length ? `${modelesTxt(modeles)}${tag ? ` · ${tag}` : ""}` : "",
         isLate ? `⏰ ${late} min de retard.` : "",
+        cb ? `🔙 Retour de coupure noté : ${cb.took} min de coupure.${back ? ` Il ${back}.` : ""}` : r?.cutCancel ? "⚡ Ta coupure est retirée : ton shift n'avait pas commencé." : "",
         note,
       ].filter(Boolean).join("\n"),
       60000
@@ -1817,23 +1963,25 @@ async function startClockIn(i) {
 }
 
 // Pointage de l'app : présent ou retard (si le compte Discord est relié à un chatteur)
+// Renvoie { note, r } : r = le pointage écrit (cutBack : il revenait de sa coupure)
 async function syncClockIn(i, shift, t) {
   const uid = i.user.id;
-  if (!appSync.enabled()) return "";
+  if (!appSync.enabled()) return { note: "" };
   try {
     const r = await appSync.onClockIn({ uid, names: namesOf(i), shift, t });
     if (r.skipped === "unlinked") {
       console.warn(`Pointage app : ${nameOf(uid)} (${uid}) n'est relié à aucun chatteur`);
-      return "⚠️ Ton compte Discord n'est relié à aucun chatteur de l'app : ton pointage n'y apparaît pas. Préviens un admin.";
+      return { note: "⚠️ Ton compte Discord n'est relié à aucun chatteur de l'app : ton pointage n'y apparaît pas. Préviens un admin." };
     }
     if (r.chatterId && data.sessions[uid]) {
       data.sessions[uid].app = { date: r.date, key: r.key, cid: r.chatterId };
       saveData();
     }
+    return { note: "", r };
   } catch (e) {
     console.error("Pointage app (clock in) :", e.message);
   }
-  return "";
+  return { note: "" };
 }
 
 // ================== CLOCK OUT ==================

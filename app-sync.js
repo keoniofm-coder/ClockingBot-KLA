@@ -322,7 +322,8 @@ async function retireChatter(cid, from, { dry = false } = {}) {
 // Chatteurs en coupure en ce moment (pas encore revenus)
 async function openCoupures(t = Date.now()) {
   const today = parisParts(t).date;
-  const [chatters, ...days] = await Promise.all([appChatters(), readMarks(addDays(today, -1)), readMarks(today)]);
+  // demain aussi : une coupure déclarée avant un shift qui commence après minuit
+  const [chatters, ...days] = await Promise.all([appChatters(), readMarks(addDays(today, -1)), readMarks(today), readMarks(addDays(today, 1))]);
   const byId = Object.fromEntries(chatters.map((c) => [c.id, c]));
   const open = days
     .flatMap((m, k) => Object.values(m).map((x) => ({ ...x, date: addDays(today, k - 1) })))
@@ -360,7 +361,7 @@ async function writePlan(date, patch, nbox, { loud = false } = {}) {
 const hooks = {};
 // Shift prévu au planning pour ce chatteur à l'instant t : de 1 h 30 avant le début jusqu'à la fin du shift
 // (6 h). Si deux shifts conviennent (double shift), celui qui commence le plus près de t.
-async function plannedSlotAt(uid, names, t) {
+async function plannedSlotAt(uid, names, t, before = 90) {
   const c = await chatterOf(uid, names, false);
   if (!c) return null;
   const today = parisParts(t).date;
@@ -370,7 +371,7 @@ async function plannedSlotAt(uid, names, t) {
   dates.forEach((date, k) => {
     for (const s of plans[k].filter((p) => p.chatterId === c.id && START_OF[p.slot] != null)) {
       const start = parisMs(date, START_OF[s.slot]);
-      if (t >= start - 90 * 60e3 && t < start + 6 * 3600e3) hits.push({ slot: s.slot, date, gap: Math.abs(t - start) });
+      if (t >= start - before * 60e3 && t < start + 6 * 3600e3) hits.push({ slot: s.slot, date, gap: Math.abs(t - start), start });
     }
   });
   return hits.sort((a, b) => a.gap - b.gap)[0] || null;
@@ -658,11 +659,24 @@ async function onClockIn({ uid, names, shift, t }) {
   const { date, late } = lateness(slot, t);
   const key = markKey(slot, c.id);
   const prev = (await readMarks(date))[key];
+  const base = { chatterId: c.id, name: c.name, discordId: c.discordId, date, slot, key, late };
+  // en coupure (déclarée avant le shift, ou partie après un clock out) : son clock in est son retour de coupure.
+  // Avant le début du shift : la coupure n'a pas commencé, elle est retirée et il est présent.
+  if (prev?.status === "coupure" && prev.cutAt && !prev.cutEnd) {
+    if (t < prev.cutAt) {
+      await writeMark(date, key, { ...presentMark(c.id, slot, t, late, prev), cutAt: null, cutEnd: null, cutDone: null, pre: null });
+      return { ...base, written: true, cutCancel: true };
+    }
+    const took = Math.max(1, Math.round((t - prev.cutAt) / 60000));
+    const total = (Number(prev.cutDone) || 0) + took;
+    await writeMark(date, key, { min: total, cutDone: total, cutEnd: t, at: t });
+    return { ...base, written: false, cutBack: { took, total, since: prev.cutAt, fromStart: prev.cutAt <= parisMs(date, START_OF[slot]) } };
+  }
   // un pointage déjà fait à la main dans l'app n'est jamais écrasé (un absent posé par le bot, si),
   // ni une coupure notée avec /coupure (le chatteur qui revient après une coupure reste en coupure)
-  if (prev?.status && (prev.src !== "discord" || prev.status === "coupure")) return { chatterId: c.id, name: c.name, date, slot, key, late, written: false };
+  if (prev?.status && (prev.src !== "discord" || prev.status === "coupure")) return { ...base, written: false };
   await writeMark(date, key, presentMark(c.id, slot, t, late, prev));
-  return { chatterId: c.id, name: c.name, date, slot, key, late, written: true };
+  return { ...base, written: true };
 }
 
 async function onClockOut({ app, t }) {
@@ -715,11 +729,14 @@ async function markCoupure({ uid, cid, names, slot, date, min, note, t = Date.no
   const prev = (await readMarks(date))[key];
   // cutAt : début de la coupure en cours ; le temps réel est calculé au retour (endCoupure).
   // Déjà en coupure (ex. noté puis remplacé) : on garde l'heure de départ.
+  // Déclarée avant le début du shift (« j'ai une coupure » 1 h avant) : elle compte à partir du début du shift.
   const going = prev?.status === "coupure" && prev.cutAt && !prev.cutEnd;
-  const patch = { chatterId: c.id, slot, status: "coupure", min: min || (going ? prev.min : prev?.cutDone) || "", at: t, src: "discord", auto: null, cutAt: going ? prev.cutAt : t, cutEnd: null };
+  const start = START_OF[slot] == null ? 0 : parisMs(date, START_OF[slot]);
+  const cutAt = going ? prev.cutAt : Math.max(t, start);
+  const patch = { chatterId: c.id, slot, status: "coupure", min: min || (going ? prev.min : prev?.cutDone) || "", at: t, src: "discord", auto: null, cutAt, cutEnd: null, pre: going ? prev.pre ?? null : t < start ? t : null };
   if (note) patch.note = note;
   await writeMark(date, key, patch);
-  return { chatterId: c.id, name: c.name, date, slot, key };
+  return { chatterId: c.id, name: c.name, discordId: c.discordId, date, slot, key, cutAt, pre: t < cutAt, going: !!going };
 }
 // Retour de coupure : temps de coupure réel (ajouté aux coupures précédentes du même shift), comme un retard
 async function endCoupure({ uid, cid, names, t = Date.now() }) {
@@ -728,11 +745,17 @@ async function endCoupure({ uid, cid, names, t = Date.now() }) {
   if (!c) return { skipped: "unlinked" };
   const today = parisParts(t).date;
   const found = [];
-  for (const date of [addDays(today, -1), today])
+  for (const date of [addDays(today, -1), today, addDays(today, 1)])
     for (const [key, m] of Object.entries(await readMarks(date)))
-      if (m?.chatterId === c.id && m.status === "coupure" && m.cutAt && !m.cutEnd && m.cutAt <= t && !(t >= shiftEnd(date, m.slot))) found.push({ date, key, m });
-  const cur = found.sort((a, b) => b.m.cutAt - a.m.cutAt)[0];
+      if (m?.chatterId === c.id && m.status === "coupure" && m.cutAt && !m.cutEnd && !(t >= shiftEnd(date, m.slot))) found.push({ date, key, m });
+  // celle en cours d'abord, sinon une déclarée pour un shift qui n'a pas commencé
+  const cur = found.filter((x) => x.m.cutAt <= t).sort((a, b) => b.m.cutAt - a.m.cutAt)[0] || found.sort((a, b) => a.m.cutAt - b.m.cutAt)[0];
   if (!cur) return { chatterId: c.id, name: c.name, discordId: c.discordId, notCut: true };
+  // il peut reprendre avant le début du shift : la coupure n'a pas commencé, elle est retirée
+  if (cur.m.cutAt > t) {
+    await writeMark(cur.date, cur.key, { status: null, min: "", cutAt: null, cutEnd: null, cutDone: null, pre: null, at: t });
+    return { chatterId: c.id, name: c.name, discordId: c.discordId, date: cur.date, slot: cur.m.slot, key: cur.key, cancelled: true, since: cur.m.cutAt };
+  }
   const took = Math.max(1, Math.round((t - cur.m.cutAt) / 60000));
   const total = (Number(cur.m.cutDone) || 0) + took;
   await writeMark(cur.date, cur.key, { min: total, cutDone: total, cutEnd: t, at: t });
