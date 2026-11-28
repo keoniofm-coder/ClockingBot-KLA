@@ -3,7 +3,7 @@
 // (VOICE_LOG_CHANNEL_ID pour un autre salon), sans notifier personne, avec ses box à droite de son nom.
 // S'il part pendant son shift (clock in, ou au planning d'un shift commencé), les admins ont deux boutons :
 // ⚡ Coupure (notée tout de suite, puis quoi faire de ses box : quelqu'un le remplace, redonnées, retirées) et
-// 🔁 Remplacer (la fenêtre : qui le remplace, ou ses box retirées). À son retour, s'il est en coupure : 🔙 Retour de coupure.
+// 🔁 Remplacer (la fenêtre : qui le remplace, ou ses box retirées). À son retour, s'il est en coupure : 🔄 Retour de coupure.
 // Une micro-coupure (retour en moins de 30 s) n'affiche rien.
 const { ButtonStyle } = require("discord.js");
 const { reply, row, button } = require("./ui");
@@ -80,7 +80,7 @@ async function onVoice(oldS, newS) {
       content: back
         ? `🟢 ${w} est revenu sur **${chName(to)}** · ${time} · parti ${Math.max(1, Math.round((t - left) / 60000))} min`
         : `🟢 ${w} a rejoint **${chName(to)}** · ${time}`,
-      ...(cut ? { components: [row(button(`vc_back_${uid}`, "Retour de coupure", "🔙", ButtonStyle.Success))] } : {}),
+      ...(cut ? { components: [row(button(`vc_back_${uid}`, "Retour de coupure", "🔄", ButtonStyle.Success))] } : {}),
     });
   }
   // départ : posté après GRACE secondes s'il n'est pas revenu

@@ -1,7 +1,7 @@
 // ================== LES BOUTONS DES ADMINS (🛠️ Admin en haut du message du salon box) ==================
 // Dans le salon box, les chatteurs n'utilisent que Clock In / Clock Out. 🛠️ Admin, en haut du message du salon box, ouvre
 // pour l'admin seul (Discord ne cache pas un bouton d'un message public) la barre de recherche et un bouton par sujet. Presque tout s'ouvre en petite fiche (une fenêtre Discord) : 🔎 la fiche d'un chatteur (barre de recherche du haut),
-// ➕ Ajouter un chatteur, ✏️ Modifier le shift, 💪🏼 Renfort, ⚡ Coupure, 🔙 Retour de coupure, ⚠️ Pénalités, 💃 Modèles,
+// ➕ Ajouter un chatteur, ✏️ Modifier le shift, 💪🏼 Renfort, ⚡ Coupure, 🔄 Retour de coupure, ⚠️ Pénalités, 💃 Modèles,
 // 🛡️ Admins, 🔔 Renvoyer le panneau, 🚫 Virer. 📋 Pointer reste un menu visible seulement par
 // l'admin qui a cliqué (un seul à la fois, voir menus.js). Les commandes restent en secours.
 // L'ancien panneau du salon gestion n'est plus envoyé (sauf si GESTION_CHANNEL_ID est réglé dans Railway).
@@ -57,7 +57,7 @@ function panelView(live) {
       row(
         button("g_att", "Pointer", "📋", ButtonStyle.Primary),
         button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
-        button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
+        button("g_back", "Retour de coupure", "🔄", ButtonStyle.Secondary),
         button("g_off", "Day off", "🏖️", ButtonStyle.Secondary),
         button("g_shift", "Message de shift", "🔔", ButtonStyle.Secondary)
       ),
@@ -84,7 +84,7 @@ function panelRows(date, slot, { unlinked = 0 } = {}) {
       button(c("g_att"), "Pointer", "📋", ButtonStyle.Primary),
       button(c("g_ren"), "Renfort", "💪🏼", ButtonStyle.Secondary),
       button("g_cut", "Coupure", "⚡", ButtonStyle.Secondary),
-      button("g_back", "Retour de coupure", "🔙", ButtonStyle.Secondary),
+      button("g_back", "Retour de coupure", "🔄", ButtonStyle.Secondary),
       button("g_shift", "Renvoyer le panneau", "🔔", ButtonStyle.Secondary)
     ),
     row(
@@ -203,7 +203,7 @@ const VIEWS = {
       content: [
         st.note,
         "⚡ **Noter une coupure**",
-        "Le chatteur est notifié dans le salon box et passe en « Coupure » au pointage. À son retour : 🔙 **Retour de coupure**.",
+        "Le chatteur est notifié dans le salon box et passe en « Coupure » au pointage. À son retour : 🔄 **Retour de coupure**.",
         st.user ? `Chatteur : <@${st.user.id}>${st.min ? ` · ${st.min} min` : ""}` : "",
       ].filter(Boolean).join("\n"),
       components: [
@@ -232,7 +232,7 @@ const VIEWS = {
     return {
       content: [
         st.note,
-        "🔙 **Retour de coupure**",
+        "🔄 **Retour de coupure**",
         list.length ? "Choisis qui revient : le temps de coupure est compté au pointage, comme un retard." : "_Personne n'est en coupure en ce moment._",
         held ? `📦 Pendant sa coupure, ses ${held}${st.give === false ? " · il ne les reprend pas" : " · il les reprend à son retour"}` : "",
       ].filter(Boolean).join("\n"),
@@ -245,7 +245,7 @@ const VIEWS = {
             )
           : []),
         row(
-          button("g_bok", "Retour", "🔙", ButtonStyle.Success, !st.cid),
+          button("g_bok", "Retour", "🔄", ButtonStyle.Success, !st.cid),
           ...(held ? [button("g_bgv", st.give === false ? "Reprend ses box : non" : "Reprend ses box : oui", "📦", st.give === false ? ButtonStyle.Secondary : ButtonStyle.Primary)] : []),
           cancelBtn()
         ),
@@ -336,10 +336,10 @@ const FICHES = {
       label("Détail (optionnel)", "Le chatteur le verra").setTextInputComponent(textIn("note", { placeholder: "ex : orage, box internet en panne" }))
     );
   },
-  // 🔙 Retour de coupure : seulement ceux en coupure en ce moment
+  // 🔄 Retour de coupure : seulement ceux en coupure en ce moment
   back(list) {
     const sl = (k) => planning.SLOTS.find((s) => s.k === k);
-    return new ModalBuilder().setCustomId("g_backm").setTitle("🔙 Retour de coupure").addLabelComponents(
+    return new ModalBuilder().setCustomId("g_backm").setTitle("🔄 Retour de coupure").addLabelComponents(
       label("Qui revient ?", "Le temps de coupure est compté au pointage, comme un retard").setStringSelectMenuComponent(
         pick("who", list.slice(0, 25).map((c) => ({ label: c.name, value: c.id, emoji: "⚡", description: `En coupure depuis ${fmt(c.since)}${sl(c.slot) ? ` · ${sl(c.slot).l}` : ""}`, default: list.length === 1 })), { max: 25 })
       ),
@@ -463,7 +463,7 @@ async function handle(i) {
     case "g_back": {
       const list = await quick(appSync.openCoupures());
       if (!list) return reply(i, { content: "⏳ L'app répond lentement : réessaie dans un instant." });
-      if (!list.length) return reply(i, { content: "🔙 Personne n'est en coupure en ce moment." });
+      if (!list.length) return reply(i, { content: "🔄 Personne n'est en coupure en ce moment." });
       return i.showModal(FICHES.back(list));
     }
     // l'ancien « Envoyer le planning » (anciens messages) : le salon box le remplace, son message est renvoyé
