@@ -955,6 +955,8 @@ client.once(Events.ClientReady, async () => {
   cron.schedule("0 10 * * *", primeRecap, { timezone: TZ });
   setTimeout(primeRecap, 25000);
   setTimeout(() => primes.ensurePanel().catch((e) => console.error("Primes (barème) :", e.message)), 12000);
+  // salon ventes Twizz / réatrib : le message avec le bouton 💰 Vente Twizz (envoyé une fois, remis s'il a disparu)
+  setTimeout(() => ventes.ensureTwPanel().catch((e) => console.error("Vente Twizz (bouton) :", e.message)), 14000);
   const primesLive = () => primesAuto.refreshLive().catch((e) => console.error("Primes en cours :", e.message));
   cron.schedule("*/30 * * * *", primesLive, { timezone: TZ });
   setTimeout(primesLive, 40000);
