@@ -168,6 +168,47 @@ function linkOf(map, all, raw) {
   return same.length === 1 ? same[0] : "";
 }
 
+// ---------- Fans : ce que chaque fan a dépensé dans la journée (app : Tableau de bord › Par fans) ----------
+// wyfans/<jour>.f["<compte>|<id Telegram du fan>"] = [brut €, achats, dernier achat (ms), modèle, { chatteur: brut € }, nom, @username]
+// Mêmes ventes que Ventes : payées, ni remboursées ni en litige, au prix du média. Chatteur "" : pas relié dans l'app.
+const FANS_V = 1; // à changer pour tout réécrire depuis le début
+function fansOf(pays, ctx, raMap = {}) {
+  const f = {};
+  for (const p of pays) {
+    const amt = counted(p);
+    if (!amt || !p.b) continue;
+    const mid = linkOf(ctx.links.m, ctx.models, p.an);
+    if (mid === "-") continue;
+    const ra = p.ra && raMap[p.ra] && raMap[p.ra].status === "applied" ? p.to : "";
+    let cid = ra && ctx.chatters[ra] ? ra : linkOf(ctx.links.c, ctx.chatters, p.un || "(sans membre)");
+    if (cid === "-") cid = "";
+    const x = (f[`${p.acc}|${p.b}`] ||= [0, 0, 0, "", {}, "", ""]);
+    x[0] = r2(x[0] + amt);
+    x[1]++;
+    x[2] = Math.max(x[2], p.at || 0);
+    x[3] ||= mid || "";
+    x[4][cid] = r2((x[4][cid] || 0) + amt);
+    x[5] = fanName(p) || x[5];
+    x[6] = p.bu || x[6];
+  }
+  return f;
+}
+// écrit seulement ce qui a changé (dernier contenu gardé en mémoire, sinon relu)
+const fansSeen = new Map();
+async function writeFans(d, f) {
+  const js = JSON.stringify(stable(f));
+  if (fansSeen.get(d) === js) return false;
+  if (!fansSeen.has(d)) {
+    const o = await appSync.getDoc("wyfans", d);
+    if ((o && JSON.stringify(stable(o.f || {})) === js) || (!o && js === "{}")) return fansSeen.set(d, js), false;
+  }
+  await appSync.putDoc("wyfans", d, { date: d, f });
+  fansSeen.set(d, js);
+  if (fansSeen.size > 90) fansSeen.delete(fansSeen.keys().next().value);
+  return true;
+}
+const fansDay = async (d, ctx, raMap) => writeFans(d, fansOf(Object.values((await appSync.getDoc("wysper", d))?.p || {}), ctx, raMap));
+
 // ---------- Recalcul des lignes Ventes d'un jour ----------
 // Lignes de la plateforme écrites par l'import Whysper ou par le bot : remplacées ; les parts tapées ou
 // corrigées à la main (manuel, adj) restent. Les lignes tapées à la main (sans src) ne sont pas touchées.
@@ -254,6 +295,7 @@ async function recomputeDay(d, ctx, unknown, raMap) {
     if (!e || !same([e.slot, e.sales, e.tips, e.parts, e.src, e.n], [ne.slot, ne.sales, ne.tips, ne.parts, ne.src, ne.n])) patch[key] = ne;
   }
   if (Object.keys(patch).length) await appSync.mergeDoc("days", d, { entries: patch }, { date: d, entries: {} });
+  await writeFans(d, fansOf(pays, ctx, raMap)).catch((e) => console.warn("Wysper fans :", e.message));
   return Object.keys(patch).length;
 }
 
@@ -449,8 +491,20 @@ async function run({ now = Date.now(), force = false, incoming = null, ag = "" }
         const byDay = Object.fromEntries(Object.entries(u.byDay || {}).filter(([d]) => !touched.has(d) && d >= lo));
         if (Object.keys(byDay).length) unknown[kind][n] = { raw: u.raw, byDay };
       }
+    // noms des fans (contacts Wysper, relus toutes les 5 min au plus), pour wyfans
+    await loadContacts(Object.keys(accts), accAg).catch((e) => console.warn("Wysper contacts :", e.message));
     let lines = 0;
     for (const d of [...touched].sort()) if (d >= from && d <= addDays(today, 1)) lines += await recomputeDay(d, ctx, unknown, raMap);
+    // une fois : les fans de tous les jours depuis le début (sans toucher aux lignes de Ventes)
+    let fansV = st.fansV;
+    if (fansV !== FANS_V) {
+      try {
+        for (let d = from; d <= today; d = addDays(d, 1)) if (!touched.has(d)) await fansDay(d, ctx, raMap);
+        fansV = FANS_V;
+      } catch (e) {
+        console.warn("Wysper fans (reprise) :", e.message);
+      }
+    }
     for (const kind of ["c", "m"])
       for (const u of Object.values(unknown[kind])) {
         const v = Object.values(u.byDay);
@@ -466,7 +520,7 @@ async function run({ now = Date.now(), force = false, incoming = null, ag = "" }
       from, since: ags["1"]?.since ?? st.since ?? null, sig, lastErr: null,
       ...(incoming ? { lastEvent: now } : { lastOk: now, lastN: list.length, agErr: agErr || null, agErrAt: agErr ? now : null }),
       live: AGENCIES.some((a) => a.secret), key: KEYS.length > 0, fullAt: full ? now : st.fullAt, unknown, raIds,
-      accts, acctsAt: ags["1"]?.acctsAt ?? st.acctsAt ?? 0, accAg, ags, models: [...ctx.covered].sort(),
+      accts, acctsAt: ags["1"]?.acctsAt ?? st.acctsAt ?? 0, accAg, ags, models: [...ctx.covered].sort(), fansV: fansV ?? null,
     });
     return { payments: list.length, days: touched.size, lines, reattribs: nRa };
   } catch (e) {
@@ -724,4 +778,4 @@ function start({ client } = {}) {
 
 // clés des agences, pour les stats (wystats.js)
 const keys = () => KEYS.map((a) => ({ id: a.id, key: a.key }));
-module.exports = { start, tick, check, verify, verifyAny, handleEvent, webhookServer, recomputeDay, slim, counted, norm, linkOf, enabled, api, keys, _contacts: contacts };
+module.exports = { start, tick, check, verify, verifyAny, handleEvent, webhookServer, recomputeDay, slim, counted, norm, linkOf, enabled, api, keys, fansOf, _contacts: contacts, _fansSeen: fansSeen };
