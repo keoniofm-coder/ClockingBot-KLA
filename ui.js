@@ -68,7 +68,8 @@ const plS = (n) => (n > 1 ? "s" : "");
 // conteneur, d'une section ou d'une rangée comptent), 4000 caractères de texte. Au-delà, la suite part dans un
 // message de plus ; les rangées de boutons vont sous le dernier.
 // items : { text } | { sep: true } | { text, button } ; keep : reste avec ce qui suit (un titre ne finit pas un message) ;
-// cont : titre répété en haut du message suivant quand la liste y continue
+// cont : titre répété en haut du message suivant quand la liste y continue ; grpCost (sur un titre) : sa liste entière,
+// qui part au message suivant plutôt que d'être coupée en deux quand elle tient dans un message
 const V2_MAX = 40, V2_TEXT = 3900;
 function v2Messages(items, { color = null, rows = [] } = {}) {
   const rowCost = rows.reduce((n, r) => n + 1 + r.components.length, 0);
@@ -78,7 +79,7 @@ function v2Messages(items, { color = null, rows = [] } = {}) {
   let page = null, n = 0, chars = 0;
   for (const it of items) {
     const len = (it.text || "").length;
-    if (!page || (page.length && (n + cost(it) > cap || chars + len > V2_TEXT))) {
+    if (!page || (page.length && (n + cost(it) > cap || chars + len > V2_TEXT || (it.grpCost && n + it.grpCost > cap && it.grpCost + 1 <= cap)))) {
       // un titre resté en bas du message part avec sa liste
       const carry = [];
       while (page && page.length > 1 && (page.at(-1).keep || page.at(-1).sep)) carry.unshift(page.pop());
