@@ -330,7 +330,7 @@ async function openCoupures(t = Date.now()) {
     .filter((m) => m?.status === "coupure" && m.cutAt && !m.cutEnd && byId[m.chatterId] && !(t >= shiftEnd(m.date, m.slot)))
     .map((m) => ({ ...byId[m.chatterId], since: m.cutAt, slot: m.slot, date: m.date }))
     .sort((a, b) => a.since - b.since);
-  // une seule ligne par chatteur : sa coupure la plus récente, celle que 🔙 termine (une d'hier jamais terminée
+  // une seule ligne par chatteur : sa coupure la plus récente, celle que 🔄 termine (une d'hier jamais terminée
   // le mettait deux fois dans la liste, et Discord refusait d'ouvrir la fenêtre)
   return [...new Map(open.map((c) => [c.id, c])).values()].sort((a, b) => a.since - b.since);
 }
@@ -735,8 +735,33 @@ async function markCoupure({ uid, cid, names, slot, date, min, note, t = Date.no
   const cutAt = going ? prev.cutAt : Math.max(t, start);
   const patch = { chatterId: c.id, slot, status: "coupure", min: min || (going ? prev.min : prev?.cutDone) || "", at: t, src: "discord", auto: null, cutAt, cutEnd: null, pre: going ? prev.pre ?? null : t < start ? t : null };
   if (note) patch.note = note;
+  // il était sur backup (batterie, générateur) : le backup s'arrête avec la coupure
+  const bk = prev?.bkAt && !prev.bkEnd ? Math.max(1, Math.round((t - prev.bkAt) / 60000)) : 0;
+  if (bk) patch.bkEnd = t;
   await writeMark(date, key, patch);
-  return { chatterId: c.id, name: c.name, discordId: c.discordId, date, slot, key, cutAt, pre: t < cutAt, going: !!going };
+  return { chatterId: c.id, name: c.name, discordId: c.discordId, date, slot, key, cutAt, pre: t < cutAt, going: !!going, bkDone: bk };
+}
+// Backup : coupure de courant, mais il continue sur batterie ou générateur (pas une coupure : son pointage ne change pas).
+// bkAt : début, bkUntil : jusqu'à quand il pense tenir (null : il ne sait pas), bkEnd : courant revenu ou plus de batterie.
+async function markBackup({ cid, slot, date, min, t = Date.now() }) {
+  if (!enabled()) return { skipped: "off" };
+  const c = (await appChatters()).find((x) => x.id === cid);
+  if (!c) return { skipped: "unlinked" };
+  const key = markKey(slot, c.id);
+  const prev = (await readMarks(date))[key];
+  const going = !!(prev?.bkAt && !prev.bkEnd);
+  const bkAt = going ? prev.bkAt : t;
+  const bkUntil = min > 0 ? t + min * 60e3 : null;
+  await writeMark(date, key, { chatterId: c.id, slot, bkAt, bkUntil, bkEnd: null, at: t });
+  return { chatterId: c.id, name: c.name, discordId: c.discordId, date, slot, key, bkAt, bkUntil, going };
+}
+async function endBackup({ cid, slot, date, t = Date.now() }) {
+  if (!enabled()) return { skipped: "off" };
+  const key = markKey(slot, cid);
+  const prev = (await readMarks(date))[key];
+  if (!prev?.bkAt || prev.bkEnd) return { notBk: true };
+  await writeMark(date, key, { bkEnd: t, at: t });
+  return { date, slot, key, since: prev.bkAt, took: Math.max(1, Math.round((t - prev.bkAt) / 60000)) };
 }
 // Retour de coupure : temps de coupure réel (ajouté aux coupures précédentes du même shift), comme un retard
 async function endCoupure({ uid, cid, names, t = Date.now() }) {
@@ -886,7 +911,7 @@ async function finishPost(req, patch) {
 module.exports = {
   enabled, RETARD_TOLERANCE, ABSENT_AFTER_H, SLOT_OF, START_OF,
   appChatters, appCatalog, chatterOf, boxCounts, setBoxCount, linkDiscord, migrateLinks, publishMembers, habSlots, habitOf, saveChatter, applyHabit, copyPlan, planCounts, slotCounts, plannedFor,
-  onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, closeStaleCoupures, shiftEnd, setMark, slotStaff, lateness, shiftDay,
+  onClockIn, onClockOut, sweepAbsents, coverShifts, coversSlot, markCoupure, endCoupure, markBackup, endBackup, closeStaleCoupures, shiftEnd, setMark, slotStaff, lateness, shiftDay,
   planningDay, planOf, plansBetween, writePlan, planTemplate, fillDays, hooks, plannedSlotAt, plannedAccts, pendingPost, finishPost,
   offsBetween, offScope, addOff, delDoc, dayOffQuota, readMarks, newId, retireChatter, openCoupures, penaltiesIn, addPenalty, delPenalty,
   setWallet, primesIn, addPrime, delPrime, reattribsIn, reattribsToShow, addReattrib, delReattrib, markReattribShown,

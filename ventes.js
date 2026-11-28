@@ -7,6 +7,7 @@
 // Une ligne déjà là garde sa façon de compter : une vente en brut sur une ligne en net est convertie avec les
 // frais de la plateforme (et l'inverse). Chaque vente est postée dans le salon ventes (message normal) ;
 // 🗑️ au bout de sa ligne la retire de l'app si tu t'es trompé.
+// 💰 Vente Twizz (bouton dans le salon ventes Twizz / réatrib) : la même chose en plus court, pour Twizz en net.
 const { UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle, ButtonStyle, ButtonBuilder, SectionBuilder, TextDisplayBuilder, MessageFlags } = require("discord.js");
 const appSync = require("./app-sync");
 const { money, workDay } = require("./penalties");
@@ -251,9 +252,129 @@ async function rmOk(i, tok) {
   if (u.msg)
     await ctx.client?.channels
       .fetch(u.msg.channelId)
-      .then((ch) => ch.messages.edit(u.msg.id, { flags: V2, components: [new TextDisplayBuilder().setContent(`~~${u.head}~~\n-# 🗑️ Retirée par <@${i.user.id}> : ${res}.`)], allowedMentions: { parse: [] } }))
+      .then((ch) => ch.messages.edit(u.msg.id, { flags: V2, components: [new TextDisplayBuilder().setContent(`~~${u.head}~~\n-# 🗑️ Retirée par <@${i.user.id}> : ${res}.`), ...(u.kind === "tw" ? [row(twBtn())] : [])], allowedMentions: { parse: [] } }))
       .catch((e) => console.warn("Vente retirée (message) :", e.message));
   return done(i, `🗑️ Vente retirée : ${res}.`, 12000);
+}
+
+// ---------- 💰 Vente Twizz : un bouton dans le salon ventes Twizz / réatrib ----------
+// Le bouton ouvre une petite fiche (chatteur, modèle sur Twizz, ventes en net, jour) ; la vente part dans l'app
+// (Ventes, ligne Twizz du chatteur, en net) et un message est posté dans le salon :
+//   « @chatteur Ventes 28/11 : 200 € sur Anna Twizz » puis 🗑️ et le bouton 💰 Vente Twizz à sa droite.
+const TWIZZ_CHANNEL_ID = (process.env.TWIZZ_CHANNEL_ID ?? process.env.REATTRIB_CHANNEL_ID ?? "1557008074491826237").trim();
+const isTwizz = (name) => /twizz/i.test(String(name || ""));
+const twBtn = () => button("vt_tw", "Vente Twizz", "💰", ButtonStyle.Success);
+const ddmm = (date) => `${date.slice(8, 10)}/${date.slice(5, 7)}`;
+async function twAccounts() {
+  const cat = await appSync.appCatalog();
+  return cat.accounts.filter((a) => isTwizz(a.platform)).slice(0, 25);
+}
+async function twModal() {
+  const accts = await twAccounts();
+  if (!accts.length) return null;
+  // une modèle avec deux comptes Twizz : on dit lequel
+  const two = new Set(accts.map((a) => a.mid)).size < accts.length;
+  const d0 = workDay();
+  const days = [0, 1, 2, 3, 4, 5, 6].map((k) => appSync.addDays(d0, -k));
+  const dayName = (d, k) => (k === 0 ? `Aujourd'hui · ${dayShort(d)}` : k === 1 ? `Hier · ${dayShort(d)}` : dayShort(d));
+  return new ModalBuilder().setCustomId("vt_twnew").setTitle("💰 Vente Twizz").addLabelComponents(
+    label("Chatteur", "Celui qui a fait la vente").setUserSelectMenuComponent(
+      new UserSelectMenuBuilder().setCustomId("who").setRequired(true).setMinValues(1).setMaxValues(1).setPlaceholder("🔎 Tape son nom")
+    ),
+    label("Modèle sur Twizz").setStringSelectMenuComponent(
+      select("acct", accts.map((a) => ({ label: (two ? `${a.model} · ${a.platform}` : a.model).slice(0, 100), value: a.key, emoji: "🟣", default: accts.length === 1 }))).setPlaceholder("Choisis la modèle")
+    ),
+    label("Ventes en net", "Ce que Twizz verse, après ses frais, comme dans l'app. Ex : 200 ou 18,05").setTextInputComponent(
+      new TextInputBuilder().setCustomId("amount").setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(12).setPlaceholder("ex : 200")
+    ),
+    label("Jour", "Jour de shift : avant 2 h du matin, c'est encore la veille").setStringSelectMenuComponent(
+      select("day", days.map((d, k) => ({ label: dayName(d, k), value: d, emoji: "📅", default: k === 0 })))
+    )
+  );
+}
+async function twOpen(i) {
+  if (!appSync.enabled()) return reply(i, { content: "⚠️ Lien avec l'app désactivé : ajoute SUPABASE_URL et SUPABASE_SERVICE_KEY dans Railway." });
+  const m = await twModal().catch((e) => (console.error("Vente Twizz (fiche) :", e.message), null));
+  if (!m) return reply(i, { content: "⚠️ Aucune modèle n'a Twizz dans l'app : ajoute la plateforme à la modèle dans Équipe." });
+  return i.showModal(m);
+}
+const twPostOf = (text, tok, uid) => ({
+  flags: V2,
+  components: [new TextDisplayBuilder().setContent(text), row(rmBtn(tok), twBtn())],
+  allowedMentions: { users: uid ? [uid] : [] },
+});
+async function twSubmit(i) {
+  const who = field(i, "getSelectedUsers", "who")?.first?.();
+  const acct = (field(i, "getStringSelectValues", "acct") || [])[0] || "";
+  const amount = parseAmount(field(i, "getTextInputValue", "amount"));
+  const pickedDay = (field(i, "getStringSelectValues", "day") || [])[0];
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(pickedDay || "") ? pickedDay : workDay();
+  await i.deferReply({ flags: EPHEMERAL });
+  const [mid, pid] = acct.split("|");
+  const errors = [
+    !who && "choisis le chatteur.",
+    who?.bot && "choisis un chatteur, pas un bot.",
+    !(mid && pid) && "choisis la modèle.",
+    !(Number.isFinite(amount) && amount > 0 && amount <= 100000) && "écris le montant en net (ex : 200).",
+  ].filter(Boolean);
+  if (errors.length) return done(i, `⚠️ Rien n'est ajouté : ${errors.join(" ")}`, 30000);
+  const c = await appSync.chatterOf(who.id, [ctx.nameOf?.(who.id)].filter(Boolean), false).catch(() => null);
+  if (!c)
+    return done(i, `⚠️ Rien n'est ajouté : <@${who.id}> n'est relié à aucun chatteur de l'app. Relie son compte Discord dans sa fiche (👤 sous le panneau, ou Équipe › Comptes Discord dans l'app).`, 30000);
+  const { slot, how } = await slotFor(c, date, Date.now(), { mid, pid });
+  const r = await addSale({ c, mid, pid, amount, inp: "net", date, slot });
+  const cat = await appSync.appCatalog();
+  const acc = cat.accounts.find((a) => a.key === acct);
+  const cur = r.e.cur === "USD" ? "USD" : "EUR";
+  const mode = (net) => (net ? "net" : "brut");
+  const where = slot ? SLOT_L[slot] : "hors planning";
+  const head = `<@${who.id}> Ventes ${ddmm(date)} : **${money(amount, cur)}** sur ${acc ? `${acc.model} ${acc.platform}` : "Twizz"}`;
+  const text = `${head}\n-# Net · ${where} · ajoutée par <@${i.user.id}>`;
+  const tok = appSync.newId();
+  const rec = { date, key: r.key, add: r.add, created: !r.prev, at: Date.now(), head, kind: "tw" };
+  const msg = TWIZZ_CHANNEL_ID
+    ? await ctx.client?.channels.fetch(TWIZZ_CHANNEL_ID).then((ch) => ch.send(twPostOf(text, tok, who.id))).catch((e) => (console.error("Vente Twizz (salon) :", e.message), null))
+    : null;
+  if (msg) rec.msg = { channelId: msg.channelId || TWIZZ_CHANNEL_ID, id: msg.id };
+  keep(tok, rec);
+  const notes = [
+    `-# Ventes › sa ligne ${acc?.model || ""} · Twizz (${where}, ${dayShort(date)}) est à **${money(r.e.sales, cur)} ${mode(r.lineNet)}**${r.prev ? "" : " (nouvelle)"}.`,
+    !r.lineNet ? `-# Sa ligne est comptée en brut : ajouté ${money(r.add, cur)} brut (frais Twizz ${r.fee} %).` : "",
+    how === "habit" ? "-# Pas au planning ce jour-là : rangée sur son shift habituel. Tu peux la déplacer dans l'app." : "",
+    how === "hour" ? "-# Pas au planning aujourd'hui : rangée sur le shift en cours. Tu peux la déplacer dans l'app." : "",
+    how === "none" ? "-# Pas au planning ce jour-là : rangée en « hors planning ». Tu peux la déplacer dans l'app." : "",
+  ].filter(Boolean).join("\n").replace(/ {2,}/g, " ");
+  if (msg) {
+    await showView(i, { content: `✅ Vente ajoutée dans l'app et postée dans <#${rec.msg.channelId}>.\n${notes}`, allowedMentions: { parse: [] } });
+    setTimeout(() => i.deleteReply().catch(() => {}), how === "plan" || how === "line" ? 12000 : 45000);
+    return;
+  }
+  // salon introuvable : la vente est quand même dans l'app, on la montre ici
+  return showView(i, {
+    content: `${text}\n${notes}\n-# ⚠️ Pas pu la poster dans le salon (salon introuvable ou bot sans accès).`,
+    components: [row(twBtn(), button(`vt_rm~${tok}`, "Retirer cette vente", "🗑️", ButtonStyle.Secondary))],
+    allowedMentions: { parse: [] },
+  });
+}
+// Le message du bouton dans le salon (envoyé une fois ; remis s'il a disparu)
+const twPanel = () => ({
+  content: "### 💰 Ventes Twizz\n-# Clique sur **Vente Twizz** : choisis le chatteur, la modèle et ses ventes en net. Elles vont direct dans l'app (Ventes) et s'affichent ici.",
+  components: [row(twBtn())],
+  allowedMentions: { parse: [] },
+});
+async function ensureTwPanel() {
+  const data = ctx.getData?.();
+  if (!TWIZZ_CHANNEL_ID || !data || !ctx.client) return null;
+  const ch = await ctx.client.channels.fetch(TWIZZ_CHANNEL_ID);
+  const old = data.twizzPanel?.id ? await ch.messages.fetch(data.twizzPanel.id).catch(() => null) : null;
+  if (old) {
+    if (old.content !== twPanel().content) await old.edit(twPanel());
+    return old.id;
+  }
+  const msg = await ch.send(twPanel());
+  data.twizzPanel = { channelId: ch.id, id: msg.id };
+  save();
+  return msg.id;
 }
 
 // ---------- Interactions vt_… ----------
@@ -261,6 +382,8 @@ async function handle(i) {
   if (!ctx.isAdmin(i)) return reply(i, { content: "⛔ Réservé aux admins." });
   const id = i.customId;
   if (id === "vt_new") return submit(i);
+  if (id === "vt_tw") return twOpen(i);
+  if (id === "vt_twnew") return twSubmit(i);
   if (id === "vt_add") return open(i);
   if (id.startsWith("vt_rm~")) return rmAsk(i, id.slice(6));
   if (id.startsWith("vt_rmok~")) return rmOk(i, id.slice(8));
@@ -268,4 +391,4 @@ async function handle(i) {
   return reply(i, { content: "Ce bouton a expiré : reclique sur 🛠️ Admin › 💰 Ventes." });
 }
 
-module.exports = { ctx, open, handle, modal, slotFor, addSale, undo, SALES_CHANNEL_ID };
+module.exports = { ctx, open, handle, modal, twModal, ensureTwPanel, slotFor, addSale, undo, SALES_CHANNEL_ID, TWIZZ_CHANNEL_ID };

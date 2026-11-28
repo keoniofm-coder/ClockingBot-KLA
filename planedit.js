@@ -580,7 +580,7 @@ async function freeBoxes(st) {
       content: `🧺 Box retirées à ${tag(c)}${st.cutNoted ? " (⚡ coupure, rendues à son retour)" : ""} · ${sl.emoji} ${sl.l} · ${what}`,
       allowedMentions: { users: [c.discordId].filter(Boolean) },
     }).catch((err) => console.error("Box retirées (salon box) :", err.message));
-  return `✅ Box retirées à ${whoMd(c)} : ${what}.${st.cutNoted ? " Il les reprend à son 🔙 retour de coupure." : ""}`;
+  return `✅ Box retirées à ${whoMd(c)} : ${what}.${st.cutNoted ? " Il les reprend à son 🔄 retour de coupure." : ""}`;
 }
 
 // ---------- Actions ----------
