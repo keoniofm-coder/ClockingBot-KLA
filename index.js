@@ -1,5 +1,5 @@
 const {
-  Client, GatewayIntentBits, Events, EmbedBuilder, ButtonStyle,
+  Client, GatewayIntentBits, Events, EmbedBuilder, ButtonStyle, ButtonBuilder,
   StringSelectMenuBuilder, UserSelectMenuBuilder, ModalBuilder, LabelBuilder, TextDisplayBuilder, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, REST, Routes, PermissionFlagsBits,
 } = require("discord.js");
@@ -309,14 +309,15 @@ function timesOf(p, k) {
   if (k === "off" || k === "todo") return "";
   const m = p.mark || {};
   const inT = m.in || (p.discordId && data.sessions[p.discordId]?.clockIn);
+  // court, pour tenir sur la ligne à côté du bouton (Discord fixe la largeur du message)
   return [
-    inT ? `✔️ ${hh(inT)}` : "",
-    m.bkAt && !m.bkEnd ? (m.bkUntil ? `🔋 Backup ${hh(m.bkAt)} ➡️ ~${hh(m.bkUntil)}` : `🔋 Backup depuis ${hh(m.bkAt)}`) : "",
-    m.bkAt && m.bkEnd ? `🔋 ${hh(m.bkAt)} ➡️ ${hh(m.bkEnd)}` : "",
-    m.cutAt && !m.cutEnd ? `⚡ Depuis ${hh(m.cutAt)}` : "",
-    m.cutAt && m.cutEnd ? (m.noBack ? `⚡ ${hh(m.cutAt)} ➡️ ${hh(m.cutEnd)} (pas revenu)` : `⚡ 🔄 ${hh(m.cutAt)} ➡️ ${hh(m.cutEnd)}`) : "",
+    inT ? `✓ ${hh(inT)}` : "",
+    m.bkAt && !m.bkEnd ? (m.bkUntil ? `🔋 ${hh(m.bkAt)}→~${hh(m.bkUntil)}` : `🔋 depuis ${hh(m.bkAt)}`) : "",
+    m.bkAt && m.bkEnd ? `🔋 ${hh(m.bkAt)}→${hh(m.bkEnd)}` : "",
+    m.cutAt && !m.cutEnd ? `⚡ depuis ${hh(m.cutAt)}` : "",
+    m.cutAt && m.cutEnd ? `⚡ ${hh(m.cutAt)}→${hh(m.cutEnd)}${m.noBack ? " (pas revenu)" : ""}` : "",
     m.out ? `❌ ${hh(m.out)}` : "",
-  ].filter(Boolean).join(" | ");
+  ].filter(Boolean).join(" · ");
 }
 const idsOf = (m) => m.ids || (m.id ? [m.id] : []);
 async function delAll(channelId, ids) {
@@ -337,7 +338,7 @@ async function dropClockingPanels() {
 // direct. 15 min avant chaque shift il est remplacé par celui du shift suivant. 🛠️ Admin (la gestion du shift, pour
 // l'admin seul) en haut à droite ; en bas Clock In / Clock Out et ✏️ Modifier le shift (la fenêtre avec toutes les modèles). Les annonces du shift (clock in, clock out, coupure, retour, changements de box ou de shift, aussi
 // ceux faits dans l'app) s'écrivent dans ce salon et partent avec son message, au shift suivant.
-// À droite de chaque chatteur : ⚡ Coupure (noté tout de suite), qui devient 🔄 Retour de coupure tant qu'elle dure.
+// À droite de chaque chatteur : ⚡ (coupure notée tout de suite), qui devient 🔄 (retour de coupure) tant qu'elle dure.
 // Pour un admin, ou pour le chatteur lui-même. Sous le message : ⚡ J'ai une coupure / 🔋 Backup / 🔄 Retour de coupure (chatteurs).
 const openCut = (m) => m?.status === "coupure" && !!m.cutAt && !m.cutEnd;
 const cutRow = () =>
@@ -377,7 +378,8 @@ async function boxView(name, date) {
     if (b.stOf(p) === "off") return { text };
     const back = openCut(p.mark);
     const id = `cb~${date}~${slot}~${x.id}~${(seq++).toString(36)}`;
-    return { text, button: back ? button(id, "Retour de coupure", "🔄", ButtonStyle.Success) : button(id, "Coupure", "⚡", ButtonStyle.Secondary) };
+    // juste l'emoji (⚡ gris, 🔄 vert pendant la coupure) : la ligne tient sur une ligne à côté
+    return { text, button: new ButtonBuilder().setCustomId(id).setEmoji(back ? "🔄" : "⚡").setStyle(back ? ButtonStyle.Success : ButtonStyle.Secondary) };
   };
   const withBox = new Set(groups.flatMap((g) => g.people.filter((x) => x.boxes.length).map((x) => x.id)));
   const { head, extra, done, due } = boardLines(b);
