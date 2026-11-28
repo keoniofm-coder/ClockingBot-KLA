@@ -260,7 +260,7 @@ async function rmOk(i, tok) {
 // ---------- 💰 Vente Twizz : un bouton dans le salon ventes Twizz / réatrib ----------
 // Le bouton ouvre une petite fiche (chatteur, modèle sur Twizz, ventes en net, jour) ; la vente part dans l'app
 // (Ventes, ligne Twizz du chatteur, en net) et un message est posté dans le salon :
-//   « @chatteur Ventes 28/11 : 200 € sur Anna Twizz » avec 🗑️ au bout et le bouton 💰 Vente Twizz dessous.
+//   « @chatteur Ventes 28/11 : 200 € sur Anna Twizz » puis 🗑️ et le bouton 💰 Vente Twizz à sa droite.
 const TWIZZ_CHANNEL_ID = (process.env.TWIZZ_CHANNEL_ID ?? process.env.REATTRIB_CHANNEL_ID ?? "1557008074491826237").trim();
 const isTwizz = (name) => /twizz/i.test(String(name || ""));
 const twBtn = () => button("vt_tw", "Vente Twizz", "💰", ButtonStyle.Success);
@@ -300,7 +300,7 @@ async function twOpen(i) {
 }
 const twPostOf = (text, tok, uid) => ({
   flags: V2,
-  components: [new SectionBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(text)).setButtonAccessory(rmBtn(tok)), row(twBtn())],
+  components: [new TextDisplayBuilder().setContent(text), row(rmBtn(tok), twBtn())],
   allowedMentions: { users: uid ? [uid] : [] },
 });
 async function twSubmit(i) {

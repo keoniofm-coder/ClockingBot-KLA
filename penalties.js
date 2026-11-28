@@ -116,13 +116,12 @@ const lineOf = (p) => `${headTxt(p.n, p.amount)} | ${faultTxt(p)}\n<@${p.uid}> :
 // le bouton 🗑️ (réservé aux admins au clic)
 const rmBtn = (p) => new ButtonBuilder().setCustomId(`pn_rm~${p.id}`).setEmoji("🗑️").setStyle(ButtonStyle.Secondary);
 const rmRow = (p) => row(rmBtn(p)); // anciens messages : le bouton sous le texte
-// nouveau message : le texte et la 🗑️ au bout de la ligne (composants v2 : une section avec le bouton à droite),
-// puis ⚠️ Nouvelle pénalité dessous
+// nouveau message (composants v2) : le texte, puis une ligne de boutons : 🗑️ et ⚠️ Nouvelle pénalité à sa droite
 const V2 = MessageFlags.IsComponentsV2;
 const newBtn = () => button("pn_add", "Nouvelle pénalité", "⚠️", ButtonStyle.Secondary);
 const msgOf = (p) => ({
   flags: V2,
-  components: [new SectionBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(lineOf(p))).setButtonAccessory(rmBtn(p)), row(newBtn())],
+  components: [new TextDisplayBuilder().setContent(lineOf(p)), row(rmBtn(p), newBtn())],
 });
 // une fois annulée : le texte barré, sans bouton
 const struck = (txt, by) => `${txt.split("\n").map((l) => (l ? `~~${l}~~` : l)).join("\n")}\n-# Annulée par <@${by}>`;
@@ -402,8 +401,8 @@ async function cancel(p, by) {
         ch.messages.edit(
           p.msg.id,
           p.msg.v === 2
-            ? { flags: V2, components: [new TextDisplayBuilder().setContent(struck(lineOf({ ...p, note: "" }), by))], allowedMentions: { parse: [] } }
-            : { content: struck(oldLineOf(p), by), components: [], allowedMentions: { parse: [] } }
+            ? { flags: V2, components: [new TextDisplayBuilder().setContent(struck(lineOf({ ...p, note: "" }), by)), row(newBtn())], allowedMentions: { parse: [] } }
+            : { content: struck(oldLineOf(p), by), components: [row(newBtn())], allowedMentions: { parse: [] } }
         )
       )
       .catch((e) => console.warn("Pénalité annulée (message) :", e.message));
@@ -426,7 +425,8 @@ async function addRmButtons() {
   ctx.saveData?.();
   return n;
 }
-// ⚠️ Nouvelle pénalité ajoutée une fois aux pénalités déjà envoyées (ce mois-ci et le mois d'avant, pas les annulées)
+// ⚠️ Nouvelle pénalité ajoutée une fois aux pénalités déjà envoyées (ce mois-ci et le mois d'avant, pas les annulées),
+// à droite de leur 🗑️
 async function addNewButtons() {
   const d = ctx.getData?.();
   if (!d || d.penNew || !appSync.enabled()) return 0;
@@ -434,9 +434,10 @@ async function addNewButtons() {
   const before = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)) - 2, 15)).toISOString().slice(0, 7);
   let n = 0;
   for (const p of [...(await appSync.penaltiesIn(before)), ...(await appSync.penaltiesIn(m))]) {
-    if (p.msg?.v !== 2) continue;
+    if (!p.msg) continue;
     const ch = await ctx.client.channels.fetch(p.msg.channelId).catch(() => null);
-    if (await ch?.messages.edit(p.msg.id, { ...msgOf(p), allowedMentions: { parse: [] } }).then(() => true, () => false)) n++;
+    const patch = p.msg.v === 2 ? { ...msgOf(p), allowedMentions: { parse: [] } } : { components: [row(rmBtn(p), newBtn())] };
+    if (await ch?.messages.edit(p.msg.id, patch).then(() => true, () => false)) n++;
   }
   d.penNew = 1;
   ctx.saveData?.();
